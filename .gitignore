@@ -6,7 +6,7 @@ debug/
 .env
 .DS_Store
 
-
+# testnet
 /nodes
 /rethdata
 monitoring/data-grafana/
