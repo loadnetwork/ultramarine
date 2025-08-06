@@ -1,6 +1,46 @@
-[package]
-name = "ultramarine"
+[workspace]
+resolver = "2"
+
+members = ["bin/ultramarine", "crates/consensus", "crates/execution", "crates/node", "crates/types"]
+default-members = ["bin/ultramarine"]
+
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.91"
+authors = ["Load Network"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/loadnetwork/ultramarine"
+repository = "https://github.com/loadnetwork/ultramarine"
+exclude = ["benches/", "tests/", "testdata/"]
 
-[dependencies]
+[workspace.dependencies]
+
+
+# ultramarine dependencies
+ultramarine-node = { path = "crates/node" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 1
+
+[workspace.lints.clippy]
+all = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[workspace.lints.rust]
+missing-debug-implementations = "warn"
+missing-docs = "warn"
+unreachable-pub = "warn"
+unused-must-use = "deny"
+rust-2018-idioms = "deny"
+unnameable-types = "warn"
