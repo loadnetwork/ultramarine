@@ -1,0 +1,23 @@
+# This Dockerfile is used in conjunction with the Makefile’s
+# cross-architecture build targets.  It assumes that static binaries for
+# each architecture are placed under `dist/bin/$TARGETARCH/ultramarine`.
+# The final image merely copies the appropriate binary and exposes the
+# network ports.
+
+FROM ubuntu:24.04
+
+LABEL org.opencontainers.image.source="https://github.com/loadnetwork/ultramarine"
+LABEL org.opencontainers.image.description="Ultramarine is a Rust implementation of the Load Network consensus client."
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
+
+# Filled automatically by `docker buildx`.  See Makefile targets
+# `docker-build-push` and `docker-build-push-latest`.
+ARG TARGETARCH
+
+# Copy the pre-built binary for this architecture into the runtime image.
+COPY ./dist/bin/${TARGETARCH}/ultramarine /usr/local/bin/ultramarine
+
+# Expose ports used by the client.  Update when the API changes.
+EXPOSE 30303 9001
+
+ENTRYPOINT ["/usr/local/bin/ultramarine"]

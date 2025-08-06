@@ -1,0 +1,13 @@
+[package]
+name = "ultramarine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "A Rust implementation of the Load Network consensus client"
+
+[[bin]]
+name = "ultramarine"
+path = "src/main.rs"

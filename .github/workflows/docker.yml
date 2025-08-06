@@ -1,0 +1,140 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"] # no path filters here, so tags always run
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "Dockerfile*"
+      - ".dockerignore"
+      - "Makefile"
+      - "bin/**"
+      - "crates/**"
+      - ".github/workflows/docker.yml"
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: loadnetwork/ultramarine
+
+jobs:
+  # --------------------------------------------------------------------------
+  # PR smoke build (non-draft PRs). Build only; do not push.
+  # --------------------------------------------------------------------------
+  smoke:
+    name: PR Smoke Build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        run: make docker-build
+
+  # --------------------------------------------------------------------------
+  # Pushes to main and tags — build & push multi-arch images
+  # --------------------------------------------------------------------------
+  push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
+    permissions:
+      contents: read
+      security-events: write # needed for upload-sarif
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only filter on main. Tags should always build.
+      - name: Detect docker-relevant changes
+        id: changes
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docker:
+              - "Dockerfile*"
+              - ".dockerignore"
+              - "Makefile"
+              - "bin/**"
+              - "crates/**"
+              - ".github/workflows/docker.yml"
+
+      - name: Log in to Docker Hub
+        if: ${{ startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }} # a USER’s Docker ID
+          password: ${{ secrets.DOCKERHUB_TOKEN }} # that user’s PAT
+
+      # If your Makefile uses cross to build static bins before docker build,
+      # this installs a prebuilt cross quickly. Remove if not needed.
+      - name: Install cross (prebuilt)
+        if: ${{ startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # Optional: cache cargo/target if your Makefile builds on the host
+      - name: Cache cargo/target
+        if: ${{ startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true' }}
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compute tags
+        id: meta
+        if: ${{ startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true' }}
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            echo "git_tag=${tag}" >> "$GITHUB_OUTPUT"
+            echo "print_tag=${tag},latest" >> "$GITHUB_OUTPUT"
+          else
+            short_sha="$(echo "${GITHUB_SHA}" | cut -c1-12)"
+            echo "git_tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+            echo "print_tag=sha-${short_sha},latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Makefile target builds multi-arch and pushes GIT_TAG + latest
+      - name: Build & push (multi-arch)
+        if: ${{ startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true' }}
+        run: make docker-build-push-latest
+        env:
+          DOCKER_IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          GIT_TAG: ${{ steps.meta.outputs.git_tag }}
+
+      - name: Skip (no docker changes on main)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && steps.changes.outputs.docker != 'true' }}
+        run: echo "No docker-relevant changes on main; skipping build."
+
+      # Trivy + SARIF upload (only when we actually built; skip on private repos)
+      - name: Trivy scan
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true') && github.event.repository.private == false }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:latest
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload scan
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || steps.changes.outputs.docker == 'true') && github.event.repository.private == false }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
