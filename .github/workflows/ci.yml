@@ -10,78 +10,78 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: short
+
+# Cancel in-progress runs for the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test
+  # ============================================================================
+  # Unified CI Check (uses Makefile)
+  # ============================================================================
+  ci:
+    name: CI
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build
-        run: cargo build --all-features --workspace
+      - name: Install development tools
+        run: make tools
 
-      - name: Test
-        run: cargo test --all-features --workspace
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features --workspace
-
-  docs:
-    name: Docs
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check documentation
-        run: cargo doc --no-deps --all-features --workspace --document-private-items
+      - name: Run CI checks
+        run: make ci
         env:
-          RUSTDOCFLAGS: "-D warnings"
+          RUSTFLAGS: "-D warnings"
 
-  deny:
-    name: Cargo Deny
+  # ============================================================================
+  # Coverage (uses Makefile)
+  # ============================================================================
+  coverage:
+    name: Coverage
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.title, '[coverage]')
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install development tools
+        run: make tools
+
+      - name: Generate coverage report
+        run: make cov-report-html
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html/
+          retention-days: 30
