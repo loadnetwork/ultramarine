@@ -2,11 +2,11 @@
 resolver = "2"
 
 members = [
-  "bin/ultramarine",
-  "crates/consensus",
-  "crates/execution",
-  "crates/node",
-  "crates/types",
+    "bin/ultramarine",
+    "crates/consensus",
+    "crates/execution",
+    "crates/node",
+    "crates/types",
 ]
 default-members = ["bin/ultramarine"]
 
