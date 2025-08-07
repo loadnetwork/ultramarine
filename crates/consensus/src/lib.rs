@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // crate-level: suppresses missing_docs for the whole crate
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }

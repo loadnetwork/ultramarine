@@ -10,36 +10,22 @@ members = [
 ]
 default-members = ["bin/ultramarine"]
 
-
 [workspace.package]
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
 authors = ["Load Network"]
-license = "MIT OR Apache-2.0"
-homepage = "https://github.com/loadnetwork/ultramarine"
-repository = "https://github.com/loadnetwork/ultramarine"
+edition = "2024"
 exclude = ["benches/", "tests/", "testdata/"]
+homepage = "https://github.com/loadnetwork/ultramarine"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/loadnetwork/ultramarine"
+rust-version = "1.88"
 
 [workspace.dependencies]
-
-
 # ultramarine dependencies
-ultramarine-node = { path = "crates/node" }
-ultramarine-execution = { path = "crates/execution" }
 ultramarine-consensus = { path = "crates/consensus" }
+ultramarine-execution = { path = "crates/execution" }
+ultramarine-node = { path = "crates/node" }
 ultramarine-types = { path = "crates/types" }
-
-[profile.dev]
-opt-level = 1
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-
-[profile.test]
-opt-level = 1
 
 [workspace.lints.clippy]
 all = "warn"
@@ -53,3 +39,14 @@ unreachable-pub = "warn"
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 unnameable-types = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 1

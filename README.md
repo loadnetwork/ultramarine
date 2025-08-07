@@ -1,4 +1,3 @@
-
 ```
 # Format code
 cargo +nightly fmt --all
@@ -24,7 +23,7 @@ cargo docs --document-private-items
 
 ## ⚙️ Development workflow with `make`
 
-The root-level **Makefile** wraps cargo, linting, testing, and release chores behind short, memorable commands.  
+The root-level **Makefile** wraps cargo, linting, testing, and release chores behind short, memorable commands.\
 It gives every contributor identical tooling, flags problems early, and produces reproducible artefacts that match CI.
 
 ### Why use it?
@@ -73,17 +72,17 @@ make update-book-cli  # regenerate CLI/book docs (if script exists)
 
 ### Target categories
 
-| Category        | Examples (short)                  |
-|-----------------|-----------------------------------|
-| **Build**       | `build`, `build-%`, `install`     |
-| **Dev**         | `dev`, `run`                      |
-| **Testing**     | `test`, `test-nextest`, `bench`   |
-| **Coverage**    | `cov`, `cov-report-html`          |
-| **Quality**     | `fmt`, `clippy`, `lint`           |
-| **Deps**        | `deps-check`, `audit`             |
-| **Docs**        | `doc`, `rustdocs`                 |
-| **Docker**      | `docker-build`, `docker-build-push` |
-| **Release**     | `release-dry`, `release-patch`    |
+| Category     | Examples (short)                    |
+| ------------ | ----------------------------------- |
+| **Build**    | `build`, `build-%`, `install`       |
+| **Dev**      | `dev`, `run`                        |
+| **Testing**  | `test`, `test-nextest`, `bench`     |
+| **Coverage** | `cov`, `cov-report-html`            |
+| **Quality**  | `fmt`, `clippy`, `lint`             |
+| **Deps**     | `deps-check`, `audit`               |
+| **Docs**     | `doc`, `rustdocs`                   |
+| **Docker**   | `docker-build`, `docker-build-push` |
+| **Release**  | `release-dry`, `release-patch`      |
 
 Run `make help` anytime to see all targets with a one-line description.
 
