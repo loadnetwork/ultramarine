@@ -34,17 +34,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          toolchains: stable, nightly
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
       - name: Install development tools
         run: make ci-tools
 
@@ -65,16 +54,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-
       - name: Install development tools
-        run: make tools
+        run: make ci-tools
 
       - name: Generate coverage report
         run: make cov-report-html
