@@ -53,15 +53,22 @@ jobs:
       - name: Install development tools
         run: make ci-tools
 
-      # Needed by `make sort-check`
       - name: Install cargo-sort
         run: cargo install cargo-sort --locked
 
-      - name: Run CI checks
-        run: make ci
+      - name: Format (rustfmt nightly)
+        run: make fmt-check
+
+      - name: Sort deps (cargo-sort)
+        run: make sort-check
+
+      - name: Clippy (stable 1.88)
+        run: make clippy
         env:
           RUSTFLAGS: "-D warnings"
 
+      - name: Unit tests
+        run: make test
   # ============================================================================
   # Coverage (uses Makefile)
   # ============================================================================
