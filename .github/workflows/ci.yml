@@ -65,11 +65,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Prebuilt cargo-sort (fast)
-      - name: Install cargo-sort
+      - name: Install cargo-sort (pinned)
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-sort
+          tool: cargo-sort@latest
+
+      - name: Show cargo-sort version
+        run: cargo sort --version
 
       - name: sort-check
         run: make sort-check
