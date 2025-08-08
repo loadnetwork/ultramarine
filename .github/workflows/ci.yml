@@ -26,6 +26,7 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Run on pushes OR on non-draft PRs
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
       - name: Checkout
@@ -40,7 +41,7 @@ jobs:
           toolchain: 1.88
           components: rustfmt, clippy, llvm-tools-preview
 
-      # Install nightly rustfmt WITHOUT changing the override
+      # Install nightly rustfmt WITHOUT changing the override (Makefile uses `+nightly fmt`)
       - name: Install nightly rustfmt (for fmt-check)
         run: |
           rustup toolchain install nightly --profile=minimal
@@ -68,6 +69,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Run on pushes to main OR PRs explicitly asking for coverage in the title
     if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[coverage]')) }}
     steps:
       - name: Checkout
@@ -112,6 +114,7 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Run on pushes OR on non-draft PRs
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
       - name: Checkout
