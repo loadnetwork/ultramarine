@@ -19,84 +19,167 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ============================================================================
-  # Unified CI Check (uses Makefile)
-  # ============================================================================
-  ci:
-    name: CI
+  # ----------------------------------------------------------------------------
+  # Format (nightly rustfmt)
+  # ----------------------------------------------------------------------------
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Run on pushes OR on non-draft PRs
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      # Active toolchain for the job → 1.88 (clippy/rustfmt/llvm-tools)
-      - name: Setup Rust (1.88 + components)
+      - name: Setup Rust 1.88
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
           components: rustfmt, clippy, llvm-tools-preview
 
-      # Install nightly rustfmt WITHOUT changing the override (Makefile uses `+nightly fmt`)
       - name: Install nightly rustfmt (for fmt-check)
         run: |
           rustup toolchain install nightly --profile=minimal
           rustup component add --toolchain nightly rustfmt
 
-      - name: Cache cargo/target
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Install development tools
-        run: make ci-tools
-
-      - name: Install cargo-sort
-        run: cargo install cargo-sort --locked
-
-      - name: Format (rustfmt nightly)
+      - name: fmt-check
         run: make fmt-check
 
-      - name: Sort deps (cargo-sort)
-        run: make sort-check
-
-      - name: Clippy (stable 1.88)
-        run: make clippy
-        env:
-          RUSTFLAGS: "-D warnings"
-
-      - name: Unit tests
-        run: make test
-  # ============================================================================
-  # Coverage (uses Makefile)
-  # ============================================================================
-  coverage:
-    name: Coverage
+  # ----------------------------------------------------------------------------
+  # Sort (cargo-sort)
+  # ----------------------------------------------------------------------------
+  sort:
+    name: Sort
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    # Run on pushes to main OR PRs explicitly asking for coverage in the title
-    if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[coverage]')) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      - name: Setup Rust (1.88 + components)
+      - name: Setup Rust 1.88
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
           components: rustfmt, clippy, llvm-tools-preview
 
-      - name: Cache cargo/target
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Install development tools
-        run: make ci-tools
+      # Prebuilt cargo-sort (fast)
+      - name: Install cargo-sort
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sort
 
-      - name: Generate coverage report
+      - name: sort-check
+        run: make sort-check
+
+  # ----------------------------------------------------------------------------
+  # Clippy (stable 1.88)
+  # ----------------------------------------------------------------------------
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Setup Rust 1.88
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy
+        run: make clippy
+        env:
+          RUSTFLAGS: "-D warnings"
+
+  # ----------------------------------------------------------------------------
+  # Tests (runs only if linting passed)
+  # ----------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: [fmt, sort, clippy]
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Setup Rust 1.88
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: test
+        run: make test
+
+  # ----------------------------------------------------------------------------
+  # Docs (build + upload)
+  # ----------------------------------------------------------------------------
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Setup Rust 1.88
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build docs (public API)
+        run: make doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-docs
+          path: target/doc
+          retention-days: 7
+
+  # ----------------------------------------------------------------------------
+  # Coverage (main or PRs with [coverage] in title)
+  # ----------------------------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[coverage]')) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Setup Rust 1.88
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Prebuilt dev tools needed for coverage
+      - name: Install coverage tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: |
+            nextest
+            cargo-llvm-cov
+
+      - name: Generate coverage report (HTML + lcov)
         run: make cov-report-html
 
       - name: Upload to Codecov
@@ -113,41 +196,3 @@ jobs:
           name: coverage-report
           path: target/llvm-cov/html/
           retention-days: 30
-
-  # ============================================================================
-  # Docs (build & upload)
-  # ============================================================================
-  docs:
-    name: Docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # Run on pushes OR on non-draft PRs
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Rust (1.88)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-
-      - name: Cache cargo/target
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install development tools
-        run: make ci-tools
-
-      - name: Build docs (public API)
-        run: make doc
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-
-      - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-docs
-          path: target/doc
-          retention-days: 7
