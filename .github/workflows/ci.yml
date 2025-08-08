@@ -68,7 +68,7 @@ jobs:
       - name: Install cargo-sort (pinned)
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-sort@latest
+          tool: cargo-sort@2.0.1
 
       - name: Show cargo-sort version
         run: cargo sort --version
