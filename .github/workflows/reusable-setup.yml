@@ -14,7 +14,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy, llvm-tools-preview
-          toolchains: stable, nightly
+          toolchain: nightly
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
