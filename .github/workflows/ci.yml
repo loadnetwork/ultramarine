@@ -26,7 +26,6 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Run on pushes OR on non-draft PRs
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
       - name: Checkout
@@ -34,18 +33,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Active toolchain for the job → 1.88 (clippy/rustfmt/llvm-tools)
       - name: Setup Rust (1.88 + components)
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
           components: rustfmt, clippy, llvm-tools-preview
 
-      # Makefile uses `cargo +nightly fmt` → ensure nightly has rustfmt
+      # Install nightly rustfmt WITHOUT changing the override
       - name: Install nightly rustfmt (for fmt-check)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: nightly
-          components: rustfmt
+        run: |
+          rustup toolchain install nightly --profile=minimal
+          rustup component add --toolchain nightly rustfmt
 
       - name: Cache cargo/target
         uses: Swatinem/rust-cache@v2
@@ -69,7 +68,6 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Run on pushes to main OR PRs explicitly asking for coverage in the title
     if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[coverage]')) }}
     steps:
       - name: Checkout
