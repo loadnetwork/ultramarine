@@ -11,11 +11,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Principle of least privilege
 permissions:
   contents: read
 
-# Cancel in-progress runs for the same PR/branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -27,7 +25,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     # Run on pushes OR on non-draft PRs
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
@@ -42,11 +40,22 @@ jobs:
           toolchain: 1.88
           components: rustfmt, clippy, llvm-tools-preview
 
+      # Makefile uses `cargo +nightly fmt` → ensure nightly has rustfmt
+      - name: Install nightly rustfmt (for fmt-check)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: rustfmt
+
       - name: Cache cargo/target
         uses: Swatinem/rust-cache@v2
 
       - name: Install development tools
         run: make ci-tools
+
+      # Needed by `make sort-check`
+      - name: Install cargo-sort
+        run: cargo install cargo-sort --locked
 
       - name: Run CI checks
         run: make ci
@@ -59,7 +68,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     # Run on pushes to main OR PRs explicitly asking for coverage in the title
     if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[coverage]')) }}
     steps:
@@ -82,6 +91,21 @@ jobs:
 
       - name: Generate coverage report
         run: make cov-report-html
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html/
+          retention-days: 30
 
   # ============================================================================
   # Docs (build & upload)
