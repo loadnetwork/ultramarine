@@ -11,28 +11,39 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Principle of least privilege
+permissions:
+  contents: read
+
 # Cancel in-progress runs for the same PR/branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  setup:
-    name: Setup Environment
-    uses: ./.github/workflows/reusable-setup.yml
-    # You can pass secrets if the reusable workflow needs them
-    # secrets: inherit
   # ============================================================================
   # Unified CI Check (uses Makefile)
   # ============================================================================
   ci:
     name: CI
-    needs: setup
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    timeout-minutes: 10
+    # Run on pushes OR on non-draft PRs
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust (1.88 + components)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo/target
+        uses: Swatinem/rust-cache@v2
 
       - name: Install development tools
         run: make ci-tools
@@ -47,30 +58,27 @@ jobs:
   # ============================================================================
   coverage:
     name: Coverage
-    needs: setup
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.title, '[coverage]')
+    timeout-minutes: 10
+    # Run on pushes to main OR PRs explicitly asking for coverage in the title
+    if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[coverage]')) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust (1.88 + components)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo/target
+        uses: Swatinem/rust-cache@v2
 
       - name: Install development tools
         run: make ci-tools
 
       - name: Generate coverage report
         run: make cov-report-html
-
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          file: lcov.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-      - name: Upload HTML coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: target/llvm-cov/html/
-          retention-days: 30
