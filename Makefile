@@ -313,6 +313,23 @@ tools-check: ## Verify that all development tools are installed.
 	@command -v typos         >/dev/null 2>&1 && echo "$(GREEN)✓$(NC) typos"         || echo "$(RED)✗$(NC) typos"
 	@command -v dprint        >/dev/null 2>&1 && echo "$(GREEN)✓$(NC) dprint"        || echo "$(RED)✗$(NC) dprint"
 
+
+.PHONY: ci-tools
+ci-tools: ## Install only tools required for CI
+	@echo "$(GREEN)Installing CI-specific tools$(NC)"
+	@echo "Installing cargo-nextest..."; cargo install cargo-nextest --locked
+	@echo "Installing cargo-deny...";  cargo install cargo-deny --locked
+	@echo "Installing cargo-llvm-cov..."; cargo install cargo-llvm-cov --locked
+	@echo "Installing typos-cli..."; cargo install typos-cli --locked
+	@echo "$(GREEN)✓ CI tools installed$(NC)"
+
+.PHONY: ci-lint
+ci-lint: ## Run CI linting (without tools that require installation)
+	@echo "$(GREEN)Running CI lints$(NC)"
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	typos
+
 # -----------------------------------------------------------------------------
 # Docker
 

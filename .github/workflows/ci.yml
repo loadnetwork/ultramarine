@@ -17,11 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  setup:
+    name: Setup Environment
+    uses: ./.github/workflows/reusable-setup.yml
+    # You can pass secrets if the reusable workflow needs them
+    # secrets: inherit
   # ============================================================================
   # Unified CI Check (uses Makefile)
   # ============================================================================
   ci:
     name: CI
+    needs: setup
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
     steps:
@@ -32,6 +38,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          toolchains: stable, nightly
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
@@ -39,7 +46,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install development tools
-        run: make tools
+        run: make ci-tools
 
       - name: Run CI checks
         run: make ci
@@ -51,6 +58,7 @@ jobs:
   # ============================================================================
   coverage:
     name: Coverage
+    needs: setup
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.title, '[coverage]')
     steps:
