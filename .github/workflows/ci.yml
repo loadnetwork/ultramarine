@@ -82,3 +82,40 @@ jobs:
 
       - name: Generate coverage report
         run: make cov-report-html
+
+  # ============================================================================
+  # Docs (build & upload)
+  # ============================================================================
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust (1.88)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+
+      - name: Cache cargo/target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install development tools
+        run: make ci-tools
+
+      - name: Build docs (public API)
+        run: make doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-docs
+          path: target/doc
+          retention-days: 7
