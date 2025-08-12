@@ -1,0 +1,39 @@
+[package]
+name = "cli"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+exclude.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+malachitebft-app.workspace = true
+malachitebft-config.workspace = true
+
+malachitebft-core-types.workspace = true
+malachitebft-metrics.workspace = true
+
+axum = { workspace = true }
+bytesize = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+color-eyre = { workspace = true }
+directories = { workspace = true }
+itertools = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
+
+[lints]
+workspace = true
