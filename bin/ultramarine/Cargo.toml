@@ -11,3 +11,6 @@ description = "A Rust implementation of the Load Network consensus client"
 [[bin]]
 name = "ultramarine"
 path = "src/main.rs"
+
+[dependencies]
+color-eyre.workspace = true
