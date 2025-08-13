@@ -35,6 +35,7 @@ rust-2018-idioms = "deny"
 unnameable-types = "warn"
 
 [workspace.dependencies]
+ultramarine-cli = { path = "crates/cli" }
 # ultramarine dependencies
 ultramarine-consensus = { path = "crates/consensus" }
 ultramarine-execution = { path = "crates/execution" }
@@ -75,52 +76,52 @@ url = "2"
 [workspace.dependencies.malachitebft-app]
 package = "informalsystems-malachitebft-app"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-app-channel]
 package = "informalsystems-malachitebft-app-channel"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-codec]
 package = "informalsystems-malachitebft-codec"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-config]
 package = "informalsystems-malachitebft-config"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-core-consensus]
 package = "informalsystems-malachitebft-core-consensus"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-core-types]
 package = "informalsystems-malachitebft-core-types"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-metrics]
 package = "informalsystems-malachitebft-metrics"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-proto]
 package = "informalsystems-malachitebft-proto"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-signing-ed25519]
 package = "informalsystems-malachitebft-signing-ed25519"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-sync]
 package = "informalsystems-malachitebft-sync"
 rev = "0968a34ba747130467569b1d10b2b1ef18f4b69b"
-git = "https://github.com/informalsystems/malachite.git"
+git = "https://github.com/circlefin/malachite.git"
 
 [profile.dev]
 opt-level = 1
