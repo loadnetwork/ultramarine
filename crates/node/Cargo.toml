@@ -1,5 +1,5 @@
 [package]
-name = "node"
+name = "ultramarine-node"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
