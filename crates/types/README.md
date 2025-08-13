@@ -17,3 +17,6 @@ some utils from malaketh-layerd:
 
 - [ ] proto
 - [ ] validator gen
+
+proto: right now we use just the default proto from malaketh-layerd
+proto codec: in progress

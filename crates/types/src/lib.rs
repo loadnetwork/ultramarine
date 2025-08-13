@@ -9,7 +9,11 @@ pub mod genesis;
 pub mod height;
 pub mod proposal;
 pub mod proposal_part;
+pub mod proto;
 pub mod signing;
 pub mod validator_set;
 pub mod value;
 pub mod vote;
+
+pub mod codec;
+pub mod utils;
