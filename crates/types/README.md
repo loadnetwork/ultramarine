@@ -12,3 +12,8 @@ implement context and primitive consensus types for Load:
 - [ ] validator
 - [ ] validator set
 - [ ] vote
+
+some utils from malaketh-layerd:
+
+- [ ] proto
+- [ ] validator gen
