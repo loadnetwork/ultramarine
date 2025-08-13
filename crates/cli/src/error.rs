@@ -1,5 +1,7 @@
 //! Custom error messages for CLI helper functions.
 //! This low level implementation allows the developer to choose their own error handling library.
+#![allow(missing_docs)]
+
 use std::path::PathBuf;
 
 /// Error messages for commands
