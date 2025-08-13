@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use core::fmt;
 
 use malachitebft_proto::{Error as ProtoError, Protobuf};

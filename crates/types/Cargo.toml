@@ -22,7 +22,7 @@ malachitebft-signing-ed25519 = { workspace = true, features = [
   "serde",
 ] }
 malachitebft-sync = { workspace = true }
-
+bytes.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 

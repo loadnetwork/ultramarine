@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use std::io;
 
 use axum::{Router, routing::get};

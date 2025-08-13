@@ -5,6 +5,7 @@
 //!
 //! The command-line parameters are stored in the `Args` structure.
 //! `clap` parses the command-line parameters into this structure.
+#![allow(missing_docs)]
 
 use std::path::PathBuf;
 

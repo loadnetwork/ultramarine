@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Multithreaded runtime builder.
 
 use std::io::Result;

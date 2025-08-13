@@ -41,6 +41,16 @@ ultramarine-consensus = { path = "crates/consensus" }
 ultramarine-execution = { path = "crates/execution" }
 ultramarine-node = { path = "crates/node" }
 ultramarine-types = { path = "crates/types" }
+# eth types
+
+alloy-consensus = { version = "1.0.23", default-features = false }
+alloy-rpc-types = { version = "1.0.23", features = [
+  "eth",
+], default-features = false }
+alloy-rpc-types-engine = { version = "1.0.23", features = [
+  "ssz",
+], default-features = false }
+alloy-rpc-types-eth = { version = "1.0.23", default-features = false }
 
 color-eyre = "0.6.5"
 

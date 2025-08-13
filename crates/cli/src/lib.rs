@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 pub mod args;
 pub mod cmd;
 pub mod error;

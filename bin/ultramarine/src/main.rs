@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Example application using channels
 
 use color_eyre::eyre::{Result, eyre};
