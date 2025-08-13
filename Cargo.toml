@@ -44,6 +44,7 @@ ultramarine-types = { path = "crates/types" }
 # eth types
 
 alloy-consensus = { version = "1.0.23", default-features = false }
+alloy-primitives = { version = "1.3.0", default-features = false }
 alloy-rpc-types = { version = "1.0.23", features = [
   "eth",
 ], default-features = false }
