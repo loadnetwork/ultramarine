@@ -1,0 +1,14 @@
+ethereum compatible types?
+
+implement context and primitive consensus types for Load:
+
+- [ ] context
+- [x] height
+- [ ] address
+- [ ] proposal
+- [ ] proposal part
+- [ ] signing method (Public and Private key)
+- [ ] genesis
+- [ ] validator
+- [ ] validator set
+- [ ] vote
