@@ -22,14 +22,9 @@ use ultramarine_types::{
     genesis::Genesis,
     proposal::Proposal,
     proposal_part::ProposalPart,
-    signing::Ed25519Provider,
+    signing::{Ed25519Provider, PrivateKey, PublicKey},
     validator_set::{Validator, ValidatorSet},
 };
-
-// use ultramarine_types::{
-// Address, Ed25519Provider, Genesis, Height, PrivateKey, PublicKey, TestContext, Validator,
-// ValidatorSet,
-// };
 
 /// Main application struct implementing the consensus node functionality
 #[derive(Clone)]
@@ -48,7 +43,7 @@ pub struct Handle {
 }
 
 #[async_trait]
-impl NodeHandle<TestContext> for Handle {
+impl NodeHandle<LoadContext> for Handle {
     fn subscribe(&self) -> RxEvent<LoadContext> {
         self.tx_event.subscribe()
     }
@@ -58,5 +53,69 @@ impl NodeHandle<TestContext> for Handle {
         self.app.abort();
         self.engine.handle.abort();
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Node for App {
+    type Context = LoadContext;
+    type Genesis = Genesis;
+    type PrivateKeyFile = PrivateKey;
+    type SigningProvider = Ed25519Provider;
+    type NodeHandle = Handle;
+
+    fn get_home_dir(&self) -> PathBuf {
+        todo!()
+    }
+
+    fn get_signing_provider(&self, private_key: PrivateKey) -> Self::SigningProvider {
+        todo!()
+    }
+
+    fn generate_private_key<R>(&self, rng: R) -> PrivateKey
+    where
+        R: RngCore + CryptoRng,
+    {
+        todo!()
+    }
+
+    fn get_address(&self, pk: &PublicKey) -> Address {
+        todo!()
+    }
+
+    fn get_public_key(&self, pk: &PrivateKey) -> PublicKey {
+        todo!()
+    }
+
+    fn get_keypair(&self, pk: PrivateKey) -> Keypair {
+        todo!()
+    }
+
+    fn load_private_key(&self, file: Self::PrivateKeyFile) -> PrivateKey {
+        todo!()
+    }
+
+    fn load_private_key_file(&self) -> std::io::Result<Self::PrivateKeyFile> {
+        todo!()
+    }
+
+    fn make_private_key_file(&self, private_key: PrivateKey) -> Self::PrivateKeyFile {
+        todo!()
+    }
+
+    fn load_genesis(&self) -> std::io::Result<Self::Genesis> {
+        todo!()
+    }
+
+    fn make_genesis(&self, validators: Vec<(PublicKey, VotingPower)>) -> Self::Genesis {
+        todo!()
+    }
+
+    async fn start(&self) -> eyre::Result<Handle> {
+        todo!()
+    }
+
+    async fn run(self) -> eyre::Result<()> {
+        todo!()
     }
 }

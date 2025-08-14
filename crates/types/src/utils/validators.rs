@@ -1,7 +1,7 @@
 use malachitebft_core_types::VotingPower;
 use rand::{SeedableRng, rngs::StdRng};
 
-use crate::{PrivateKey, Validator};
+use crate::{signing::PrivateKey, validator_set::Validator};
 
 pub fn make_validators<const N: usize>(
     voting_powers: [VotingPower; N],

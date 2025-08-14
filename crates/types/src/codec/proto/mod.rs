@@ -154,7 +154,7 @@ impl Codec<StreamMessage<ProposalPart>> for ProtobufCodec {
     }
 }
 
-impl Codec<ProposedValue<LaodContext>> for ProtobufCodec {
+impl Codec<ProposedValue<LoadContext>> for ProtobufCodec {
     type Error = ProtoError;
 
     fn decode(&self, bytes: Bytes) -> Result<ProposedValue<LoadContext>, Self::Error> {
