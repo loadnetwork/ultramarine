@@ -1,14 +1,13 @@
 //! The Application (or Node) definition. The Node trait implements the Consensus context and the
 //! cryptographic library used for signing.
 #![allow(missing_docs)]
-use std::{path::PathBuf, str::FromStr};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use color_eyre::eyre;
 use malachitebft_app_channel::app::{
     EngineHandle, Node, NodeHandle,
     events::{RxEvent, TxEvent},
-    metrics::SharedRegistry,
     types::{Keypair, config::Config, core::VotingPower},
 };
 use rand::{CryptoRng, RngCore};
@@ -20,10 +19,7 @@ use ultramarine_types::{
     address::Address,
     context::LoadContext,
     genesis::Genesis,
-    proposal::Proposal,
-    proposal_part::ProposalPart,
     signing::{Ed25519Provider, PrivateKey, PublicKey},
-    validator_set::{Validator, ValidatorSet},
 };
 
 /// Main application struct implementing the consensus node functionality

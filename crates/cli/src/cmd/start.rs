@@ -27,10 +27,10 @@ impl StartCmd {
 /// start command to run a node.
 pub async fn start(node: impl Node, metrics: Option<MetricsConfig>) -> eyre::Result<()> {
     // Enable Prometheus
-    if let Some(metrics) = metrics {
-        if metrics.enabled {
-            tokio::spawn(metrics::serve(metrics.listen_addr));
-        }
+    if let Some(metrics) = metrics &&
+        metrics.enabled
+    {
+        tokio::spawn(metrics::serve(metrics.listen_addr));
     }
 
     // Start the node
