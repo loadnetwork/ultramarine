@@ -10,6 +10,7 @@ use ultramarine_cli::{
     cmd::{init::InitCmd, start::StartCmd, testnet::TestnetCmd},
     config, logging, runtime,
 };
+use ultramarine_node::node::App;
 use ultramarine_types::height::Height;
 
 /// Main entry point for the application

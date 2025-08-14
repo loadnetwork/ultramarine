@@ -34,6 +34,8 @@ unused-must-use = "deny"
 rust-2018-idioms = "deny"
 unnameable-types = "warn"
 
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+
 [workspace.dependencies]
 ultramarine-cli = { path = "crates/cli" }
 # ultramarine dependencies
@@ -68,9 +70,9 @@ directories = "6.0.0"
 hex = { version = "0.4.3", features = ["serde"] }
 itertools = "0.14.0"
 itf = "0.4.0"
-prost = "0.14.1"
-prost-build = "0.14.1"
-prost-types = "0.14.1"
+prost = "0.13"
+prost-build = "0.13"
+prost-types = "0.13"
 rand = { version = "0.8.5", features = ["std_rng"] }
 redb = "3.0.0"
 serde = "1.0.219"

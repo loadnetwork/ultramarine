@@ -26,4 +26,5 @@ malachitebft-metrics.workspace = true
 
 # ultramarine dependencies
 ultramarine-cli.workspace = true
+ultramarine-node.workspace = true
 ultramarine-types.workspace = true
