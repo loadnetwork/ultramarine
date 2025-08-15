@@ -1,22 +1,20 @@
-ethereum compatible types?
+## implement context and primitive consensus types for Load
 
-implement context and primitive consensus types for Load:
-
-- [ ] context
+- [x] context
 - [x] height
-- [ ] address
-- [ ] proposal
-- [ ] proposal part
-- [ ] signing method (Public and Private key)
-- [ ] genesis
-- [ ] validator
-- [ ] validator set
-- [ ] vote
+- [x] address
+- [x] proposal
+- [x] proposal part
+- [x] signing method (Public and Private key)
+- [x] genesis
+- [x] validator
+- [x] validator set
+- [x] vote
 
 some utils from malaketh-layerd:
 
-- [ ] proto
-- [ ] validator gen
+- [x] proto
+- [x ] validator gen
 
 proto: right now we use just the default proto from malaketh-layerd
 proto codec: in progress

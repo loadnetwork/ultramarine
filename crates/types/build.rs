@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::io::Result;
 
 fn main() -> Result<()> {
