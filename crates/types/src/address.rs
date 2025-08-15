@@ -40,7 +40,7 @@ impl Address {
         Self(AlloyAddress::repeat_byte(byte))
     }
 
-    pub fn to_alloy_address(&self) -> alloy_primitives::Address {
+    pub fn to_alloy_address(self) -> alloy_primitives::Address {
         self.0
     }
 }
