@@ -1,5 +1,5 @@
 [package]
-name = "consensus"
+name = "ultramarine-consensus"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

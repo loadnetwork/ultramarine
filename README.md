@@ -1,3 +1,5 @@
+Inspired by: <https://github.com/circlefin/malaketh-layered>
+
 ```
 # Format code
 cargo +nightly fmt --all
