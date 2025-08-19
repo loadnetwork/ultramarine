@@ -10,6 +10,38 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ultramarine-cli.workspace = true
+ultramarine-execution.workspace = true
+ultramarine-types.workspace = true
+
+malachitebft-app-channel.workspace = true
+malachitebft-proto.workspace = true
+
+alloy-consensus = { workspace = true }
+alloy-rpc-types-engine = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+
+alloy-rpc-types = { workspace = true }
+alloy-rpc-types-txpool = { workspace = true }
+alloy-transport-http = { workspace = true }
+
+async-trait.workspace = true
+bytes.workspace = true
+color-eyre.workspace = true
+derive-where.workspace = true
+ethereum_ssz = "0.8"
+
+hex.workspace = true
+prost.workspace = true
+rand.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true
