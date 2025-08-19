@@ -5824,6 +5824,32 @@ dependencies = [
 [[package]]
 name = "ultramarine-consensus"
 version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
+ "async-trait",
+ "bytes",
+ "color-eyre",
+ "derive-where",
+ "ethereum_ssz 0.8.3",
+ "hex",
+ "informalsystems-malachitebft-app-channel",
+ "informalsystems-malachitebft-proto",
+ "prost",
+ "rand 0.8.5",
+ "redb",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror 2.0.14",
+ "tokio",
+ "tracing",
+ "ultramarine-cli",
+ "ultramarine-execution",
+ "ultramarine-types",
+ "url",
+]
 
 [[package]]
 name = "ultramarine-execution"
@@ -5854,6 +5880,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ultramarine-cli",
+ "ultramarine-consensus",
  "ultramarine-execution",
  "ultramarine-types",
  "url",
@@ -5863,6 +5890,7 @@ dependencies = [
 name = "ultramarine-types"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives 1.3.0",
  "bytes",
  "informalsystems-malachitebft-app",

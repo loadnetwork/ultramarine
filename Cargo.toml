@@ -54,6 +54,8 @@ alloy-rpc-types-engine = { version = "1.0.23", features = [
   "ssz",
 ], default-features = false }
 alloy-rpc-types-eth = { version = "1.0.23", default-features = false }
+alloy-rpc-types-txpool = { version = "1.0.23" }
+alloy-transport-http = { version = "1.0.23", features = ["jwt-auth"] }
 
 color-eyre = "0.6.5"
 

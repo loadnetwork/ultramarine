@@ -15,5 +15,6 @@ pub mod validator_set;
 pub mod value;
 pub mod vote;
 
+pub mod aliases;
 pub mod codec;
 pub mod utils;
