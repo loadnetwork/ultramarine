@@ -8,7 +8,7 @@ pub mod eth_rpc;
 pub mod metrics;
 pub mod transport;
 
-pub use client::ExecutionClient;
+// pub use client::ExecutionClient;
 pub use config::ExecutionConfig;
 pub use engine_api::EngineApi;
 pub use error::ExecutionError;
