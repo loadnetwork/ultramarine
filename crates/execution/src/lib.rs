@@ -1,15 +1,15 @@
-#![allow(missing_docs)] // crate-level: suppresses missing_docs for the whole crate
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+// crates/execution/src/lib.rs
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod client;
+pub mod config;
+pub mod engine_api;
+pub mod error;
+pub mod eth_rpc;
+pub mod metrics;
+pub mod transport;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+// pub use client::ExecutionClient;
+pub use config::ExecutionConfig;
+pub use engine_api::EngineApi;
+pub use error::ExecutionError;
+pub use eth_rpc::EthRpc;

@@ -11,3 +11,20 @@ description = "A Rust implementation of the Load Network consensus client"
 [[bin]]
 name = "ultramarine"
 path = "src/main.rs"
+
+[dependencies]
+
+color-eyre.workspace = true
+tracing.workspace = true
+
+# malachite dependencies
+malachitebft-app.workspace = true
+malachitebft-app-channel.workspace = true
+malachitebft-config.workspace = true
+malachitebft-core-types.workspace = true
+malachitebft-metrics.workspace = true
+
+# ultramarine dependencies
+ultramarine-cli.workspace = true
+ultramarine-node.workspace = true
+ultramarine-types.workspace = true
