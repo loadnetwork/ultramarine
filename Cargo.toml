@@ -73,6 +73,7 @@ directories = "6.0.0"
 hex = { version = "0.4.3", features = ["serde"] }
 itertools = "0.14.0"
 itf = "0.4.0"
+jsonwebtoken = "9"
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"

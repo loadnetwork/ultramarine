@@ -2,6 +2,9 @@
 
 // This file will contain the HTTP transport implementation.
 
+use super::{JsonRpcRequest, JsonRpcResponse, Transport};
+use crate::engine_api::jwt::JwtProvider;
+
 // --- REFERENCE IMPLEMENTATION ---
 // use super::{JsonRpcRequest, JsonRpcResponse, Transport};
 // use crate::engine_api::jwt::JwtProvider;

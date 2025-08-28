@@ -23,6 +23,7 @@ malachitebft-app-channel.workspace = true
 malachitebft-config.workspace = true
 malachitebft-core-types.workspace = true
 malachitebft-metrics.workspace = true
+jsonwebtoken = "9.3.1"
 
 # ultramarine dependencies
 ultramarine-cli.workspace = true
