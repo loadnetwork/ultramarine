@@ -1,4 +1,5 @@
 // crates/execution/src/transport/mod.rs
+#![allow(missing_docs)]
 
 pub mod http;
 pub mod ipc;

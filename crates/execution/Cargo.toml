@@ -32,6 +32,7 @@ derive-where.workspace = true
 ethereum_ssz.workspace = true
 
 hex.workspace = true
+jsonwebtoken.workspace = true
 prost.workspace = true
 rand.workspace = true
 redb.workspace = true
