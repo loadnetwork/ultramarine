@@ -36,6 +36,7 @@ jsonwebtoken.workspace = true
 prost.workspace = true
 rand.workspace = true
 redb.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha3.workspace = true

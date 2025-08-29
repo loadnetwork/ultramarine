@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 color-eyre.workspace = true
 tracing.workspace = true
+jsonwebtoken = "9.3.1"
 
 # malachite dependencies
 malachitebft-app.workspace = true
@@ -23,7 +24,6 @@ malachitebft-app-channel.workspace = true
 malachitebft-config.workspace = true
 malachitebft-core-types.workspace = true
 malachitebft-metrics.workspace = true
-jsonwebtoken = "9.3.1"
 
 # ultramarine dependencies
 ultramarine-cli.workspace = true
