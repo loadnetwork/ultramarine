@@ -15,8 +15,8 @@ path = "src/main.rs"
 [dependencies]
 
 color-eyre.workspace = true
-tracing.workspace = true
 jsonwebtoken = "9.3.1"
+tracing.workspace = true
 
 # malachite dependencies
 malachitebft-app.workspace = true

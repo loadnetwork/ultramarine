@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Sends a JSON-RPC request and returns the response.
-    async fn send(&self, request: &JsonRpcRequest) -> eyre::Result<JsonRpcResponse>;
+    async fn send(&self, req: &JsonRpcRequest) -> eyre::Result<JsonRpcResponse>;
 }
 
 /// Represents a JSON-RPC request object.
