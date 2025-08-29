@@ -26,6 +26,7 @@ struct Claims {
 }
 
 /// Caches a JWT token and its creation time.
+#[derive(Clone)]
 struct JwtCache {
     token: String,
     created_at: SystemTime,
