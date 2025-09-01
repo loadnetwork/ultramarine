@@ -1,45 +1,59 @@
-// crates/execution/src/client.rs
+use std::sync::Arc;
 
-// This file defines the main `ExecutionClient`, which acts as the public
-// entry point to the entire crate.
+use color_eyre::eyre;
 
-// --- REFERENCE IMPLEMENTATION ---
-// use crate::engine_api::{client::EngineApiClient, EngineApi};
-// use crate::eth_rpc::{alloy_impl::AlloyEthRpc, EthRpc};
-// use crate::transport::{HttpTransport, IpcTransport};
-// use color_eyre::eyre;
-// use std::path::Path;
-// use std::sync::Arc;
-// use url::Url;
-//
-// pub struct ExecutionClient {
-// pub engine: Arc<dyn EngineApi>,
-// pub eth: Arc<dyn EthRpc>,
-// }
-//
-// impl ExecutionClient {
-// pub fn with_ipc(ipc_path: impl AsRef<Path>) -> Self {
-// let engine_transport = IpcTransport::new(ipc_path);
-// let engine = Arc::new(EngineApiClient::new(engine_transport));
-// let eth = Arc::new(AlloyEthRpc);
-// Self { engine, eth }
-// }
-//
-// pub fn with_http(url: Url, jwt_secret: Option<[u8; 32]>) -> eyre::Result<Self> {
-// let mut engine_transport = HttpTransport::new(url.clone());
-// if let Some(secret) = jwt_secret {
-// engine_transport = engine_transport.with_jwt(secret);
-// }
-// let engine = Arc::new(EngineApiClient::new(engine_transport));
-// let eth = Arc::new(AlloyEthRpc);
-// Ok(Self { engine, eth })
-// }
-//
-// pub fn engine(&self) -> &dyn EngineApi {
-// self.engine.as_ref()
-// }
-//
-// pub fn eth(&self) -> &dyn EthRpc {
-// self.eth.as_ref()
-// }
-// }
+use crate::{
+    config::{EngineApiEndpoint, ExecutionConfig},
+    engine_api::{EngineApi, client::EngineApiClient},
+    eth_rpc::{EthRpc, alloy_impl::AlloyEthRpc},
+    transport::{http::HttpTransport, ipc::IpcTransport},
+};
+
+/// The main client for interacting with an execution layer node.
+///
+/// This client encapsulates both the Engine API client (for consensus-critical
+/// operations) and a standard Eth1 RPC client (for all other interactions).
+/// It is created from a single, flexible `ExecutionConfig`.
+#[derive(Clone)]
+pub struct ExecutionClient {
+    /// The Engine API client, used for block production and fork choice.
+    pub engine: Arc<dyn EngineApi>,
+    /// The standard Eth1 JSON-RPC client, used for things like fetching logs.
+    pub eth: Arc<dyn EthRpc>,
+}
+
+impl ExecutionClient {
+    /// Creates a new `ExecutionClient` from the given configuration.
+    ///
+    /// This function is async because it needs to establish a connection
+    /// to the execution node to initialize the EthRpc1 client.
+    pub async fn new(config: ExecutionConfig) -> eyre::Result<Self> {
+        // 1. Craete the Engine API client using its specific endpoint from the config.
+        let engine_client: Arc<dyn EngineApi> = match config.engine_api_endpoint {
+            EngineApiEndpoint::Http(url) => {
+                let transport = HttpTransport::new(url).with_jwt(config.jwt_secret);
+                Arc::new(EngineApiClient::new(transport))
+            }
+            EngineApiEndpoint::Ipc(path) => {
+                let transport = IpcTransport::new(path);
+                Arc::new(EngineApiClient::new(transport))
+            }
+        };
+
+        // 2. Craete the standard Eth1 RPC client using its dedicated HTTP Url from the config.
+        let eth_client: Arc<dyn EthRpc> = {
+            let rpc_client = AlloyEthRpc::new(config.eth1_rpc_url);
+            Arc::new(rpc_client)
+        };
+
+        Ok(Self { engine: engine_client, eth: eth_client })
+    }
+
+    pub fn engine(&self) -> &dyn EngineApi {
+        self.engine.as_ref()
+    }
+
+    pub fn eth(&self) -> &dyn EthRpc {
+        self.eth.as_ref()
+    }
+}
