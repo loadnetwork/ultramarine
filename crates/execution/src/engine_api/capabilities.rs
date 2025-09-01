@@ -1,8 +1,6 @@
 // crates/execution/src/engine_api/capabilities.rs
 
-use std::{collections::HashSet, hash::Hash, time::Duration};
-
-use crate::engine_api::capabilities;
+use std::{collections::HashSet, time::Duration};
 
 pub const ENGINE_NEW_PAYLOAD_V1: &str = "engine_newPayloadV1";
 pub const ENGINE_NEW_PAYLOAD_V2: &str = "engine_newPayloadV2";

@@ -82,10 +82,6 @@ impl JwtProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::thread::sleep;
-
-    use sha3::digest::typenum::assert_type;
-
     use super::*;
 
     #[tokio::test]

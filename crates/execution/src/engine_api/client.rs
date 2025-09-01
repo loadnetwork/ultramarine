@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use alloy_rpc_types_engine::{
     ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadId,
@@ -6,12 +6,12 @@ use alloy_rpc_types_engine::{
 };
 use async_trait::async_trait;
 use color_eyre::eyre;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use ultramarine_types::aliases::{B256, BlockHash};
 
 use super::EngineApi;
 use crate::{
-    engine_api::{EngineCapabilities, capabilities::*},
+    engine_api::{EngineCapabilities, capabilities::*, json_structures},
     transport::{JsonRpcRequest, Transport},
 };
 
@@ -50,11 +50,11 @@ impl EngineApi for EngineApiClient {
         state: ForkchoiceState,
         payload_attributes: Option<PayloadAttributes>,
     ) -> eyre::Result<ForkchoiceUpdated> {
-        unimplemented!()
+        self.request(ENGINE_FORKCHOICE_UPDATED_V3, (state, payload_attributes)).await
     }
 
     async fn get_payload(&self, payload_id: PayloadId) -> eyre::Result<ExecutionPayloadV3> {
-        unimplemented!()
+        self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await
     }
 
     async fn new_payload(
@@ -63,7 +63,9 @@ impl EngineApi for EngineApiClient {
         versioned_hashes: Vec<B256>,
         parent_block_hash: BlockHash,
     ) -> eyre::Result<PayloadStatus> {
-        unimplemented!()
+        let payload = json_structures::JsonExecutionPayloadV3::from(execution_payload);
+        let params = serde_json::json!([payload, versioned_hashes, parent_block_hash]);
+        self.request(ENGINE_NEW_PAYLOAD_V3, params).await
     }
 
     async fn exchange_capabilities(&self) -> eyre::Result<EngineCapabilities> {
