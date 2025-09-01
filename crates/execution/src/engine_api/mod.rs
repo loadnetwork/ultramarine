@@ -1,5 +1,3 @@
-// crates/execution/src/engine_api/mod.rs
-
 pub mod capabilities;
 pub mod client;
 mod json_structures;
