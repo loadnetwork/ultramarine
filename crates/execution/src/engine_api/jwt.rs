@@ -1,4 +1,3 @@
-// --- ANNOTATED IMPLEMENTATION ---
 // This implementation is based on the official Engine API specification.
 // It generates JWTs with an `iat` claim but no `exp` claim.
 // The token is cached and regenerated periodically to ensure the `iat`

@@ -1,5 +1,3 @@
-// crates/execution/src/transport/ipc.rs
-
 // TODO: Implement an actor-based client as an alternative to the Mutex-based approach.
 // This could be more flexible and help to avoid deadlocks in more complex scenarios.
 
