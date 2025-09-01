@@ -9,6 +9,8 @@ use crate::{
     transport::{http::HttpTransport, ipc::IpcTransport},
 };
 
+// TODO: USE GENERICS instead of dyn
+
 /// The main client for interacting with an execution layer node.
 ///
 /// This client encapsulates both the Engine API client (for consensus-critical
