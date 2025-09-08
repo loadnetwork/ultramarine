@@ -7,11 +7,14 @@ use alloy_rpc_types_engine::{
 use async_trait::async_trait;
 use color_eyre::eyre;
 use serde::{Serialize, de::DeserializeOwned};
-use ultramarine_types::aliases::{B256, BlockHash};
+use ultramarine_types::{
+    aliases::{B256, BlockHash},
+    engine_api::JsonExecutionPayloadV3,
+};
 
 use super::EngineApi;
 use crate::{
-    engine_api::{EngineCapabilities, capabilities::*, json_structures},
+    engine_api::{EngineCapabilities, capabilities::*},
     transport::{JsonRpcRequest, Transport},
 };
 
@@ -45,6 +48,11 @@ impl EngineApiClient {
 
 #[async_trait]
 impl EngineApi for EngineApiClient {
+    /// Notify that a fork choice has been updated, to set the head of the chain
+    /// - head_block_hash: The block hash of the head of the chain
+    /// - safe_block_hash: The block hash of the most recent "safe" block (can be same as head)
+    /// - finalized_block_hash: The block hash of the highest finalized block (can be 0x0 for
+    ///   genesis)
     async fn forkchoice_updated(
         &self,
         state: ForkchoiceState,
@@ -63,7 +71,7 @@ impl EngineApi for EngineApiClient {
         versioned_hashes: Vec<B256>,
         parent_block_hash: BlockHash,
     ) -> eyre::Result<PayloadStatus> {
-        let payload = json_structures::JsonExecutionPayloadV3::from(execution_payload);
+        let payload = JsonExecutionPayloadV3::from(execution_payload);
         let params = serde_json::json!([payload, versioned_hashes, parent_block_hash]);
         self.request(ENGINE_NEW_PAYLOAD_V3, params).await
     }

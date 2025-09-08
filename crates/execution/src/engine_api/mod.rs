@@ -1,6 +1,5 @@
 pub mod capabilities;
 pub mod client;
-mod json_structures;
 pub mod jwt;
 
 use alloy_rpc_types_engine::{

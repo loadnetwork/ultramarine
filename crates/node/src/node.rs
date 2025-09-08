@@ -1,28 +1,36 @@
 //! The Application (or Node) definition. The Node trait implements the Consensus context and the
 //! cryptographic library used for signing.
 #![allow(missing_docs)]
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use async_trait::async_trait;
 use color_eyre::eyre;
 use malachitebft_app_channel::app::{
     EngineHandle, Node, NodeHandle,
     events::{RxEvent, TxEvent},
+    metrics::SharedRegistry,
     types::{Keypair, config::Config, core::VotingPower},
 };
 use rand::{CryptoRng, RngCore};
 use tokio::task::JoinHandle;
-// use ultramarine_execution::{engine::Engine, engine_rpc::EngineRPC,
-// ethereum_rpc::EthereumRPC};
-use ultramarine_types::height::Height;
+use ultramarine_cli::metrics;
+use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
+use ultramarine_execution::{
+    client::ExecutionClient,
+    config::{self, ExecutionConfig},
+    engine_api::EngineApi,
+    eth_rpc::EthRpc,
+};
 use ultramarine_types::{
     address::Address,
     codec::proto::ProtobufCodec,
     context::LoadContext,
     genesis::Genesis,
+    height::Height,
     signing::{Ed25519Provider, PrivateKey, PublicKey},
     validator_set::{Validator, ValidatorSet},
 };
+use url::Url;
 
 /// Main application struct implementing the consensus node functionality
 #[derive(Clone)]
@@ -86,7 +94,8 @@ impl Node for App {
     }
 
     fn get_keypair(&self, pk: PrivateKey) -> Keypair {
-        Keypair::ed25519_from_bytes(pk.inner().to_bytes()).unwrap()
+        Keypair::ed25519_from_bytes(pk.inner().to_bytes())
+            .expect("a valid private key should always produce a valid keypair")
     }
 
     fn load_private_key(&self, file: Self::PrivateKeyFile) -> PrivateKey {
@@ -147,45 +156,59 @@ impl Node for App {
 
         let tx_event = channels.events.clone();
 
-        // Metric, state(which is basically an app over which we do consensus? )
-        // let registry = SharedRegistry::global().with_moniker(&self.config.moniker);
-        // let metrics = DbMetrics::register(&registry);
-        //
-        // if self.config.metrics.enabled {
-        // tokio::spawn(metrics::serve(self.config.metrics.listen_addr));
-        // }
-        //
-        // let store = Store::open(self.get_home_dir().join("store.db"), metrics)?;
-        // let start_height = self.start_height.unwrap_or_default();
-        // let mut state = State::new(genesis, ctx, signing_provider, address, start_height, store);
-        //
-        // let engine: Engine = {
-        // // TODO: make EL host, EL port, and jwt secret configurable
-        // let engine_url: Url = {
-        // let engine_port = match self.config.moniker.as_str() {
-        // "test-0" => 8551,
-        // "test-1" => 18551,
-        // "test-2" => 28551,
-        // _ => 8551,
-        // };
-        // Url::parse(&format!("http://localhost:{engine_port}"))?
-        // };
-        // let jwt_path = PathBuf::from_str("./assets/jwtsecret")?; // Should be the same secret
-        // used by the execution client. let eth_url: Url = {
-        // let eth_port = match self.config.moniker.as_str() {
-        // "test-0" => 8545,
-        // "test-1" => 18545,
-        // "test-2" => 28545,
-        // _ => 8545,
-        // };
-        // Url::parse(&format!("http://localhost:{eth_port}"))?
-        // };
-        // Engine::new(EngineRPC::new(engine_url, jwt_path.as_path())?, EthereumRPC::new(eth_url)?)
-        // };
-        //
+        let registry = SharedRegistry::global().with_moniker(&self.config.moniker);
+        let metrics = DbMetrics::register(&registry);
+
+        if self.config.metrics.enabled {
+            tokio::spawn(metrics::serve(self.config.metrics.listen_addr));
+        }
+
+        let store = Store::open(self.get_home_dir().join("store.db"), metrics)?;
+        let start_height = self.start_height.unwrap_or_default();
+        let mut state = State::new(genesis, ctx, signing_provider, address, start_height, store);
+
+        // --- Initialize Execution Client ---
+        // TODO: The following logic for determining ports and paths is for local
+        // testing convenience. A production-ready implementation should remove this
+        // and rely solely on the loaded configuration. The logic for generating
+        // testnet configurations with unique ports should be moved to the
+        // `TestnetCmd` in the `cli` crate.
+        let engine_url: Url = {
+            let engine_port = match self.config.moniker.as_str() {
+                "test-0" => 8551,
+                "test-1" => 18551,
+                "test-2" => 28551,
+                _ => 8551,
+            };
+            Url::parse(&format!("http://localhost:{engine_port}"))?
+        };
+        let jwt_path = PathBuf::from_str("./assets/jwtsecret")?;
+        let eth_url: Url = {
+            let eth_port = match self.config.moniker.as_str() {
+                "test-0" => 8545,
+                "test-1" => 18545,
+                "test-2" => 28545,
+                _ => 8545,
+            };
+            Url::parse(&format!("http://localhost:{eth_port}"))?
+        };
+
+        let jwt_secret_bytes = std::fs::read(&jwt_path)
+            .map_err(|e| eyre!("Failed to read JWT secret from {}: {}", jwt_path.display(), e))?;
+        let jwt_secret: [u8; 32] = jwt_secret_bytes
+            .try_into()
+            .map_err(|_| eyre!("JWT secret at {} must be exactly 32 bytes", jwt_path.display()))?;
+
+        let execution_config = ExecutionConfig {
+            engine_api_endpoint: config::EngineApiEndpoint::Http(engine_url),
+            eth1_rpc_url: eth_url,
+            jwt_secret,
+        };
+
+        let execution_client = ExecutionClient::new(execution_config).await?;
 
         let app_handle = tokio::spawn(async move {
-            if let Err(e) = crate::app::run(&mut state, &mut channels, engine).await {
+            if let Err(e) = crate::app::run(&mut state, &mut channels, execution_client).await {
                 tracing::error!(%e, "Application error");
             }
         });

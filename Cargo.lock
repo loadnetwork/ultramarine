@@ -6463,7 +6463,12 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rpc-types",
+ "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-txpool",
  "bytes",
+ "ethereum_serde_utils",
  "informalsystems-malachitebft-app",
  "informalsystems-malachitebft-codec",
  "informalsystems-malachitebft-config",
