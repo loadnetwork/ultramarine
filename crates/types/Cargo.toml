@@ -11,6 +11,12 @@ rust-version.workspace = true
 
 [dependencies]
 alloy-consensus.workspace = true
+alloy-rpc-types = { workspace = true }
+alloy-rpc-types-engine = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-rpc-types-txpool = { workspace = true }
+ethereum_serde_utils = { workspace = true }
+
 bytes.workspace = true
 malachitebft-app = { workspace = true }
 malachitebft-codec = { workspace = true }

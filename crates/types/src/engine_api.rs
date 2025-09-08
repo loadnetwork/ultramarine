@@ -1,7 +1,8 @@
 use alloy_rpc_types::Withdrawal;
 use alloy_rpc_types_engine::ExecutionPayloadV3;
 use serde::{Deserialize, Serialize};
-use ultramarine_types::{
+
+use crate::{
     address::Address,
     aliases::{B256, BlockHash, BlockNumber, BlockTimestamp, Bloom, Bytes, U256},
 };
