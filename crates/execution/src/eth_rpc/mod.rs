@@ -1,9 +1,10 @@
 pub mod alloy_impl;
 
-use alloy_rpc_types::{Block, BlockNumberOrTag, Filter, Log, SyncStatus};
+use alloy_rpc_types::{BlockNumberOrTag, Filter, Log, SyncStatus};
 use alloy_rpc_types_txpool::{TxpoolInspect, TxpoolStatus};
 use async_trait::async_trait;
 use color_eyre::eyre;
+use ultramarine_types::engine_api::ExecutionBlock;
 
 /// A trait representing the standard Ethereum JSON-RPC API.
 ///
@@ -26,7 +27,7 @@ pub trait EthRpc: Send + Sync {
         &self,
         block_number: BlockNumberOrTag,
         full_transactions: bool,
-    ) -> eyre::Result<Option<Block>>;
+    ) -> eyre::Result<Option<ExecutionBlock>>;
 
     /// Corresponds to the `txpool_status` RPC method.
     async fn txpool_status(&self) -> eyre::Result<TxpoolStatus>;

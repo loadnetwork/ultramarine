@@ -12,6 +12,7 @@ use alloy_rpc_types_txpool::{TxpoolInspect, TxpoolStatus};
 use alloy_transport_http::Http;
 use async_trait::async_trait;
 use color_eyre::eyre;
+use ultramarine_types::engine_api::ExecutionBlock;
 use url::Url;
 
 use super::EthRpc;
@@ -68,16 +69,21 @@ impl EthRpc for AlloyEthRpc {
         &self,
         block_number: BlockNumberOrTag,
         full_transactions: bool,
-    ) -> eyre::Result<Option<Block>> {
+    ) -> eyre::Result<Option<ExecutionBlock>> {
         let mut request = self.provider.get_block(block_number.into());
         if full_transactions {
             request = request.full();
         }
-        // 3. Await the final configured request.
-        Ok(request.await?)
-        // The `.into()` here converts our `BlockNumberOrTag` into the `BlockId`
-        // type that the `get_block` method expects.
-        // Ok(self.provider.get_block(block_number.into(), full_transactions).await?)
+
+        let maybe_full_block = request.await?;
+        let execution_block = maybe_full_block.map(|block| ExecutionBlock {
+            block_number: block.header.number,
+            block_hash: block.header.hash,
+            parent_hash: block.header.parent_hash,
+            prev_randao: block.header.mix_hash,
+            timestamp: block.header.timestamp,
+        });
+        Ok(execution_block)
     }
 
     /// Fetches the status of the node's transaction pool.
