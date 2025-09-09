@@ -193,11 +193,12 @@ impl Node for App {
             Url::parse(&format!("http://localhost:{eth_port}"))?
         };
 
-        let jwt_secret_bytes = std::fs::read(&jwt_path)
-            .map_err(|e| eyre!("Failed to read JWT secret from {}: {}", jwt_path.display(), e))?;
-        let jwt_secret: [u8; 32] = jwt_secret_bytes
-            .try_into()
-            .map_err(|_| eyre!("JWT secret at {} must be exactly 32 bytes", jwt_path.display()))?;
+        let jwt_secret_bytes = std::fs::read(&jwt_path).map_err(|e| {
+            eyre::eyre!("Failed to read JWT secret from {}: {}", jwt_path.display(), e)
+        })?;
+        let jwt_secret: [u8; 32] = jwt_secret_bytes.try_into().map_err(|_| {
+            eyre::eyre!("JWT secret at {} must be exactly 32 bytes", jwt_path.display())
+        })?;
 
         let execution_config = ExecutionConfig {
             engine_api_endpoint: config::EngineApiEndpoint::Http(engine_url),

@@ -14,7 +14,6 @@ use malachitebft_app_channel::app::{
         core::{CommitCertificate, Round, Validity},
     },
 };
-// TODO: use malachitebft_eth_engine::json_structures::ExecutionBlock;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha3::Digest;
 use tokio::time::Instant;
@@ -23,6 +22,7 @@ use ultramarine_types::{
     address::Address,
     codec::proto::ProtobufCodec,
     context::LoadContext,
+    engine_api::ExecutionBlock,
     genesis::Genesis,
     height::Height,
     proposal_part::{ProposalData, ProposalFin, ProposalInit, ProposalPart},
@@ -62,7 +62,7 @@ pub struct State {
     pub current_proposer: Option<Address>,
     pub peers: HashSet<PeerId>,
 
-    // TODO: pub latest_block: Option<ExecutionBlock>,
+    pub latest_block: Option<ExecutionBlock>,
 
     // For stats
     pub txs_count: u64,
@@ -118,7 +118,7 @@ impl State {
             rng: StdRng::seed_from_u64(seed_from_address(&address)),
             peers: HashSet::new(),
 
-            // TODO: latest_block: None,
+            latest_block: None,
             txs_count: 0,
             chain_bytes: 0,
             start_time: Instant::now(),
@@ -270,6 +270,7 @@ impl State {
         Bytes::from(random_bytes)
     }
 
+    // TODO: LOAD: here could be added blobs, right? or...
     /// Creates a new proposal value for the given height
     /// Returns either a previously built proposal or creates a new one
     pub async fn propose_value(
