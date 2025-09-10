@@ -1,4 +1,4 @@
-// crates/execution/src/lib.rs
+#![allow(missing_docs)]
 
 pub mod client;
 pub mod config;

@@ -1,4 +1,4 @@
-// crates/execution/src/error.rs
+#![allow(missing_docs)]
 
 use thiserror::Error;
 

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use std::sync::Arc;
 
 use alloy_rpc_types_engine::{

@@ -3,11 +3,11 @@
 //! This module provides a client for the standard Ethereum JSON-RPC API. It is
 //! responsible for all non-Engine API calls, such as fetching logs, checking
 //! sync status, or getting blocks.
-
+#![allow(missing_docs)]
 use alloy_network::Ethereum;
 use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_client::RpcClient;
-use alloy_rpc_types::{Block, BlockNumberOrTag, Filter, Log, SyncStatus};
+use alloy_rpc_types::{BlockNumberOrTag, Filter, Log, SyncStatus};
 use alloy_rpc_types_txpool::{TxpoolInspect, TxpoolStatus};
 use alloy_transport_http::Http;
 use async_trait::async_trait;

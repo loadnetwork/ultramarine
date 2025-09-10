@@ -1,5 +1,4 @@
-// crates/execution/src/config.rs
-
+#![allow(missing_docs)]
 use std::path::PathBuf;
 
 use url::Url;

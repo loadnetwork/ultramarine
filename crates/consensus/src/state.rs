@@ -242,10 +242,10 @@ impl State {
         let block_data = self.store.get_block_data(certificate.height, certificate.round).await?;
 
         // Log first 32 bytes of block data with JNT prefix
-        if let Some(data) = &block_data {
-            if data.len() >= 32 {
-                info!("Committed block_data[0..32]: {}", hex::encode(&data[..32]));
-            }
+        if let Some(data) = &block_data &&
+            data.len() >= 32
+        {
+            info!("Committed block_data[0..32]: {}", hex::encode(&data[..32]));
         }
 
         if let Some(data) = block_data {
