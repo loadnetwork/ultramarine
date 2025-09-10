@@ -1,5 +1,5 @@
-use alloy_consensus::error;
-use alloy_rpc_types_engine::{ExecutionPayloadV3, payload};
+#![allow(missing_docs)]
+use alloy_rpc_types_engine::ExecutionPayloadV3;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
 use malachitebft_app_channel::{
@@ -7,7 +7,7 @@ use malachitebft_app_channel::{
     app::{
         streaming::StreamContent,
         types::{
-            LocallyProposedValue, ProposedValue,
+            ProposedValue,
             codec::Codec,
             core::{Round, Validity},
             sync::RawDecidedValue,
@@ -15,7 +15,6 @@ use malachitebft_app_channel::{
     },
 };
 use ssz::{Decode, Encode};
-use tokio::time::timeout;
 use tracing::{debug, error, info};
 use ultramarine_consensus::state::{State, decode_value};
 use ultramarine_execution::client::ExecutionClient;
@@ -333,8 +332,105 @@ pub async fn run(
                 }
             }
 
+            // After some time, consensus will finally reach a decision on the value
+            // to commit for the current height, and will notify the application,
+            // providing it with a commit certificate which contains the ID of the value
+            // that was decided on as well as the set of commits for that value,
+            // ie. the precommits together with their (aggregated) signatures.
             AppMsg::Decided { certificate, extensions, reply } => {
-                unimplemented!()
+                let height = certificate.height;
+                let round = certificate.round;
+                info!(
+                    %height, %round, value = %certificate.value_id,
+                    "🟢🟢 Consensus has decided on value"
+                );
+
+                let block_bytes = state
+                    .get_block_data(height, round)
+                    .await
+                    .expect("certificate should have associated block data");
+
+                debug!("🎁 block size: {:?}, height: {}", block_bytes.len(), height);
+
+                // Decode bytes into execution payload (a block)
+
+                let execution_payload = ExecutionPayloadV3::from_ssz_bytes(&block_bytes).unwrap();
+
+                let parent_block_hash = execution_payload.payload_inner.payload_inner.parent_hash;
+                let new_block_hash = execution_payload.payload_inner.payload_inner.block_hash;
+
+                assert_eq!(state.latest_block.unwrap().block_hash, parent_block_hash);
+
+                let new_block_timestamp = execution_payload.timestamp();
+                let new_block_number = execution_payload.payload_inner.payload_inner.block_number;
+                let new_block_prev_randao =
+                    execution_payload.payload_inner.payload_inner.prev_randao;
+
+                // Log stats
+
+                let tx_count = execution_payload.payload_inner.payload_inner.transactions.len();
+                state.txs_count += tx_count as u64;
+                state.chain_bytes += block_bytes.len() as u64;
+                let elapsed_time = state.start_time.elapsed();
+
+                info!(
+                    "👉 stats at height {}: #txs={}, txs/s={:.2}, chain_bytes={}, bytes/s={:.2}",
+                    height,
+                    state.txs_count,
+                    state.txs_count as f64 / elapsed_time.as_secs_f64(),
+                    state.chain_bytes,
+                    state.chain_bytes as f64 / elapsed_time.as_secs_f64(),
+                );
+
+                debug!("🦄 Block at height {height} contains {tx_count} transactions");
+
+                let block: Block = execution_payload.clone().try_into_block().unwrap();
+
+                let versioned_hashes: Vec<BlockHash> =
+                    block.body.blob_versioned_hashes_iter().copied().collect();
+
+                let payload_status =
+                    execution_layer.notify_new_block(execution_payload, versioned_hashes).await?;
+                if payload_status.is_invalid() {
+                    return Err(eyre::eyre!("Invalid payload status: {}", payload_status.status))
+                }
+
+                debug!("💡 New block added at height {} with hash: {}", height, new_block_hash);
+
+                // Notify the execution client (EL) of the new block.
+                // Update the execution head state to this block.
+                let latest_valid_hash =
+                    execution_layer.set_latest_forkchoice_state(new_block_hash).await?;
+                debug!(
+                    "🚀 Forkchoice updated to height {} for block hash={} and latest_valid_hash={}",
+                    height, new_block_hash, latest_valid_hash
+                );
+
+                // When that happens, we store the decided value in our store
+                state.commit(certificate).await?;
+
+                // Save the latest block
+                state.latest_block = Some(ExecutionBlock {
+                    block_hash: new_block_hash,
+                    block_number: new_block_number,
+                    parent_hash: latest_valid_hash,
+                    timestamp: new_block_timestamp,
+                    prev_randao: new_block_prev_randao,
+                });
+
+                // Pause briefly before starting next height, just to make following the logs easier
+                // tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // And then we instruct consensus to start the next height
+                if reply
+                    .send(ConsensusMsg::StartHeight(
+                        state.current_height,
+                        state.get_validator_set().clone(),
+                    ))
+                    .is_err()
+                {
+                    error!("Failed to send Decided reply");
+                }
             }
 
             // It may happen that our node is lagging behind its peers. In that case,

@@ -18,8 +18,6 @@ use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
 use ultramarine_execution::{
     client::ExecutionClient,
     config::{self, ExecutionConfig},
-    engine_api::EngineApi,
-    eth_rpc::EthRpc,
 };
 use ultramarine_types::{
     address::Address,

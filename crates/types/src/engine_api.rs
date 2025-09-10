@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use alloy_rpc_types::Withdrawal;
 use alloy_rpc_types_engine::ExecutionPayloadV3;
 use serde::{Deserialize, Serialize};

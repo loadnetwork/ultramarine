@@ -2,7 +2,7 @@
 // It generates JWTs with an `iat` claim but no `exp` claim.
 // The token is cached and regenerated periodically to ensure the `iat`
 // timestamp is always recent enough to be accepted by the execution client.
-
+#![allow(missing_docs)]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use color_eyre::eyre::Ok;
@@ -48,10 +48,10 @@ impl JwtProvider {
         // First, check for a valid token using a read lock for concurrency
         {
             let cached_guard = self.cache.read().await;
-            if let Some(cached) = cached_guard.as_ref() {
-                if cached.created_at.elapsed()? < TOKEN_VALIDITY_DURATION {
-                    return Ok(cached.token.clone())
-                }
+            if let Some(cached) = cached_guard.as_ref() &&
+                cached.created_at.elapsed()? < TOKEN_VALIDITY_DURATION
+            {
+                return Ok(cached.token.clone())
             }
         }
 
@@ -59,10 +59,10 @@ impl JwtProvider {
 
         let mut cache = self.cache.write().await;
 
-        if let Some(cached) = cache.as_ref() {
-            if cached.created_at.elapsed()? < TOKEN_VALIDITY_DURATION {
-                return Ok(cached.token.clone())
-            }
+        if let Some(cached) = cache.as_ref() &&
+            cached.created_at.elapsed()? < TOKEN_VALIDITY_DURATION
+        {
+            return Ok(cached.token.clone())
         }
 
         // Generate a new token.

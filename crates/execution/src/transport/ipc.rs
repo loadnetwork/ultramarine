@@ -1,6 +1,6 @@
 // TODO: Implement an actor-based client as an alternative to the Mutex-based approach.
 // This could be more flexible and help to avoid deadlocks in more complex scenarios.
-
+#![allow(missing_docs)]
 use std::{
     path::{Path, PathBuf},
     time::Duration,

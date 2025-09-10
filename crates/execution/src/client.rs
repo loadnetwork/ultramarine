@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -16,7 +17,7 @@ use ultramarine_types::{
 
 use crate::{
     config::{EngineApiEndpoint, ExecutionConfig},
-    engine_api::{self, EngineApi, client::EngineApiClient},
+    engine_api::{EngineApi, client::EngineApiClient},
     eth_rpc::{EthRpc, alloy_impl::AlloyEthRpc},
     transport::{http::HttpTransport, ipc::IpcTransport},
 };
