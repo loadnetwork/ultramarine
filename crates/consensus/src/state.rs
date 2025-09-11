@@ -450,5 +450,5 @@ fn assemble_value_from_parts(parts: ProposalParts) -> (ProposedValue<LoadContext
 
 /// Decodes a Value from its byte representation using ProtobufCodec
 pub fn decode_value(bytes: Bytes) -> Value {
-    ProtobufCodec.decode(bytes).unwrap()
+    ProtobufCodec.decode(bytes).expect("panic during protobuf velue decode")
 }

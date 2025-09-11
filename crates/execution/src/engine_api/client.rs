@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use alloy_rpc_types_engine::{
-    ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadId,
-    PayloadStatus,
+    ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated,
+    PayloadAttributes, PayloadId, PayloadStatus,
 };
 use async_trait::async_trait;
 use color_eyre::eyre;
@@ -63,7 +63,10 @@ impl EngineApi for EngineApiClient {
     }
 
     async fn get_payload(&self, payload_id: PayloadId) -> eyre::Result<ExecutionPayloadV3> {
-        self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await
+        // In V3 the response is an envelope; extract the execution payload.
+        let envelope: ExecutionPayloadEnvelopeV3 =
+            self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await?;
+        Ok(envelope.execution_payload)
     }
 
     async fn new_payload(

@@ -7,7 +7,7 @@ use malachitebft_app_channel::{
     app::{
         streaming::StreamContent,
         types::{
-            ProposedValue,
+            LocallyProposedValue, ProposedValue,
             codec::Codec,
             core::{Round, Validity},
             sync::RawDecidedValue,
@@ -95,11 +95,62 @@ pub async fn run(
             // At some point, we may end up being the proposer for that round, and the consensus
             // engine will then ask us for a value to propose to the other validators.
             AppMsg::GetValue { height, round, timeout, reply } => {
+                // TODO(round-0-timeout): On round 0 at startup, peers may still be wiring up and
+                // miss the streamed proposal, leading to Prevote(nil) and rebroadcast loops.
+                // Consider a small proposer grace (sleep until N-1 peers are connected or
+                // an env-configured delay) or increase initial TimeoutConfig for dev/testnets.
+               // NOTE: We can ignore the timeout as we are building the value right away.
+                // If we were let's say reaping as many txes from a mempool and executing them,
+                // then we would need to respect the timeout and stop at a certain point.
+
                 info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
+
+                // We need to ask the execution engine for a new value to
+                // propose. Then we send it back to consensus.
+                let latest_block = state.latest_block.expect("Head block hash is not set");
+                debug!("Requesting EL to build payload on top of head");
+                let execution_payload = execution_layer.generate_block(&latest_block).await?;
+                debug!("🌈 Got execution payload: {:?}", execution_payload);
+
+                // Store block in state and propagate to peers.
+                let bytes = Bytes::from(execution_payload.as_ssz_bytes());
+                debug!("🎁 block size: {:?}, height: {}", bytes.len(), height);
+
+                // Prepare block proposal.
+                let proposal: LocallyProposedValue<LoadContext> =
+                    state.propose_value(height, round, bytes.clone()).await?;
+
+                // When the node is not the proposer, store the block data,
+                // which will be passed to the execution client (EL) on commit.
+                state.store_undecided_proposal_data(bytes.clone()).await?;
+
+                // Send it to consensus
+                if reply.send(proposal.clone()).is_err() {
+                    error!(%height, %round, "Failed to send GetValue reply; channel closed");
+                }
+
+                // Now what's left to do is to break down the value to propose into parts,
+                // and send those parts over the network to our peers, for them to re-assemble the full value.
+                for stream_message in state.stream_proposal(proposal, bytes) {
+                    info!(%height, %round, "Streaming proposal part: {stream_message:?}");
+                    if let Err(e) = channels
+                        .network
+                        .send(NetworkMsg::PublishProposalPart(stream_message))
+                        .await
+                    {
+                        error!(%height, %round, "Failed to stream proposal part: {e}");
+                        return Err(e.into());
+                    }
+                }
+                debug!(%height, %round, "✅ Proposal sent");
+            }
+                /*
+                info!(%height, %round, ?timeout, "🟢🟢 Consensus is requesting a value to propose");
 
                 // Define an async task to generate the full proposal.
                 // All operations that can fail or take time are inside this block.
                 let get_proposal_task = async {
+                    let started = std::time::Instant::now();
                     let latest_block = state.latest_block.expect("Head block hash is not set");
 
                     // 1. Generate the block from the execution layer.
@@ -111,9 +162,40 @@ pub async fn run(
 
                     // 3. Store the associated block data.
                     state.store_undecided_proposal_data(bytes.clone()).await?;
+
+                    let elapsed = started.elapsed();
+                    debug!(?elapsed, "Built proposal and prepared bytes");
+
                     // Return both the proposal for the reply and the bytes for streaming.
                     eyre::Result::<_>::Ok((proposal, bytes))
                 };
+
+                // Allow bypassing the timeout (malaketh-layered behavior) while tuning.
+                let ignore_timeout = std::env::var("ULTRAMARINE_IGNORE_PROPOSE_TIMEOUT")
+                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+                    .unwrap_or(false);
+
+                if ignore_timeout {
+                    match get_proposal_task.await {
+                        Ok((proposal, bytes)) => {
+                            if reply.send(proposal.clone()).is_err() {
+                                error!("Failed to send GetValue reply; channel closed.");
+                                return Ok(());
+                            }
+                            for stream_message in state.stream_proposal(proposal, bytes) {
+                                if let Err(e) = channels.network.send(NetworkMsg::PublishProposalPart(stream_message)).await {
+                                    error!("Failed to stream proposal part: {}", e);
+                                    break;
+                                }
+                            }
+                            debug!(%height, %round, "✅ Proposal sent and streamed");
+                        }
+                        Err(e) => {
+                            error!("Failed to generate proposal: {}. Not replying; letting timeout drive prevote-nil.", e);
+                        }
+                    }
+                    continue;
+                }
 
                 // Race the proposal generation against the consensus timeout.
                 match tokio::time::timeout(timeout, get_proposal_task).await {
@@ -147,38 +229,20 @@ pub async fn run(
                     }
                     // Task failed internally before the timeout.
                     Ok(Err(e)) => {
-                        error!("Failed to generate proposal: {}. Proposing nil.", e);
-                        // Attempt to propose a nil value.
-                        if let Ok(nil_proposal) =
-                            state.propose_value(height, round, Bytes::new()).await
-                        {
-                            if reply.send(nil_proposal).is_err() {
-                                error!("Failed to send GetValue nil reply; channel closed.");
-                            }
-                        } else {
-                            error!(
-                                "Failed to create even a nil proposal. Letting consensus time out."
-                            );
-                        }
+                        // Do not fabricate a proposal. Let consensus handle propose timeout
+                        // and progress via prevote-nil.
+                        error!(
+                            "Failed to generate proposal: {}. Not replying; letting timeout drive prevote-nil.",
+                            e
+                        );
                     }
                     // Task took too long and timed out.
                     Err(_) => {
-                        info!("GetValue task timed out after {:?}. Proposing nil.", timeout);
-                        // Attempt to propose a nil value.
-                        if let Ok(nil_proposal) =
-                            state.propose_value(height, round, Bytes::new()).await
-                        {
-                            if reply.send(nil_proposal).is_err() {
-                                error!("Failed to send GetValue nil reply; channel closed.");
-                            }
-                        } else {
-                            error!(
-                                "Failed to create even a nil proposal. Letting consensus time out."
-                            );
-                        }
-                    }
+                        info!(?timeout, "GetValue task timed out; not replying; letting timeout drive prevote-nil.");
                 }
             }
+            }
+*/
             AppMsg::ExtendVote { reply, .. } => {
                 if reply.send(None).is_err() {
                     error!("🔴 Failed to send ExtendVote reply");
@@ -345,10 +409,25 @@ pub async fn run(
                     "🟢🟢 Consensus has decided on value"
                 );
 
-                let block_bytes = state
-                    .get_block_data(height, round)
-                    .await
-                    .expect("certificate should have associated block data");
+                let Some(block_bytes) = state.get_block_data(height, round).await else {
+                    let e = eyre!(
+                        "Missing block bytes for decided value at height {} round {}",
+                        height,
+                        round
+                    );
+                    error!(%e, "Cannot decode decided value: block bytes not found");
+                    return Err(e);
+                };
+
+                if block_bytes.is_empty() {
+                    let e = eyre!(
+                        "Empty block bytes for decided value at height {} round {}",
+                        height,
+                        round
+                    );
+                    error!(%e, "Cannot decode decided value: empty bytes");
+                    return Err(e);
+                }
 
                 debug!("🎁 block size: {:?}, height: {}", block_bytes.len(), height);
 
@@ -526,7 +605,9 @@ pub async fn run(
 
                 let raw_decided_value = decided_value.map(|decided_value| RawDecidedValue {
                     certificate: decided_value.certificate,
-                    value_bytes: ProtobufCodec.encode(&decided_value.value).unwrap(),
+                    value_bytes: ProtobufCodec
+                        .encode(&decided_value.value)
+                        .expect("Not correct value bytes"),
                 });
 
                 if reply.send(raw_decided_value).is_err() {

@@ -73,11 +73,23 @@ impl ExecutionClient {
     }
 
     pub async fn check_capabilities(&self) -> eyre::Result<()> {
-        let cap = self.engine.exchange_capabilities().await?;
-        if !cap.forkchoice_updated_v3 || !cap.get_payload_v3 || !cap.new_payload_v3 {
-            return Err(eyre::eyre!("Engine does not required methods!"))
+        match self.engine.exchange_capabilities().await {
+            Ok(cap) => {
+                if !cap.forkchoice_updated_v3 || !cap.get_payload_v3 || !cap.new_payload_v3 {
+                    tracing::error!(
+                        ?cap,
+                        "Execution client missing required Engine API capabilities"
+                    );
+                    return Err(eyre::eyre!("Engine does not required methods!"));
+                }
+                tracing::info!("Execution client capabilities verified: OK");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to exchange Engine API capabilities: {}", e);
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     pub async fn set_latest_forkchoice_state(
@@ -94,14 +106,27 @@ impl ExecutionClient {
 
         let ForkchoiceUpdated { payload_status, payload_id } =
             self.engine.forkchoice_updated(forkchoice_state, None).await?;
-        assert!(payload_id.is_none(), "Payload ID should be None!");
+        if payload_id.is_some() {
+            return Err(eyre::eyre!(
+                "engine_forkchoiceUpdatedV3 returned unexpected payloadId in a state update (no attributes)"
+            ));
+        }
 
-        debug!("➡️ payload_status: {:?}", payload_status);
+        debug!("➡️ payload_status (state update): {:?}", payload_status);
 
         match payload_status.status {
-            PayloadStatusEnum::Valid => Ok(payload_status
-                .latest_valid_hash
-                .expect("Engine API spec violation: VALID status must have a latestValidHash")),
+            PayloadStatusEnum::Valid => {
+                if payload_status.latest_valid_hash != Some(head_block_hash) {
+                    tracing::warn!(
+                        latest_valid_hash = ?payload_status.latest_valid_hash,
+                        head_block_hash = ?head_block_hash,
+                        "VALID status but latest_valid_hash does not match head"
+                    );
+                }
+                payload_status.latest_valid_hash.ok_or_else(|| {
+                    eyre::eyre!("Engine API spec violation: VALID status without latestValidHash")
+                })
+            }
             PayloadStatusEnum::Syncing if payload_status.latest_valid_hash.is_none() => {
                 // From the Engine API spec:
                 // 8. Client software MUST respond to this method call in the following way:
@@ -109,12 +134,22 @@ impl ExecutionClient {
                 //   * validationError: null}, payloadId: null} if forkchoiceState.headBlockHash
                 //     references an unknown payload or a payload that can't be validated because
                 //     requisite data for the validation is missing
+                tracing::warn!(
+                    head_block_hash = ?head_block_hash,
+                    "forkchoiceUpdated returned SYNCING with latest_valid_hash = None; EL not ready"
+                );
                 Err(eyre::eyre!(
                     "headBlockHash={:?} references an unknown payload or a payload that can't be validated",
                     head_block_hash
                 ))
             }
-            status => Err(eyre::eyre!("Invalid payload status: {}", status)),
+            status => {
+                tracing::error!(
+                    ?status,
+                    "forkchoiceUpdated state update returned non-VALID status"
+                );
+                Err(eyre::eyre!("Invalid payload status: {}", status))
+            }
         }
     }
 
@@ -162,14 +197,45 @@ impl ExecutionClient {
         let ForkchoiceUpdated { payload_status, payload_id } =
             self.engine.forkchoice_updated(forkchoice_state, Some(payload_attributes)).await?;
 
-        assert_eq!(payload_status.latest_valid_hash, Some(block_hash));
+        tracing::debug!(
+            status = ?payload_status.status,
+            latest_valid_hash = ?payload_status.latest_valid_hash,
+            has_payload_id = %payload_id.is_some(),
+            head = ?block_hash,
+            "forkchoiceUpdated (with attributes) response"
+        );
+
+        if payload_status.latest_valid_hash != Some(block_hash) {
+            tracing::error!(
+                latest_valid_hash = ?payload_status.latest_valid_hash,
+                head = ?block_hash,
+                "engine_forkchoiceUpdatedV3 returned mismatched latest_valid_hash"
+            );
+            return Err(eyre::eyre!(
+                "engine_forkchoiceUpdatedV3 returned latestValidHash={:?} not matching head={:?}",
+                payload_status.latest_valid_hash,
+                block_hash
+            ));
+        }
 
         match payload_status.status {
             PayloadStatusEnum::Valid => {
-                assert!(payload_id.is_some(), "Payload ID should be Some!");
-                let payload_id = payload_id.expect("Engine API spec violation: VALID status with payload attributes must have a payloadId");
+                let Some(payload_id) = payload_id else {
+                    tracing::error!("VALID status but payload_id is None after attributes");
+                    return Err(eyre::eyre!(
+                        "Engine API spec violation: VALID status with payload attributes must include payloadId"
+                    ));
+                };
                 // See how payload is constructed: https://github.com/ethereum/consensus-specs/blob/v1.1.5/specs/merge/validator.md#block-proposal
-                Ok(self.engine.get_payload(payload_id).await?)
+                let payload = self.engine.get_payload(payload_id).await?;
+                tracing::info!(
+                    block_hash = ?payload.payload_inner.payload_inner.block_hash,
+                    parent_hash = ?payload.payload_inner.payload_inner.parent_hash,
+                    block_number = payload.payload_inner.payload_inner.block_number,
+                    txs = payload.payload_inner.payload_inner.transactions.len(),
+                    "Received execution payload from EL"
+                );
+                Ok(payload)
             }
             // TODO: A production client must handle all possible statuses gracefully.
             //
@@ -180,7 +246,13 @@ impl ExecutionClient {
             // - `INVALID` / `INVALID_BLOCK_HASH`: This indicates a critical desynchronization. The
             //   Host must treat this as a fatal error for the round, halt consensus, and alert an
             //   operator.
-            status => Err(eyre::eyre!("Invalid payload status: {}", status)),
+            status => {
+                tracing::error!(
+                    ?status,
+                    "forkchoiceUpdated (with attributes) returned non-VALID status"
+                );
+                Err(eyre::eyre!("Invalid payload status: {}", status))
+            }
         }
     }
 
@@ -190,6 +262,12 @@ impl ExecutionClient {
         versioned_hashes: Vec<B256>,
     ) -> eyre::Result<PayloadStatus> {
         let parent_block_hash = execution_payload.payload_inner.payload_inner.parent_hash;
+        tracing::debug!(
+            parent = ?parent_block_hash,
+            block = ?execution_payload.payload_inner.payload_inner.block_hash,
+            number = execution_payload.payload_inner.payload_inner.block_number,
+            "Submitting new payload to EL"
+        );
         self.engine.new_payload(execution_payload, versioned_hashes, parent_block_hash).await
     }
 

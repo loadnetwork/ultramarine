@@ -17,14 +17,14 @@ use tokio::{
 
 use crate::tx::make_signed_eip1559_tx;
 
-const DEFAULT_SIGNER_PRIVATE_KEY: &str =
-    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
 #[derive(Parser, Debug, Clone, PartialEq)]
 pub struct SpamCmd {
     /// URL of the execution client's RPC endpoint
     #[clap(long, default_value = "http://127.0.0.1:8545")]
     rpc_url: Url,
+    /// Chain ID to use for signing transactions (if omitted, fetched from the node)
+    #[clap(long)]
+    chain_id: Option<u64>,
     /// Number of transactions to send (0 for no limit).
     #[clap(short, long, default_value = "0")]
     num_txs: u64,
@@ -34,11 +34,40 @@ pub struct SpamCmd {
     /// Time to run the spammer for in seconds (0 for no limit).
     #[clap(short, long, default_value = "0")]
     time: u64,
+    /// Spam EIP-4844 (blob) transactions instead of EIP-1559
+    #[clap(long, default_value = "false")]
+    blobs: bool,
+    /// Index of the signer to use
+    #[clap(long, default_value = "0")]
+    signer_index: usize,
 }
 
 impl SpamCmd {
     pub async fn run(&self) -> Result<()> {
-        let spammer = Spammer::new(self.rpc_url.clone(), self.num_txs, self.time, self.rate)?;
+        if self.blobs {
+            eprintln!(
+                "[warning] EIP-4844 blob transactions enabled. On Cancun (engine V3), non-proposer imports may fail without sidecar support; expect inconsistent behavior until Engine API V4 sidecar wiring is implemented."
+            );
+        }
+        // Determine chain id: use CLI override or fetch via eth_chainId
+        let chain_id = if let Some(id) = self.chain_id {
+            id
+        } else {
+            let client = RpcClient::new(self.rpc_url.clone());
+            let chain_id_hex: String = client.rpc_request("eth_chainId", json!([])).await?;
+            let hex = chain_id_hex.strip_prefix("0x").unwrap_or(&chain_id_hex);
+            u64::from_str_radix(hex, 16)?
+        };
+
+        let spammer = Spammer::new(
+            self.rpc_url.clone(),
+            chain_id,
+            self.num_txs,
+            self.time,
+            self.rate,
+            self.blobs,
+            self.signer_index,
+        )?;
         spammer.run().await
     }
 }
@@ -48,6 +77,8 @@ impl SpamCmd {
 pub struct Spammer {
     /// Client for Ethereum RPC node server.
     client: RpcClient,
+    /// Chain ID used for signing.
+    chain_id: u64,
     /// Ethereum transaction signer.
     signer: PrivateKeySigner,
     /// Maximum number of transactions to send (0 for no limit).
@@ -56,12 +87,32 @@ pub struct Spammer {
     max_time: u64,
     /// Maximum number of transactions to send per second.
     max_rate: u64,
+    /// Whether to send EIP-4844 blob transactions.
+    blobs: bool,
 }
 
 impl Spammer {
-    pub fn new(url: Url, max_num_txs: u64, max_time: u64, max_rate: u64) -> Result<Self> {
-        let signer: PrivateKeySigner = DEFAULT_SIGNER_PRIVATE_KEY.parse()?;
-        Ok(Self { client: RpcClient::new(url), signer, max_num_txs, max_time, max_rate })
+    pub fn new(
+        url: Url,
+        chain_id: u64,
+        max_num_txs: u64,
+        max_time: u64,
+        max_rate: u64,
+        blobs: bool,
+        signer_index: usize,
+    ) -> Result<Self> {
+        let signers = crate::commands::genesis::make_signers();
+        let signer =
+            signers.get(signer_index).ok_or_else(|| eyre::eyre!("Invalid signer index"))?.clone();
+        Ok(Self {
+            client: RpcClient::new(url),
+            chain_id,
+            signer,
+            max_num_txs,
+            max_time,
+            max_rate,
+            blobs,
+        })
     }
 
     pub async fn run(self) -> Result<()> {
@@ -131,7 +182,17 @@ impl Spammer {
 
                 // Create one transaction and sign it.
                 let to_address = Address::with_last_byte((txs_sent_total % 256) as u8);
-                let signed_tx = make_signed_eip1559_tx(&self.signer, nonce, to_address).await?;
+                let signed_tx = if self.blobs {
+                    crate::tx::make_signed_eip4844_tx(
+                        &self.signer,
+                        nonce,
+                        to_address,
+                        self.chain_id,
+                    )
+                    .await?
+                } else {
+                    make_signed_eip1559_tx(&self.signer, nonce, to_address, self.chain_id).await?
+                };
                 let tx_bytes = signed_tx.encoded_2718();
                 let tx_bytes_len = tx_bytes.len() as u64;
 

@@ -38,6 +38,12 @@ pub struct App {
     pub genesis_file: PathBuf,
     pub private_key_file: PathBuf,
     pub start_height: Option<Height>,
+
+    // Optional execution-layer configuration overrides
+    pub engine_http_url: Option<Url>,
+    pub engine_ipc_path: Option<PathBuf>,
+    pub eth1_rpc_url: Option<Url>,
+    pub jwt_path: Option<PathBuf>,
 }
 
 pub struct Handle {
@@ -166,12 +172,10 @@ impl Node for App {
         let mut state = State::new(genesis, ctx, signing_provider, address, start_height, store);
 
         // --- Initialize Execution Client ---
-        // TODO: The following logic for determining ports and paths is for local
-        // testing convenience. A production-ready implementation should remove this
-        // and rely solely on the loaded configuration. The logic for generating
-        // testnet configurations with unique ports should be moved to the
-        // `TestnetCmd` in the `cli` crate.
-        let engine_url: Url = {
+        // Development defaults: if Engine/Eth endpoints are not provided, derive them from
+        // the moniker (test-0/1/2) to match compose.yaml port mapping.
+        // Priority: CLI overrides (if set) > dev defaults (moniker mapping).
+        let default_engine_http: Url = {
             let engine_port = match self.config.moniker.as_str() {
                 "test-0" => 8551,
                 "test-1" => 18551,
@@ -180,8 +184,8 @@ impl Node for App {
             };
             Url::parse(&format!("http://localhost:{engine_port}"))?
         };
-        let jwt_path = PathBuf::from_str("./assets/jwtsecret")?;
-        let eth_url: Url = {
+
+        let default_eth_http: Url = {
             let eth_port = match self.config.moniker.as_str() {
                 "test-0" => 8545,
                 "test-1" => 18545,
@@ -191,20 +195,118 @@ impl Node for App {
             Url::parse(&format!("http://localhost:{eth_port}"))?
         };
 
-        let jwt_secret_bytes = std::fs::read(&jwt_path).map_err(|e| {
-            eyre::eyre!("Failed to read JWT secret from {}: {}", jwt_path.display(), e)
-        })?;
-        let jwt_secret: [u8; 32] = jwt_secret_bytes.try_into().map_err(|_| {
-            eyre::eyre!("JWT secret at {} must be exactly 32 bytes", jwt_path.display())
-        })?;
+        // Select Engine endpoint: IPC takes precedence over HTTP if provided.
+        let engine_endpoint = if let Some(ipc_path) = &self.engine_ipc_path {
+            config::EngineApiEndpoint::Ipc(ipc_path.clone())
+        } else {
+            let url = self.engine_http_url.clone().unwrap_or(default_engine_http);
+            config::EngineApiEndpoint::Http(url)
+        };
+        // Keep a human-friendly description for error messages after move
+        let engine_endpoint_desc = match &engine_endpoint {
+            config::EngineApiEndpoint::Http(url) => format!("Http({url})"),
+            config::EngineApiEndpoint::Ipc(path) => format!("Ipc({})", path.display()),
+        };
+
+        // Select Eth1 RPC endpoint
+        let eth_url: Url = self.eth1_rpc_url.clone().unwrap_or(default_eth_http);
+        let eth_url_str = eth_url.to_string();
+
+        // JWT handling: required only for HTTP Engine API. Skip reading a JWT for IPC.
+        let (jwt_secret, jwt_path_display): ([u8; 32], Option<String>) = match &engine_endpoint {
+            config::EngineApiEndpoint::Ipc(_) => {
+                // Placeholder; not used by IPC transport.
+                ([0u8; 32], None)
+            }
+            config::EngineApiEndpoint::Http(_) => {
+                let jwt_path = if let Some(ref p) = self.jwt_path {
+                    p.clone()
+                } else {
+                    PathBuf::from_str("./assets/jwtsecret")?
+                };
+
+                // Read JWT secret file. Accept raw 32 bytes or 64 hex chars (+optional newline).
+                let jwt_raw = std::fs::read(&jwt_path).map_err(|e| {
+                    eyre::eyre!("Failed to read JWT secret from {}: {}", jwt_path.display(), e)
+                })?;
+                let jwt_secret: [u8; 32] = if jwt_raw.len() == 32 {
+                    jwt_raw.as_slice().try_into().expect("slice length checked to be 32")
+                } else {
+                    let as_str = String::from_utf8_lossy(&jwt_raw);
+                    let hex = as_str.trim();
+                    let decoded = hex::decode(hex).map_err(|e| {
+                        eyre::eyre!(
+                            "JWT secret at {} must be 32 raw bytes or 64 hex chars: {}",
+                            jwt_path.display(),
+                            e
+                        )
+                    })?;
+                    decoded.as_slice().try_into().map_err(|_| {
+                        eyre::eyre!(
+                            "JWT secret at {} must decode to exactly 32 bytes (got {} bytes)",
+                            jwt_path.display(),
+                            decoded.len()
+                        )
+                    })?
+                };
+                (jwt_secret, Some(jwt_path.display().to_string()))
+            }
+        };
+
+        // Log selected endpoints (and JWT source if applicable) for easier diagnostics
+        match &jwt_path_display {
+            Some(jwt_path) => tracing::info!(
+                moniker = %self.config.moniker,
+                engine_endpoint = %engine_endpoint_desc,
+                eth_rpc = %eth_url_str,
+                jwt_path = %jwt_path,
+                "Execution client configured"
+            ),
+            None => tracing::info!(
+                moniker = %self.config.moniker,
+                engine_endpoint = %engine_endpoint_desc,
+                eth_rpc = %eth_url_str,
+                "Execution client configured (IPC, no JWT)"
+            ),
+        }
 
         let execution_config = ExecutionConfig {
-            engine_api_endpoint: config::EngineApiEndpoint::Http(engine_url),
+            engine_api_endpoint: engine_endpoint,
             eth1_rpc_url: eth_url,
             jwt_secret,
         };
 
         let execution_client = ExecutionClient::new(execution_config).await?;
+
+        // --- Fail‑fast preflight checks ---
+        // Validate Execution (Engine) API and Eth RPC connectivity before returning the handle.
+        // If anything is misconfigured (JWT, endpoint, ports), exit early with a clear error
+        // instead of letting the background task fail later and consensus limp along.
+
+        // 1) Engine API capabilities (auth + method availability)
+        if let Err(e) = execution_client.check_capabilities().await {
+            return Err(eyre::eyre!(
+                "Execution client capability check failed for Engine endpoint: {}. Error: {}",
+                engine_endpoint_desc,
+                e
+            ));
+        }
+
+        // 2) Eth RPC reachability and basic sanity (latest block must exist)
+        match execution_client
+            .eth()
+            .get_block_by_number(alloy_rpc_types_eth::BlockNumberOrTag::Latest, false)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(eyre::eyre!(
+                    "Eth RPC at {} returned no 'latest' block. Check genesis/chain is initialized.",
+                    eth_url_str
+                ))
+            }
+            Err(e) => return Err(eyre::eyre!("Failed to reach Eth RPC at {}: {}", eth_url_str, e)),
+        }
 
         let app_handle = tokio::spawn(async move {
             if let Err(e) = crate::app::run(&mut state, &mut channels, execution_client).await {

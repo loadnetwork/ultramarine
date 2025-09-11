@@ -95,7 +95,7 @@ if [ -z "$NODES_COUNT" ] || [ -z "$NODES_HOME" ]; then
 fi
 
 # Set defaults
-app_name=${app_name:-"malachitebft-eth-app"}
+app_name=${app_name:-"ultramarine"}
 profile=${profile:-false}
 debug=${debug:-false}
 lldb=${lldb:-false}
@@ -164,4 +164,3 @@ echo
 
 read -p "Press Enter to kill the tmux session... " quit
 tmux kill-session -t "$session"
-
