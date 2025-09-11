@@ -48,7 +48,14 @@ pub fn enable_ansi() -> bool {
 }
 
 /// Common prefixes of the crates targeted by the default log level.
-const TARGET_CRATES: &[&str] = &["informalsystems_malachitebft", "malachitebft_eth"];
+/// Use broad prefixes to cover all current and future Ultramarine crates.
+const TARGET_CRATES: &[&str] = &[
+    // Main crate and all subcrates (ultramarine_*).
+    "ultramarine",
+    "ultramarine_",
+    // Upstream Malachite engine crates
+    "informalsystems_malachitebft",
+];
 
 /// Build a tracing directive setting the log level for the
 /// crates to the given `log_level`.

@@ -11,21 +11,20 @@ use color_eyre::eyre;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
-    sync::Mutex,
 };
 
 use super::{JsonRpcRequest, JsonRpcResponse, Transport};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+// Align with HTTP transport defaults; block building or EL load can exceed 3s.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct IpcTransport {
     path: PathBuf,
-    connection: Mutex<Option<UnixStream>>,
 }
 
 impl IpcTransport {
     pub fn new(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf(), connection: Mutex::new(None) }
+        Self { path: path.as_ref().to_path_buf() }
     }
 
     async fn connect(&self) -> eyre::Result<UnixStream> {
@@ -38,34 +37,18 @@ impl IpcTransport {
 #[async_trait]
 impl Transport for IpcTransport {
     async fn send(&self, req: &JsonRpcRequest) -> eyre::Result<JsonRpcResponse> {
-        let mut conn_guard = self.connection.lock().await;
+        // Establish a fresh connection per request and half-close after write so the server
+        // can terminate its side, allowing us to read a single full JSON response to EOF.
+        let mut stream = self.connect().await?;
 
-        if conn_guard.is_none() {
-            *conn_guard = Some(self.connect().await?);
-        }
+        let req_bytes = serde_json::to_vec(req)?;
+        tokio::time::timeout(REQUEST_TIMEOUT, stream.write_all(&req_bytes)).await??;
+        // Signal end-of-request; many JSON-RPC IPC servers respond and then close.
+        tokio::time::timeout(REQUEST_TIMEOUT, stream.shutdown()).await??;
 
-        if let Some(stream) = conn_guard.as_mut() {
-            let req_bytes = serde_json::to_vec(req)?;
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(REQUEST_TIMEOUT, stream.read_to_end(&mut resp_bytes)).await??;
 
-            if let Err(e) = stream.write_all(&req_bytes).await {
-                // Connection is broken, reset it and retry next time.
-                *conn_guard = None;
-                return Err(e.into())
-            }
-
-            let mut resp_bytes = Vec::new();
-            let read_future = stream.read_to_end(&mut resp_bytes);
-
-            if let Err(e) = tokio::time::timeout(REQUEST_TIMEOUT, read_future).await? {
-                // Connection is broken, reset it and retry next time.
-                *conn_guard = None;
-                return Err(e.into())
-            }
-
-            serde_json::from_slice(&resp_bytes).map_err(|e| e.into())
-        } else {
-            // This should not happen, as we just created the connection.
-            Err(eyre::eyre!("Failed to get IPC connection"))
-        }
+        serde_json::from_slice(&resp_bytes).map_err(|e| e.into())
     }
 }

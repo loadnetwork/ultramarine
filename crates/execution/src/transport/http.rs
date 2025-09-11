@@ -9,7 +9,8 @@ use url::Url;
 use super::{JsonRpcRequest, JsonRpcResponse, Transport};
 use crate::engine_api::jwt::JwtProvider;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+// Engine API requests may occasionally take longer under load; use a more forgiving default.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct HttpTransport {
     client: Client,

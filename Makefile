@@ -419,3 +419,113 @@ l: lint ## Shortcut for lint.
 
 # Silence the help output itself.
 .SILENT: help
+
+# -----------------------------------------------------------------------------
+# Local testnet helpers (parity with malaketh-layered)
+
+.PHONY: all
+all: ## Build, generate genesis, start EL stack, wire peers, generate testnet, spawn nodes.
+	$(MAKE) build-debug
+	cargo run --bin ultramarine-utils -- genesis
+	@# Ensure JWT secret exists for Engine API auth; create a secure 32‑byte hex if missing
+	@if [ ! -f ./assets/jwtsecret ]; then \
+		mkdir -p ./assets; \
+		if command -v openssl >/dev/null 2>&1; then \
+			echo "Generating JWT secret (assets/jwtsecret)"; \
+			umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
+		else \
+			echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
+			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+		fi; \
+	fi
+	docker compose up -d
+	./scripts/add_peers.sh
+	cargo run --bin ultramarine -- testnet --nodes 3 --home nodes
+	@echo "👉 Grafana dashboard is expected at http://localhost:3000"
+	bash scripts/spawn.bash --nodes 3 --home nodes --app ultramarine --ignore-propose-timeout --no-build
+
+.PHONY: all-http
+all-http: all ## Alias of `all` for HTTP-based Engine/Eth endpoints.
+
+.PHONY: all-ipc
+all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nodes with Engine IPC.
+	$(MAKE) build-debug
+	cargo run --bin ultramarine-utils -- genesis
+	@if [ ! -f ./assets/jwtsecret ]; then \
+		mkdir -p ./assets; \
+		if command -v openssl >/dev/null 2>&1; then \
+			echo "Generating JWT secret (assets/jwtsecret)"; \
+			umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
+		else \
+			echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
+			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+		fi; \
+	fi
+	mkdir -p ipc/0 ipc/1 ipc/2
+	docker compose -f compose.ipc.yaml up -d
+	$(MAKE) wait-ipc
+	./scripts/add_peers.sh
+	cargo run --bin ultramarine -- testnet --nodes 3 --home nodes
+	@echo "👉 Grafana dashboard is expected at http://localhost:3000"
+	bash scripts/spawn.bash --nodes 3 --home nodes --app ultramarine --engine-ipc-base ./ipc --ignore-propose-timeout --no-build
+	# Note: In IPC mode, JWT is not required by Ultramarine (Engine IPC doesn’t use it).
+	# Eth JSON-RPC remains HTTP; Engine IPC is used only by Ultramarine.
+
+.PHONY: wait-ipc
+wait-ipc: ## Wait for Engine IPC sockets (./ipc/{0,1,2}/engine.ipc) to appear.
+	@echo "Waiting for Engine IPC sockets (timeout 60s per node)..."
+	@for i in 0 1 2; do \
+		f=./ipc/$$i/engine.ipc; d=$$(dirname $$f); mkdir -p "$$d"; \
+		for t in $$(seq 1 60); do \
+			if [ -S "$$f" ]; then echo "✓ $$f"; break; fi; \
+			sleep 1; \
+			if [ "$$t" -eq 60 ]; then echo "Timed out waiting for $$f"; exit 1; fi; \
+		done; \
+	done
+
+# -----------------------------------------------------------------------------
+# JWT Secret helpers
+
+.PHONY: jwt
+jwt: ## Generate a 32‑byte JWT secret at assets/jwtsecret (does not overwrite)
+	@mkdir -p ./assets
+	@if [ -f ./assets/jwtsecret ]; then \
+		echo "assets/jwtsecret already exists; use 'make jwt-force' to overwrite."; \
+	else \
+		if command -v openssl >/dev/null 2>&1; then \
+			echo "Generating JWT secret (assets/jwtsecret)"; \
+			umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
+		else \
+			echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
+			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+		fi; \
+		echo "✓ Wrote ./assets/jwtsecret"; \
+	fi
+
+.PHONY: jwt-force
+jwt-force: ## Force‑regenerate JWT secret at assets/jwtsecret (overwrites)
+	@mkdir -p ./assets
+	@if command -v openssl >/dev/null 2>&1; then \
+		echo "Generating JWT secret (assets/jwtsecret)"; \
+		umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
+	else \
+		echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
+		umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+	fi
+	@echo "✓ Wrote ./assets/jwtsecret"
+
+.PHONY: stop
+stop: ## Stop the docker-compose stack.
+	docker compose down
+
+.PHONY: clean-net
+clean-net: stop ## Clean local testnet data (genesis, nodes, EL data, monitoring data).
+	rm -rf ./assets/genesis.json
+	rm -rf ./nodes
+	rm -rf ./rethdata
+	rm -rf ./monitoring/data-grafana
+	rm -rf ./monitoring/data-prometheus
+
+.PHONY: spam
+spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
+	cargo run --bin ultramarine-utils -- spam --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545

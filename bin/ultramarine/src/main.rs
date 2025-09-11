@@ -24,6 +24,10 @@ use ultramarine_types::height::Height;
 fn main() -> Result<()> {
     color_eyre::install()?;
 
+    // Also forward panics to tracing so they show up alongside node logs.
+    // This supplements color-eyre's pretty panic output on stderr.
+    install_tracing_panic_hook();
+
     // Load command-line arguments and possible configuration file.
     let args = Args::new();
 
@@ -50,6 +54,33 @@ fn main() -> Result<()> {
         Commands::Testnet(cmd) => testnet(&args, cmd, logging),
         _ => unimplemented!(),
     }
+}
+
+fn install_tracing_panic_hook() {
+    use std::panic;
+
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let msg: &str = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "panic"
+        };
+
+        // Capture backtrace if enabled; force capture provides something even without env var.
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!(target = "panic", %location, message = %msg, backtrace = %format!("{bt}"), "panic occurred");
+
+        // Preserve existing behavior (color-eyre pretty report to stderr).
+        default_hook(info);
+    }));
 }
 
 fn start(args: &Args, cmd: &StartCmd, logging: config::LoggingConfig) -> Result<()> {
@@ -79,6 +110,10 @@ fn start(args: &Args, cmd: &StartCmd, logging: config::LoggingConfig) -> Result<
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: cmd.start_height.map(Height::new),
+        engine_http_url: cmd.engine_http_url.clone(),
+        engine_ipc_path: cmd.engine_ipc_path.clone(),
+        eth1_rpc_url: cmd.eth1_rpc_url.clone(),
+        jwt_path: cmd.jwt_path.clone(),
     };
 
     // Start the node
@@ -93,6 +128,10 @@ fn init(args: &Args, cmd: &InitCmd, logging: config::LoggingConfig) -> Result<()
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: Some(Height::new(1)), // We always start at height 1
+        engine_http_url: None,
+        engine_ipc_path: None,
+        eth1_rpc_url: None,
+        jwt_path: None,
     };
 
     cmd.run(
@@ -113,6 +152,10 @@ fn testnet(args: &Args, cmd: &TestnetCmd, logging: config::LoggingConfig) -> Res
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: Some(Height::new(1)), // We always start at height 1
+        engine_http_url: None,
+        engine_ipc_path: None,
+        eth1_rpc_url: None,
+        jwt_path: None,
     };
 
     cmd.run(&app, &args.get_home_dir()?, logging)
