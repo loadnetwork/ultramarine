@@ -3,7 +3,10 @@
 // The token is cached and regenerated periodically to ensure the `iat`
 // timestamp is always recent enough to be accepted by the execution client.
 #![allow(missing_docs)]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    fmt,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use color_eyre::eyre::Ok;
 use jsonwebtoken::{Header, encode};
@@ -76,6 +79,16 @@ impl JwtProvider {
         cache.replace(JwtCache { token: token.clone(), created_at: now });
 
         Ok(token)
+    }
+}
+
+impl fmt::Debug for JwtProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Do not expose key material; only indicate presence of cache.
+        f.debug_struct("JwtProvider")
+            .field("key", &"<redacted>")
+            .field("cache", &"<RwLock>")
+            .finish()
     }
 }
 

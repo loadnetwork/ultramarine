@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use async_trait::async_trait;
 use color_eyre::eyre;
@@ -31,6 +31,15 @@ impl HttpTransport {
     pub fn with_jwt(mut self, secret: [u8; 32]) -> Self {
         self.jwt_provider = Some(JwtProvider::new(secret));
         self
+    }
+}
+
+impl fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("url", &self.url)
+            .field("jwt_provider", &self.jwt_provider.as_ref().map(|_| "<present>"))
+            .finish()
     }
 }
 

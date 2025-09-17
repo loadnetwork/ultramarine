@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 use std::{
+    fmt,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,6 +36,15 @@ pub struct ExecutionClient {
     pub engine: Arc<dyn EngineApi>,
     /// The standard Eth1 JSON-RPC client, used for things like fetching logs.
     pub eth: Arc<dyn EthRpc>,
+}
+
+impl fmt::Debug for ExecutionClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExecutionClient")
+            .field("engine", &"<dyn EngineApi>")
+            .field("eth", &"<dyn EthRpc>")
+            .finish()
+    }
 }
 
 impl ExecutionClient {

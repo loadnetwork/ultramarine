@@ -94,7 +94,7 @@ pub async fn run(
             }
             // At some point, we may end up being the proposer for that round, and the consensus
             // engine will then ask us for a value to propose to the other validators.
-            AppMsg::GetValue { height, round, timeout, reply } => {
+            AppMsg::GetValue { height, round, timeout: _, reply } => {
                 // TODO(round-0-timeout): On round 0 at startup, peers may still be wiring up and
                 // miss the streamed proposal, leading to Prevote(nil) and rebroadcast loops.
                 // Consider a small proposer grace (sleep until N-1 peers are connected or
@@ -278,7 +278,7 @@ pub async fn run(
                 }
             }
 
-            AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
+            AppMsg::RestreamProposal { height: _, round: _, valid_round: _, address: _, value_id: _ } => {
                 error!("🔴 RestreamProposal not implemented");
                 /*
                 info!(%height, %round, %value_id, %address, "Received request to restream proposal");
@@ -401,7 +401,7 @@ pub async fn run(
             // providing it with a commit certificate which contains the ID of the value
             // that was decided on as well as the set of commits for that value,
             // ie. the precommits together with their (aggregated) signatures.
-            AppMsg::Decided { certificate, extensions, reply } => {
+            AppMsg::Decided { certificate, extensions: _, reply } => {
                 let height = certificate.height;
                 let round = certificate.round;
                 info!(

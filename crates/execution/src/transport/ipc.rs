@@ -31,7 +31,7 @@ use std::{
 use async_trait::async_trait;
 use color_eyre::eyre;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 use tracing::info;
@@ -41,6 +41,7 @@ use super::{JsonRpcRequest, JsonRpcResponse, Transport};
 // Align with HTTP transport defaults; block building or EL load can exceed 3s.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug)]
 pub struct IpcTransport {
     path: PathBuf,
 }

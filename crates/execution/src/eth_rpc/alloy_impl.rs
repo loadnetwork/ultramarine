@@ -4,6 +4,8 @@
 //! responsible for all non-Engine API calls, such as fetching logs, checking
 //! sync status, or getting blocks.
 #![allow(missing_docs)]
+use std::fmt;
+
 use alloy_network::Ethereum;
 use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_client::RpcClient;
@@ -39,6 +41,12 @@ impl AlloyEthRpc {
         //    `RpcClient` and provides the user-friendly methods.
         let provider = RootProvider::new(client);
         Self { provider }
+    }
+}
+
+impl fmt::Debug for AlloyEthRpc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AlloyEthRpc").field("provider", &"<alloy RootProvider>").finish()
     }
 }
 
