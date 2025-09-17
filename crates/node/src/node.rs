@@ -197,7 +197,12 @@ impl Node for App {
 
         // Select Engine endpoint: IPC takes precedence over HTTP if provided.
         let engine_endpoint = if let Some(ipc_path) = &self.engine_ipc_path {
-            config::EngineApiEndpoint::Ipc(ipc_path.clone())
+            let absolute_ipc_path = if ipc_path.is_absolute() {
+                ipc_path.clone()
+            } else {
+                std::env::current_dir()?.join(ipc_path)
+            };
+            config::EngineApiEndpoint::Ipc(absolute_ipc_path)
         } else {
             let url = self.engine_http_url.clone().unwrap_or(default_engine_http);
             config::EngineApiEndpoint::Http(url)

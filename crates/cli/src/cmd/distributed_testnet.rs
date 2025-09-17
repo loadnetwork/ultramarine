@@ -143,7 +143,7 @@ where
     let genesis = crate::new::generate_genesis(node, public_keys, deterministic);
 
     for (i, private_key) in private_keys.iter().enumerate().take(nodes) {
-        let node_home_dir = home_dir.join((i % machines.len()).to_string()).join(i.to_string());
+        let node_home_dir = home_dir.join(i.to_string());
 
         info!(
             id = %i,
@@ -206,7 +206,6 @@ fn generate_distributed_config(
     transport: TransportProtocol,
     logging: LoggingConfig,
 ) -> Config {
-    let machine = machines[index % machines.len()].clone();
     let consensus_port = CONSENSUS_BASE_PORT + (index / machines.len());
     let mempool_port = MEMPOOL_BASE_PORT + (index / machines.len());
     let metrics_port = METRICS_BASE_PORT + (index / machines.len());
@@ -217,7 +216,7 @@ fn generate_distributed_config(
             timeouts: TimeoutConfig::default(),
             p2p: P2pConfig {
                 protocol: PubSubProtocol::default(),
-                listen_addr: transport.multiaddr(&machine, consensus_port),
+                listen_addr: transport.multiaddr("0.0.0.0", consensus_port),
                 persistent_peers: if enable_discovery {
                     let peers =
                         ((index.saturating_sub(bootstrap_set_size))..index).collect::<Vec<_>>();
@@ -262,7 +261,7 @@ fn generate_distributed_config(
         mempool: MempoolConfig {
             p2p: P2pConfig {
                 protocol: PubSubProtocol::default(),
-                listen_addr: transport.multiaddr(&machine, mempool_port),
+                listen_addr: transport.multiaddr("0.0.0.0", mempool_port),
                 persistent_peers: vec![],
                 discovery: DiscoveryConfig {
                     enabled: false,
@@ -285,7 +284,7 @@ fn generate_distributed_config(
         },
         metrics: MetricsConfig {
             enabled: true,
-            listen_addr: format!("{machine}:{metrics_port}").parse().unwrap(),
+            listen_addr: format!("0.0.0.0:{metrics_port}").parse().unwrap(),
         },
         logging,
         runtime,

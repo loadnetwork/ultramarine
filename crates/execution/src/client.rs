@@ -9,7 +9,7 @@ use alloy_rpc_types_engine::{
     PayloadStatusEnum,
 };
 use color_eyre::eyre;
-use tracing::debug;
+use tracing::{debug, info};
 use ultramarine_types::{
     address::Address,
     aliases::{B256, BlockHash},
@@ -43,23 +43,28 @@ impl ExecutionClient {
     /// This function is async because it needs to establish a connection
     /// to the execution node to initialize the EthRpc1 client.
     pub async fn new(config: ExecutionConfig) -> eyre::Result<Self> {
+        info!("Creating new ExecutionClient");
         // 1. Craete the Engine API client using its specific endpoint from the config.
         let engine_client: Arc<dyn EngineApi> = match config.engine_api_endpoint {
             EngineApiEndpoint::Http(url) => {
+                info!("Using HTTP transport for Engine API");
                 let transport = HttpTransport::new(url).with_jwt(config.jwt_secret);
                 Arc::new(EngineApiClient::new(transport))
             }
             EngineApiEndpoint::Ipc(path) => {
+                info!("Using IPC transport for Engine API");
                 let transport = IpcTransport::new(path);
                 Arc::new(EngineApiClient::new(transport))
             }
         };
 
         // 2. Craete the standard Eth1 RPC client using its dedicated HTTP Url from the config.
+        info!("Creating Eth1 RPC client");
         let eth_client: Arc<dyn EthRpc> = {
             let rpc_client = AlloyEthRpc::new(config.eth1_rpc_url);
             Arc::new(rpc_client)
         };
+        info!("ExecutionClient created");
 
         Ok(Self { engine: engine_client, eth: eth_client })
     }
@@ -237,15 +242,25 @@ impl ExecutionClient {
                 );
                 Ok(payload)
             }
-            // TODO: A production client must handle all possible statuses gracefully.
+            // TODO: A production-ready client must handle all possible statuses gracefully.
+            // This is critical for node stability and to prevent incorrect block proposals.
             //
             // In a Tendermint-based system (like Malachite), the Host application
             // would need to handle these statuses from the execution client:
-            // - `SYNCING`: The Host should pause or skip the block proposal for this round and wait
-            //   for the execution client to catch up.
-            // - `INVALID` / `INVALID_BLOCK_HASH`: This indicates a critical desynchronization. The
-            //   Host must treat this as a fatal error for the round, halt consensus, and alert an
-            //   operator.
+            // - `SYNCING`: The EL is catching up. The Host should pause or skip block proposals for
+            //   this round and wait for the EL to become synced. This prevents proposing on a
+            //   non-canonical chain.
+            // - `ACCEPTED`: The payload is valid but the EL is not yet treating it as the canonical
+            //   head (e.g., due to a re-org). The Host should likely wait and not send a PRECOMMIT
+            //   for the current proposal until the status becomes VALID in a subsequent
+            //   forkchoiceUpdated call.
+            // - `INVALID` / `INVALID_BLOCK_HASH`: This indicates a critical desynchronization or a
+            //   bug. The Host must treat this as a fatal error for the round, halt consensus to
+            //   avoid propagating a bad block, and alert an operator immediately.
+            //
+            // Additionally, the CRITICAL TODO for `suggested_fee_recipient` in this function
+            // must be addressed before any real-world use to ensure transaction fees are
+            // collected.
             status => {
                 tracing::error!(
                     ?status,

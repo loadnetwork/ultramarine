@@ -58,6 +58,25 @@ make docker-build       # local image
 make release-dry        # cargo publish dry-run
 ```
 
+### Local Testnet
+
+The Makefile includes targets for running a complete local testnet with either an HTTP or IPC based Engine API.
+
+```bash
+# Run a local testnet with Engine API over HTTP
+make all
+
+# Run a local testnet with Engine API over IPC (Docker)
+make all-ipc
+
+# Stop the testnet (use stop-ipc for the IPC variant)
+make stop
+
+# Clean the testnet data (use clean-net-ipc for the IPC variant)
+make clean-net
+```
+For more details on the testnet setup, see `docs/DEV_WORKFLOW.md`.
+
 ### Before a PR
 
 ```bash

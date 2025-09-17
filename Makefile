@@ -438,8 +438,10 @@ all: ## Build, generate genesis, start EL stack, wire peers, generate testnet, s
 			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
 		fi; \
 	fi
-	docker compose up -d
+	LOCAL_UID=$(shell id -u) LOCAL_GID=$(shell id -g) docker compose up -d
 	./scripts/add_peers.sh
+	# Generate distributed testnet configs suitable for Docker networking (service DNS names).
+	
 	cargo run --bin ultramarine -- testnet --nodes 3 --home nodes
 	@echo "👉 Grafana dashboard is expected at http://localhost:3000"
 	bash scripts/spawn.bash --nodes 3 --home nodes --app ultramarine --ignore-propose-timeout --no-build
@@ -461,13 +463,15 @@ all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nod
 			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
 		fi; \
 	fi
-	mkdir -p ipc/0 ipc/1 ipc/2
-	docker compose -f compose.ipc.yaml up -d
-	$(MAKE) wait-ipc
+	# Generate distributed CL configs for Docker networking (service DNS names) over TCP.
+	cargo run --bin ultramarine -- distributed-testnet --nodes 3 --home nodes --machines 10.250.42.10,10.250.42.11,10.250.42.12 --transport tcp
+	# Build ultramarine image once and bring up EL (reth) and CL via Compose.
+	docker build -t ultramarine:local .
+	LOCAL_UID=$(shell id -u) LOCAL_GID=$(shell id -g) docker compose -f compose.ipc.yaml up -d
 	./scripts/add_peers.sh
-	cargo run --bin ultramarine -- testnet --nodes 3 --home nodes
 	@echo "👉 Grafana dashboard is expected at http://localhost:3000"
-	bash scripts/spawn.bash --nodes 3 --home nodes --app ultramarine --engine-ipc-base ./ipc --ignore-propose-timeout --no-build
+	@echo "Ultramarine containers (ultramarine0/1/2) are started via Compose and use Engine IPC via Docker volumes."
+	@echo "Logs: docker logs -f ultramarine0|1|2"
 	# Note: In IPC mode, JWT is not required by Ultramarine (Engine IPC doesn’t use it).
 	# Eth JSON-RPC remains HTTP; Engine IPC is used only by Ultramarine.
 
@@ -518,6 +522,10 @@ jwt-force: ## Force‑regenerate JWT secret at assets/jwtsecret (overwrites)
 stop: ## Stop the docker-compose stack.
 	docker compose down
 
+.PHONY: stop-ipc
+stop-ipc: ## Stop the docker-compose stack for IPC.
+	docker compose -f compose.ipc.yaml down -v
+
 .PHONY: clean-net
 clean-net: stop ## Clean local testnet data (genesis, nodes, EL data, monitoring data).
 	rm -rf ./assets/genesis.json
@@ -525,7 +533,18 @@ clean-net: stop ## Clean local testnet data (genesis, nodes, EL data, monitoring
 	rm -rf ./rethdata
 	rm -rf ./monitoring/data-grafana
 	rm -rf ./monitoring/data-prometheus
+	rm -rf ./ipc
+
+.PHONY: clean-net-ipc
+clean-net-ipc: stop-ipc ## Clean local testnet data for IPC.
+	rm -rf ./assets/genesis.json
+	rm -rf ./nodes
+	rm -rf ./rethdata
+	rm -rf ./monitoring/data-grafana
+	rm -rf ./monitoring/data-prometheus
+	rm -rf ./ipc
 
 .PHONY: spam
 spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 	cargo run --bin ultramarine-utils -- spam --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545
+m --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545

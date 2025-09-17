@@ -7,7 +7,10 @@ use malachitebft_app_channel::app::Node;
 use tracing::{info, trace};
 use ultramarine_cli::{
     args::{Args, Commands},
-    cmd::{init::InitCmd, start::StartCmd, testnet::TestnetCmd},
+    cmd::{
+        distributed_testnet::DistributedTestnetCmd, init::InitCmd, start::StartCmd,
+        testnet::TestnetCmd,
+    },
     config, logging, runtime,
 };
 use ultramarine_node::node::App;
@@ -52,7 +55,7 @@ fn main() -> Result<()> {
         Commands::Start(cmd) => start(&args, cmd, logging),
         Commands::Init(cmd) => init(&args, cmd, logging),
         Commands::Testnet(cmd) => testnet(&args, cmd, logging),
-        _ => unimplemented!(),
+        Commands::DistributedTestnet(cmd) => distributed_testnet(&args, cmd, logging),
     }
 }
 
@@ -160,4 +163,26 @@ fn testnet(args: &Args, cmd: &TestnetCmd, logging: config::LoggingConfig) -> Res
 
     cmd.run(&app, &args.get_home_dir()?, logging)
         .map_err(|error| eyre!("Failed to run testnet command {:?}", error))
+}
+
+fn distributed_testnet(
+    args: &Args,
+    cmd: &DistributedTestnetCmd,
+    logging: config::LoggingConfig,
+) -> Result<()> {
+    // Setup the application
+    let app = App {
+        config: Default::default(), // There is not existing configuration yet
+        home_dir: args.get_home_dir()?,
+        genesis_file: args.get_genesis_file_path()?,
+        private_key_file: args.get_priv_validator_key_file_path()?,
+        start_height: Some(Height::new(1)), // We always start at height 1
+        engine_http_url: None,
+        engine_ipc_path: None,
+        eth1_rpc_url: None,
+        jwt_path: None,
+    };
+
+    cmd.run(&app, &args.get_home_dir()?, logging)
+        .map_err(|error| eyre!("Failed to run distributed testnet command {:?}", error))
 }

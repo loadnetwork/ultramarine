@@ -1,0 +1,26 @@
+# Reduce Docker build context size drastically
+
+# VCS and build outputs
+.git/
+target/
+dist/
+
+# Local data and generated runtime state
+nodes/
+rethdata/
+monitoring/data-grafana/
+monitoring/data-prometheus/
+ipc/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets and runtime artefacts
+assets/jwtsecret
+*.log
+*.ipc
+
+# Keep only source and manifests relevant for building the image
+# (Docker will include everything else not ignored)
