@@ -34,7 +34,7 @@ impl Address {
         self.0.into()
     }
 
-    /// Creates a new [`FixedBytes`] where all bytes are set to `byte`.
+    /// Creates a new address where all bytes are set to `byte`.
     #[inline]
     pub const fn repeat_byte(byte: u8) -> Self {
         Self(AlloyAddress::repeat_byte(byte))
