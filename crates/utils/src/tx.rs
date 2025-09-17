@@ -1,6 +1,6 @@
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEip4844, TxEnvelope};
 use alloy_network::TxSigner;
-use alloy_primitives::{Address, Bytes, U256, b256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, b256};
 use alloy_signer_local::PrivateKeySigner;
 use color_eyre::eyre::Result;
 
@@ -11,7 +11,7 @@ pub(crate) fn make_eip1559_tx(nonce: u64, to: Address, chain_id: u64) -> TxEip15
         max_priority_fee_per_gas: 1_000_000_000, // 1 gwei
         max_fee_per_gas: 20_000_000_000,         // 20 gwei
         gas_limit: 21_000,
-        to: to.into(),
+        to: TxKind::Call(to),
         value: U256::from(100_000_000_000_000_u128), // 0.0001 ETH
         input: Bytes::default(),
         access_list: Default::default(),
@@ -37,7 +37,7 @@ pub(crate) fn make_eip4844_tx(nonce: u64, to: Address, chain_id: u64) -> TxEip48
         max_priority_fee_per_gas: 1_000_000_000, // 1 gwei
         max_fee_per_gas: 20_000_000_000,         // 20 gwei
         gas_limit: 21_000,
-        to: to.into(),
+        to,
         value: U256::from(100_000_000_000_000_u128), // 0.0001 ETH
         input: Bytes::default(),
         access_list: Default::default(),

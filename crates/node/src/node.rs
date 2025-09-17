@@ -31,7 +31,7 @@ use ultramarine_types::{
 use url::Url;
 
 /// Main application struct implementing the consensus node functionality
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct App {
     pub config: Config,
     pub home_dir: PathBuf,
@@ -50,6 +50,12 @@ pub struct Handle {
     pub app: JoinHandle<()>,
     pub engine: EngineHandle,
     pub tx_event: TxEvent<LoadContext>,
+}
+
+impl std::fmt::Debug for Handle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handle").field("app", &self.app).finish_non_exhaustive()
+    }
 }
 
 #[async_trait]

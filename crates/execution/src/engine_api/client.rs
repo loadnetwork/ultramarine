@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use alloy_rpc_types_engine::{
     ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated,
@@ -44,6 +44,12 @@ impl EngineApiClient {
             resp.result.ok_or_else(|| eyre::eyre!("Missing result field in JSON-RPC response"))?;
 
         Ok(serde_json::from_value(res)?)
+    }
+}
+
+impl fmt::Debug for EngineApiClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EngineApiClient").field("transport", &"<dyn Transport>").finish()
     }
 }
 

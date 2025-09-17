@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use url::Url;
 
 /// Defines the endpoint for the Engine API, which can be HTTP or IPC.
+#[derive(Debug, Clone)]
 pub enum EngineApiEndpoint {
     Http(Url),
     Ipc(PathBuf),
@@ -12,6 +13,7 @@ pub enum EngineApiEndpoint {
 /// Holds all necessary parameters to connect to an execution node.
 /// This new config supports separate endpoints for the Engine API and the
 /// standard Eth1 RPC, which is a more robust and flexible pattern.
+#[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     /// The endpoint for the Engine API (can be HTTP or IPC).
     pub engine_api_endpoint: EngineApiEndpoint,
