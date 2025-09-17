@@ -95,6 +95,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies (protoc)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev pkg-config protobuf-compiler
+
       - name: clippy
         run: make clippy
         env:
@@ -120,6 +123,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies (protoc)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev pkg-config protobuf-compiler
+
       - name: test
         run: make test
 
@@ -141,8 +147,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies (protoc)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev pkg-config protobuf-compiler
+
       - name: Build docs (public API)
-        run: make doc
+        run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -172,6 +181,9 @@ jobs:
           components: rustfmt, clippy, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies (protoc)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev pkg-config protobuf-compiler
 
       # Install tooling separately so the action parses them as separate crates
       - name: Install nextest
