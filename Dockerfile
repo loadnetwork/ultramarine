@@ -22,7 +22,10 @@ LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 # Should be kept in sync with `.github/workflows` and `Makefile` tooling.
 RUN apt-get update && \
   apt-get -y upgrade && \
-  apt-get install -y --no-install-recommends libclang-dev pkg-config && \
+  apt-get install -y --no-install-recommends \
+    libclang-dev \
+    pkg-config \
+    protobuf-compiler && \
   rm -rf /var/lib/apt/lists/*
 
 # Planner stage: generate a cargo-chef recipe.  Exclude git metadata and
@@ -47,6 +50,9 @@ ENV RUSTFLAGS=${RUSTFLAGS}
 # Extra Cargo features (e.g. `--features jemalloc`).
 ARG FEATURES=""
 ENV FEATURES=${FEATURES}
+
+# Ensure a recent Rust toolchain compatible with workspace dependencies (e.g. redb >=3 requires 1.89).
+RUN rustup toolchain install 1.89.0 && rustup default 1.89.0
 
 # Cook the dependency graph.  This runs `cargo build` on a synthetic
 # workspace defined by the recipe, caching compiled dependencies in

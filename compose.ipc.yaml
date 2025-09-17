@@ -3,16 +3,17 @@ services:
     image: ghcr.io/paradigmxyz/reth:v1.4.1
     container_name: reth0
     volumes:
-      - ./rethdata/0:/data/reth/execution-data
-      - ./assets:/root/assets/
-      - ./ipc/0:/root/ipc
+      - reth0_data:/data/reth/execution-data
+      - reth0_logs:/root/logs # Added logs volume
+      - ./assets:/assets
+      - ipc0:/ipc
     ports:
       - "8545:8545"
       - "9100:9001"
-      - "30303:30303"
-      - "30303:30303/udp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -20,7 +21,8 @@ services:
       - "-vvvvv"
       - "-d"
       - "--datadir=/data/reth/execution-data"
-      - "--chain=/root/assets/genesis.json"
+      - --log.file.directory=/root/logs
+      - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
       - "--http.addr=0.0.0.0"
@@ -29,24 +31,30 @@ services:
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=30303"
       - "--port=30303"
-      # Engine API over IPC (if supported by EL)
       - "--auth-ipc"
-      - "--auth-ipc.path=/root/ipc/engine.ipc"
+      - "--auth-ipc.path=/ipc/engine.ipc"
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/engine.ipc"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 2s
 
   reth1:
     image: ghcr.io/paradigmxyz/reth:v1.4.1
     container_name: reth1
     volumes:
-      - ./rethdata/1:/data/reth/execution-data
-      - ./assets:/root/assets/
-      - ./ipc/1:/root/ipc
+      - reth1_data:/data/reth/execution-data
+      - reth0_logs:/root/logs
+      - ./assets:/assets
+      - ipc1:/ipc
     ports:
       - "18545:8545"
       - "9101:9001"
-      - "40303:40303"
-      - "40303:40303/udp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -54,7 +62,8 @@ services:
       - "-vvvvv"
       - "-d"
       - "--datadir=/data/reth/execution-data"
-      - "--chain=/root/assets/genesis.json"
+      - "--log.file.directory=/root/logs" # Added log directory specification
+      - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
       - "--http.addr=0.0.0.0"
@@ -64,22 +73,29 @@ services:
       - "--discovery.port=40303"
       - "--port=40303"
       - "--auth-ipc"
-      - "--auth-ipc.path=/root/ipc/engine.ipc"
+      - "--auth-ipc.path=/ipc/engine.ipc"
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/engine.ipc"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 2s
 
   reth2:
     image: ghcr.io/paradigmxyz/reth:v1.4.1
     container_name: reth2
     volumes:
-      - ./rethdata/2:/data/reth/execution-data
-      - ./assets:/root/assets/
-      - ./ipc/2:/root/ipc
+      - reth2_data:/data/reth/execution-data
+      - reth2_logs:/root/logs # Added logs volume
+      - ./assets:/assets
+      - ipc2:/ipc
     ports:
       - "28545:8545"
       - "9102:9001"
-      - "50303:50303"
-      - "50303:50303/udp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -87,7 +103,8 @@ services:
       - "-vvvvv"
       - "-d"
       - "--datadir=/data/reth/execution-data"
-      - "--chain=/root/assets/genesis.json"
+      - "--log.file.directory=/root/logs" # Added log directory specification
+      - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
       - "--http.addr=0.0.0.0"
@@ -97,7 +114,80 @@ services:
       - "--discovery.port=50303"
       - "--port=50303"
       - "--auth-ipc"
-      - "--auth-ipc.path=/root/ipc/engine.ipc"
+      - "--auth-ipc.path=/ipc/engine.ipc"
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/engine.ipc"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 2s
+
+  # ---------------------------------------------------------------------------
+  # Ultramarine (Consensus) nodes using Engine IPC inside Docker
+  # Each ultramarine instance mounts its node home under /nodes/N, the matching
+  # IPC directory under /ipc, and waits for both the config file and the
+  # /ipc/engine.ipc socket before starting. Eth1 JSON-RPC is overridden to the
+  # respective rethX service inside the Docker network.
+
+  ultramarine0:
+    image: ultramarine:local
+    container_name: ultramarine0
+    depends_on:
+      reth0:
+        condition: service_healthy
+    volumes:
+      - ./nodes/0:/nodes/0
+      - ipc0:/ipc
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      ultra_net:
+        ipv4_address: 10.250.42.10
+    command:
+      - start
+      - --home=/nodes/0
+      - --engine-ipc-path=/ipc/engine.ipc
+      - --eth1-rpc-url=http://reth0:8545
+
+  ultramarine1:
+    image: ultramarine:local
+    container_name: ultramarine1
+    depends_on:
+      reth1:
+        condition: service_healthy
+    volumes:
+      - ./nodes/1:/nodes/1
+      - ipc1:/ipc
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      ultra_net:
+        ipv4_address: 10.250.42.11
+    command:
+      - start
+      - --home=/nodes/1
+      - --engine-ipc-path=/ipc/engine.ipc
+      - --eth1-rpc-url=http://reth1:8545
+
+  ultramarine2:
+    image: ultramarine:local
+    container_name: ultramarine2
+    depends_on:
+      reth2:
+        condition: service_healthy
+    volumes:
+      - ./nodes/2:/nodes/2
+      - ipc2:/ipc
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      ultra_net:
+        ipv4_address: 10.250.42.12
+    command:
+      - start
+      - --home=/nodes/2
+      - --engine-ipc-path=/ipc/engine.ipc
+      - --eth1-rpc-url=http://reth2:8545
 
   prometheus:
     image: prom/prometheus
@@ -105,22 +195,54 @@ services:
       - 127.0.0.1:9090:9090
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - ./monitoring/data-prometheus:/prometheus
+      - prometheus_data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
 
   grafana:
     image: grafana/grafana-oss
-    user: "501"
+    user: "${LOCAL_UID}"
     ports:
       - 127.0.0.1:3000:3000
     volumes:
-      - ./monitoring/data-grafana:/var/lib/grafana
+      - grafana_data:/var/lib/grafana
       - ./monitoring/config-grafana/provisioning:/etc/grafana/provisioning
       - ./monitoring/config-grafana/grafana.ini:/etc/grafana/grafana.ini
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
     environment:
       GF_LOG_LEVEL: info
       GF_AUTH_ANONYMOUS_ENABLED: true
       GF_AUTH_BASIC_ENABLED: false
+
+volumes:
+  # IPC volumes for Engine API communication
+  ipc0:
+  ipc1:
+  ipc2:
+
+  # Reth data volumes
+  reth0_data:
+  reth1_data:
+  reth2_data:
+
+  # Reth logs volumes (added to fix permission issue)
+  reth0_logs:
+  reth1_logs:
+  reth2_logs:
+
+  # Monitoring volumes
+  prometheus_data:
+  grafana_data:
+
+networks:
+  ultra_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.250.42.0/24

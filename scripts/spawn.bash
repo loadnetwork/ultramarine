@@ -103,6 +103,7 @@ for NODE in $(seq 0 $((NODES_COUNT - 1))); do
             exit 1
         fi
         echo "[Node $NODE] Found Engine IPC socket. Launching node..."
+        sleep 2
     fi
 
     cargo run --bin $APP_BINARY -q -- "${NODE_ARGS[@]}" > "$NODES_HOME/$NODE/logs/node.log" 2>&1 &

@@ -4,7 +4,7 @@ services:
     container_name: reth0
     volumes:
       - ./rethdata/0:/data/reth/execution-data
-      - ./assets:/root/assets/
+      - ./assets:/assets
     ports:
       - "8545:8545"
       - "8551:8551"
@@ -20,7 +20,7 @@ services:
       - "-vvvvv"
       - "-d"
       - "--datadir=/data/reth/execution-data"
-      - "--chain=/root/assets/genesis.json"
+      - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
       - "--http.addr=0.0.0.0"
@@ -28,7 +28,7 @@ services:
       - "--http.api=admin,net,eth,web3,debug,txpool,trace"
       - "--authrpc.addr=0.0.0.0"
       - "--authrpc.port=8551"
-      - "--authrpc.jwtsecret=/root/assets/jwtsecret"
+      - "--authrpc.jwtsecret=/assets/jwtsecret"
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=30303"
       - "--port=30303"
@@ -45,7 +45,7 @@ services:
     container_name: reth1
     volumes:
       - ./rethdata/1:/data/reth/execution-data
-      - ./assets:/root/assets/
+      - ./assets:/assets
     ports:
       - "18545:8545"
       - "18551:8551"
@@ -61,7 +61,7 @@ services:
       - "-vvvvv"
       - "-d"
       - "--datadir=/data/reth/execution-data"
-      - "--chain=/root/assets/genesis.json"
+      - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
       - "--http.addr=0.0.0.0"
@@ -69,7 +69,7 @@ services:
       - "--http.api=admin,net,eth,web3,debug,txpool,trace"
       - "--authrpc.addr=0.0.0.0"
       - "--authrpc.port=8551"
-      - "--authrpc.jwtsecret=/root/assets/jwtsecret"
+      - "--authrpc.jwtsecret=/assets/jwtsecret"
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=40303"
       - "--port=40303"
@@ -86,7 +86,7 @@ services:
     container_name: reth2
     volumes:
       - ./rethdata/2:/data/reth/execution-data
-      - ./assets:/root/assets/
+      - ./assets:/assets
     ports:
       - "28545:8545"
       - "28551:8551"
@@ -102,7 +102,7 @@ services:
       - "-vvvvv"
       - "-d"
       - "--datadir=/data/reth/execution-data"
-      - "--chain=/root/assets/genesis.json"
+      - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
       - "--http.addr=0.0.0.0"
@@ -110,7 +110,7 @@ services:
       - "--http.api=admin,net,eth,web3,debug,txpool,trace"
       - "--authrpc.addr=0.0.0.0"
       - "--authrpc.port=8551"
-      - "--authrpc.jwtsecret=/root/assets/jwtsecret"
+      - "--authrpc.jwtsecret=/assets/jwtsecret"
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=50303"
       - "--port=50303"
@@ -142,9 +142,8 @@ services:
   #      - "--storage.tsdb.no-lockfile"
   grafana:
     image: grafana/grafana-oss
-    # if you are running as root then set it to 0
-    # else find the right id with the id -u command
-    user: '501'
+    # Run as the invoking user to keep permissions consistent
+    user: "${LOCAL_UID}"
     ports:
       - 127.0.0.1:3000:3000
     volumes:

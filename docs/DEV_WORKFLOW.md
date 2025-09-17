@@ -25,47 +25,39 @@ This guide shows how to develop, run, test, and observe an Ultramarine local net
 
 ## Quick Start: Local Testnet
 
-End‑to‑end, single command:
+This repository includes `make` targets to quickly stand up a complete local testnet using Docker Compose.
 
-```
+### HTTP Variant (Default)
+
+This setup uses the standard HTTP transport for the Engine API.
+
+**Start the testnet:**
+```bash
 make all
 ```
 
-What it does:
-- Build Ultramarine (debug)
-- Generate genesis (`ultramarine-utils genesis` -> `./assets/genesis.json`)
-- Bring up Docker stack (3x reth, Prometheus, Grafana)
-- Wire EL peers (`scripts/add_peers.sh`)
-- Generate 3 node configs (`ultramarine testnet --nodes 3 --home nodes`)
-- Spawn 3 Ultramarine nodes via tmux (`scripts/spawn.bash`)
+This command will:
+- Build Ultramarine (debug).
+- Generate a genesis file.
+- Bring up a Docker stack with 3 Reth nodes, Prometheus, and Grafana.
+- Wire the EL peers.
+- Generate configurations for 3 Ultramarine nodes.
+- Spawn the 3 Ultramarine nodes in `tmux` sessions.
 
-Stop the stack:
+### IPC Variant
 
-```
-make stop
-```
+This setup uses the more performant IPC (Unix sockets) transport for the Engine API.
 
-Clean local chain data and monitoring:
-
-```
-make clean-net
-
-### IPC Variant (Engine over IPC)
-
-Some ELs support Engine API over IPC. For experimentation, an IPC-oriented compose file is included.
-
-Run an IPC-based testnet:
-
-```
+**Start the testnet:**
+```bash
 make all-ipc
 ```
+This command performs the same steps as `make all`, but uses `compose.ipc.yaml` to configure the Docker containers for IPC communication.
 
-Notes:
-- This brings up `compose.ipc.yaml`, mounting `./ipc/{0,1,2}` into containers and setting IPC paths.
-- Nodes are spawned with `--engine-ipc-path ./ipc/<index>/engine.ipc`. JWT is not required for IPC.
-- Eth JSON-RPC remains HTTP for tooling; Engine IPC is used only by Ultramarine.
-- Reth’s Engine IPC support may vary; HTTP remains the default and most portable path.
-```
+### Stopping and Cleaning
+
+- **Stop the stack:** `make stop` (for HTTP) or `make stop-ipc` (for IPC).
+- **Clean all data:** `make clean-net` (for HTTP) or `make clean-net-ipc` (for IPC).
 
 ## Core Flow (How It Works)
 
