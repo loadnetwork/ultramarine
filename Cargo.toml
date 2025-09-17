@@ -20,7 +20,7 @@ exclude = ["benches/", "tests/", "testdata/"]
 homepage = "https://github.com/loadnetwork/ultramarine"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/loadnetwork/ultramarine"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.lints.clippy]
 all = "warn"
