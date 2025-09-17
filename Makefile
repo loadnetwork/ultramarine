@@ -435,7 +435,7 @@ all: ## Build, generate genesis, start EL stack, wire peers, generate testnet, s
 			umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
 		else \
 			echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
-			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%%02x"' > ./assets/jwtsecret; \
 		fi; \
 	fi
 	LOCAL_UID=$(shell id -u) LOCAL_GID=$(shell id -g) docker compose up -d
@@ -460,7 +460,7 @@ all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nod
 			umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
 		else \
 			echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
-			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%%02x"' > ./assets/jwtsecret; \
 		fi; \
 	fi
 	# Generate distributed CL configs for Docker networking (service DNS names) over TCP.
@@ -501,7 +501,7 @@ jwt: ## Generate a 32‑byte JWT secret at assets/jwtsecret (does not overwrite)
 			umask 077 && openssl rand -hex 32 > ./assets/jwtsecret; \
 		else \
 			echo "OpenSSL not found; generating JWT secret via dd/hexdump"; \
-			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' > ./assets/jwtsecret; \
+			umask 077 && dd if=/dev/urandom bs=32 count=1 2>/dev/null | hexdump -v -e '/1 "%%02x"' > ./assets/jwtsecret; \
 		fi; \
 		echo "✓ Wrote ./assets/jwtsecret"; \
 	fi
@@ -547,4 +547,3 @@ clean-net-ipc: stop-ipc ## Clean local testnet data for IPC.
 .PHONY: spam
 spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 	cargo run --bin ultramarine-utils -- spam --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545
-m --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545
