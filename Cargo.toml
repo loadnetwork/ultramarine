@@ -46,7 +46,7 @@ ultramarine-node = { path = "crates/node" }
 ultramarine-types = { path = "crates/types" }
 # eth types
 
-alloy-consensus = { version = "1.0.23", default-features = false }
+alloy-consensus = { version = "1.0.30", default-features = false }
 alloy-eips = "1.0.23"
 alloy-genesis = "1.0.23"
 alloy-network = "1.0.23"
