@@ -1,0 +1,40 @@
+[package]
+name = "ultramarine-blob-engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ultramarine-types = { path = "../types" }
+
+# Cryptography - KZG verification
+c-kzg.workspace = true
+
+# Storage backend
+rocksdb = "0.22"
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+bincode = "1.3"
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3.8"

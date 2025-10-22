@@ -29,6 +29,15 @@ message SyncedValue {
     CommitCertificate certificate = 2;
 }
 
+// Encodes full execution payload bytes and blob sidecars for state sync.
+// Stored inside Value.extensions so we can piggyback on existing sync RPCs
+// without modifying Malachite's RawDecidedValue type.
+message SyncedValueExtensions {
+    uint32 version = 1;
+    bytes execution_payload_ssz = 2;
+    repeated BlobSidecar blob_sidecars = 3;
+}
+
 message CommitSignature {
     // TODO: Add flag (no vote, nil, value?)
     Address validator_address = 1;

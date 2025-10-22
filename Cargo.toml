@@ -2,13 +2,14 @@
 resolver = "2"
 
 members = [
-    "bin/ultramarine",
-    "crates/cli",
-    "crates/consensus",
-    "crates/execution",
-    "crates/node",
-    "crates/types",
-    "crates/utils",
+  "bin/ultramarine",
+  "crates/blob_engine",
+  "crates/cli",
+  "crates/consensus",
+  "crates/execution",
+  "crates/node",
+  "crates/types",
+  "crates/utils",
 ]
 default-members = ["bin/ultramarine", "crates/utils"]
 
@@ -40,6 +41,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 [workspace.dependencies]
 ultramarine-cli = { path = "crates/cli" }
 # ultramarine dependencies
+ultramarine-blob-engine = { path = "crates/blob_engine" }
 ultramarine-consensus = { path = "crates/consensus" }
 ultramarine-execution = { path = "crates/execution" }
 ultramarine-node = { path = "crates/node" }
@@ -66,6 +68,7 @@ alloy-signer = { version = "1.0.23" }
 alloy-signer-local = { version = "1.0.23", features = ["keystore", "mnemonic"] }
 alloy-transport-http = { version = "1.0.23", features = ["jwt-auth"] }
 
+ethereum_hashing = "0.7.0"
 ethereum_ssz = "0.9.0"
 
 color-eyre = "0.6.5"
@@ -76,14 +79,19 @@ async-trait = "0.1.85"
 axum = "0.8.4"
 bytes = { version = "1.10.1", default-features = false }
 bytesize = "2.0.1"
+c-kzg = { version = "2.1.0", default-features = false }
 chrono = "0.4.38"
 clap = "4.5.44"
 config = { version = "0.15.3", features = ["toml"], default-features = false }
 derive-where = "1.6.0"
 directories = "6.0.0"
 ethereum_serde_utils = "0.8.0"
+fixed_bytes = { git = "https://github.com/sigp/lighthouse.git", package = "fixed_bytes", rev = "v8.0.0-rc.1" }
 hex = { version = "0.4.3", features = ["serde"] }
 itertools = "0.14.0"
+merkle_proof = { git = "https://github.com/sigp/lighthouse.git", package = "merkle_proof", rev = "v8.0.0-rc.1" }
+tree_hash = "0.10.0"
+tree_hash_derive = "0.10.0"
 itf = "0.4.0"
 jsonwebtoken = "9"
 prost = "0.13"
@@ -94,6 +102,8 @@ redb = "3.0.0"
 reqwest = { version = "0.12", features = ["json"] }
 serde = "1.0.219"
 serde_json = "1.0.142"
+safe_arith = { git = "https://github.com/sigp/lighthouse.git", package = "safe_arith", rev = "v7.1.0" }
+sha2 = "0.10.8"
 sha3 = "0.10.8"
 signature = "2.2.0"
 thiserror = { version = "2.0.14", default-features = false }
@@ -102,6 +112,7 @@ tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 url = "2"
+getrandom = { version = "0.2.14", features = ["std"] }
 
 [workspace.dependencies.malachitebft-app]
 package = "informalsystems-malachitebft-app"

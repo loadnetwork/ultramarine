@@ -8,7 +8,7 @@ use malachitebft_app_channel::app::types::{
     codec::Codec,
     core::{CommitCertificate, Round},
 };
-use malachitebft_proto::{Error as ProtoError, Protobuf};
+use malachitebft_proto::Error as ProtoError;
 use prost::Message;
 use redb::{ReadableDatabase, ReadableTable};
 use thiserror::Error;
@@ -103,7 +103,8 @@ impl Db {
             value.and_then(|value| {
                 let bytes = value.value();
                 read_bytes = bytes.len() as u64;
-                Value::from_bytes(&bytes).ok()
+                // Deserialize using Protobuf trait
+                ProtobufCodec.decode(Bytes::copy_from_slice(&bytes)).ok()
             })
         };
 
@@ -136,9 +137,10 @@ impl Db {
 
         {
             let mut values = tx.open_table(DECIDED_VALUES_TABLE)?;
-            let values_bytes = decided_value.value.to_bytes()?.to_vec();
+            // Serialize using Protobuf trait via ProtobufCodec
+            let values_bytes = ProtobufCodec.encode(&decided_value.value)?;
             write_bytes += values_bytes.len() as u64;
-            values.insert(height, values_bytes)?;
+            values.insert(height, values_bytes.to_vec())?;
         }
 
         {

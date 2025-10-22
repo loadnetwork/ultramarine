@@ -16,13 +16,16 @@ use malachitebft_app_channel::{
 };
 use ssz::{Decode, Encode};
 use tracing::{debug, error, info};
+use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::{State, decode_value};
 use ultramarine_execution::client::ExecutionClient;
 use ultramarine_types::{
     aliases::{Block, BlockHash},
+    blob::BlobsBundle,
     codec::proto::ProtobufCodec,
     context::LoadContext,
     engine_api::ExecutionBlock,
+    sync::SyncedValueExtensions,
 };
 
 pub async fn run(
@@ -105,20 +108,29 @@ pub async fn run(
 
                 info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
 
-                // We need to ask the execution engine for a new value to
-                // propose. Then we send it back to consensus.
+                // Phase 3 Integration: Request execution payload WITH blobs
                 let latest_block = state.latest_block.expect("Head block hash is not set");
-                debug!("Requesting EL to build payload on top of head");
-                let execution_payload = execution_layer.generate_block(&latest_block).await?;
-                debug!("🌈 Got execution payload: {:?}", execution_payload);
+                debug!("Requesting EL to build payload with blobs on top of head");
+
+                // Call generate_block_with_blobs() instead of generate_block()
+                let (execution_payload, blobs_bundle) = execution_layer
+                    .generate_block_with_blobs(&latest_block)
+                    .await?;
+
+                // Log blob information
+                let blob_count = blobs_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
+                debug!(
+                    "🌈 Got execution payload with {} blobs",
+                    blob_count
+                );
 
                 // Store block in state and propagate to peers.
                 let bytes = Bytes::from(execution_payload.as_ssz_bytes());
-                debug!("🎁 block size: {:?}, height: {}", bytes.len(), height);
+                debug!("🎁 block size: {:?}, height: {}, blobs: {}", bytes.len(), height, blob_count);
 
-                // Prepare block proposal.
+                // Prepare block proposal using new method that creates proper metadata
                 let proposal: LocallyProposedValue<LoadContext> =
-                    state.propose_value(height, round, bytes.clone()).await?;
+                    state.propose_value_with_blobs(height, round, bytes.clone(), &execution_payload, blobs_bundle.as_ref()).await?;
 
                 // When the node is not the proposer, store the block data,
                 // which will be passed to the execution client (EL) on commit.
@@ -131,7 +143,8 @@ pub async fn run(
 
                 // Now what's left to do is to break down the value to propose into parts,
                 // and send those parts over the network to our peers, for them to re-assemble the full value.
-                for stream_message in state.stream_proposal(proposal, bytes) {
+                // Phase 3: Stream with blobs!
+                for stream_message in state.stream_proposal(proposal, bytes, blobs_bundle) {
                     info!(%height, %round, "Streaming proposal part: {stream_message:?}");
                     if let Err(e) = channels
                         .network
@@ -467,6 +480,62 @@ pub async fn run(
 
                 let versioned_hashes: Vec<BlockHash> =
                     block.body.blob_versioned_hashes_iter().copied().collect();
+
+                // PHASE 5: Validate blob availability before import
+                // Ensure blobs exist in blob_engine before finalizing block
+                if !versioned_hashes.is_empty() {
+                    debug!(
+                        "Validating availability of {} blobs for height {}",
+                        versioned_hashes.len(),
+                        height
+                    );
+
+                    let blobs = state.blob_engine().get_for_import(height).await
+                        .map_err(|e| eyre!("Failed to retrieve blobs for import at height {}: {}", height, e))?;
+
+                    // Verify blob count matches versioned hashes
+                    if blobs.len() != versioned_hashes.len() {
+                        let e = eyre!(
+                            "Blob count mismatch at height {}: blob_engine has {} blobs, but block expects {}",
+                            height,
+                            blobs.len(),
+                            versioned_hashes.len()
+                        );
+                        error!(%e, "Cannot import block: blob availability check failed");
+                        return Err(e);
+                    }
+
+                    // LIGHTHOUSE PARITY: Recompute versioned hashes from stored commitments
+                    // and verify they match the payload hashes (defense-in-depth)
+                    // See: lighthouse/beacon_node/execution_layer/src/engine_api/versioned_hashes.rs
+                    use sha2::{Digest, Sha256};
+                    let computed_hashes: Vec<BlockHash> = blobs.iter()
+                        .map(|sidecar| {
+                            // Hash the KZG commitment: SHA256(commitment)[0] = 0x01
+                            let mut hash = Sha256::digest(sidecar.kzg_commitment.as_bytes());
+                            hash[0] = 0x01; // VERSIONED_HASH_VERSION_KZG
+                            BlockHash::from_slice(&hash)
+                        })
+                        .collect();
+
+                    // Verify computed hashes match payload hashes
+                    if computed_hashes != versioned_hashes {
+                        let e = eyre!(
+                            "Versioned hash mismatch at height {}: \
+                            computed from stored commitments != hashes in execution payload. \
+                            This indicates either blob data corruption or a malicious proposal.",
+                            height
+                        );
+                        error!(%e, "Cannot import block: versioned hash verification failed");
+                        return Err(e);
+                    }
+
+                    info!(
+                        "✅ Verified {} blobs available and versioned hashes match for height {}",
+                        blobs.len(),
+                        height
+                    );
+                }
 
                 let payload_status =
                     execution_layer.notify_new_block(execution_payload, versioned_hashes).await?;
