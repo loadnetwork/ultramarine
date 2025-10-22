@@ -13,6 +13,7 @@ use malachitebft_app_channel::app::{
 };
 use rand::{CryptoRng, RngCore};
 use tokio::task::JoinHandle;
+use ultramarine_blob_engine::{BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
 use ultramarine_cli::metrics;
 use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
 use ultramarine_execution::{
@@ -174,8 +175,14 @@ impl Node for App {
         }
 
         let store = Store::open(self.get_home_dir().join("store.db"), metrics)?;
+
+        // Initialize blob engine for EIP-4844 blob storage and KZG verification
+        let blob_store = RocksDbBlobStore::open(self.get_home_dir().join("blob_store.db"))?;
+        let blob_engine = BlobEngineImpl::new(blob_store)?;
+
         let start_height = self.start_height.unwrap_or_default();
-        let mut state = State::new(genesis, ctx, signing_provider, address, start_height, store);
+        let mut state =
+            State::new(genesis, ctx, signing_provider, address, start_height, store, blob_engine);
 
         // --- Initialize Execution Client ---
         // Development defaults: if Engine/Eth endpoints are not provided, derive them from

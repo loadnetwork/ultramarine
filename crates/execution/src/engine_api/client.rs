@@ -10,6 +10,8 @@ use color_eyre::eyre;
 use serde::{Serialize, de::DeserializeOwned};
 use ultramarine_types::{
     aliases::{B256, BlockHash},
+    // Phase 1b: Import BlobsBundle for get_payload_with_blobs()
+    blob::BlobsBundle,
     engine_api::JsonExecutionPayloadV3,
 };
 
@@ -73,6 +75,43 @@ impl EngineApi for EngineApiClient {
         let envelope: ExecutionPayloadEnvelopeV3 =
             self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await?;
         Ok(envelope.execution_payload)
+    }
+
+    async fn get_payload_with_blobs(
+        &self,
+        payload_id: PayloadId,
+    ) -> eyre::Result<(ExecutionPayloadV3, Option<BlobsBundle>)> {
+        // Call getPayloadV3 and receive the full envelope with blob bundle
+        let envelope: ExecutionPayloadEnvelopeV3 =
+            self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await?;
+
+        // Extract execution payload
+        let payload = envelope.execution_payload;
+
+        // Convert Alloy's BlobsBundleV1 to our BlobsBundle type
+        //
+        // The blob bundle might be empty if:
+        // 1. No blob transactions were included in the block
+        // 2. The execution layer doesn't support blobs (pre-Deneb)
+        //
+        // We check if the bundle is empty and return None in that case.
+        let blob_bundle = if envelope.blobs_bundle.blobs.is_empty() {
+            None
+        } else {
+            // Convert from Alloy's BlobsBundleV1 to our BlobsBundle
+            let bundle = BlobsBundle::try_from(envelope.blobs_bundle).map_err(|e| {
+                eyre::eyre!("Failed to convert blob bundle from Engine API response: {}", e)
+            })?;
+
+            // Validate the bundle structure before returning
+            bundle
+                .validate()
+                .map_err(|e| eyre::eyre!("Invalid blob bundle from execution layer: {}", e))?;
+
+            Some(bundle)
+        };
+
+        Ok((payload, blob_bundle))
     }
 
     async fn new_payload(

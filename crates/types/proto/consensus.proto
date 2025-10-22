@@ -6,9 +6,44 @@ message Address {
     bytes value = 1;
 }
 
+// Phase 2: EIP-4844 blob sidecar integration
+// Lightweight execution payload header for consensus voting
+message ExecutionPayloadHeader {
+    bytes block_hash = 1;           // 32 bytes
+    bytes parent_hash = 2;          // 32 bytes
+    bytes state_root = 3;           // 32 bytes
+    bytes receipts_root = 4;        // 32 bytes
+    bytes logs_bloom = 5;           // 256 bytes
+    uint64 block_number = 6;
+    uint64 gas_limit = 7;
+    uint64 gas_used = 8;
+    uint64 timestamp = 9;
+    bytes base_fee_per_gas = 10;   // U256 as bytes
+    uint64 blob_gas_used = 11;
+    uint64 excess_blob_gas = 12;
+    bytes prev_randao = 13;         // 32 bytes
+    bytes fee_recipient = 14;       // 20 bytes
+}
+
+// KZG commitment (48 bytes)
+message KzgCommitment {
+    bytes data = 1;  // 48 bytes
+}
+
+// Phase 2: Lightweight value metadata (~2KB)
+// Contains only essential info for consensus voting
+message ValueMetadata {
+    ExecutionPayloadHeader execution_payload_header = 1;
+    repeated KzgCommitment blob_kzg_commitments = 2;
+    uint32 blob_count = 3;
+    uint32 total_blob_bytes = 4;
+}
+
+// Phase 2: Value now contains metadata instead of full payload
 message Value {
     uint64 value = 1;
-    bytes extensions = 2;
+    ValueMetadata metadata = 2;
+    bytes extensions = 3;  // DEPRECATED: kept for backward compatibility
 }
 
 message ValueId {
@@ -52,7 +87,8 @@ message ProposalPart {
     oneof part {
         ProposalInit init = 1;
         ProposalData data = 2;
-        ProposalFin fin = 3;
+        BlobSidecar blob_sidecar = 3;  // Phase 3: EIP-4844 blob sidecar
+        ProposalFin fin = 4;
     }
 }
 
@@ -64,6 +100,14 @@ message ProposalInit {
 
 message ProposalData {
     bytes bytes = 1;
+}
+
+// Phase 3: Blob sidecar for streaming blobs separately from execution payload
+message BlobSidecar {
+    uint32 index = 1;              // Blob index (0-5 for Deneb, 0-8 for Electra)
+    bytes blob = 2;                // Blob data (131,072 bytes)
+    bytes kzg_commitment = 3;      // KZG commitment (48 bytes)
+    bytes kzg_proof = 4;           // KZG proof (48 bytes)
 }
 
 message ProposalFin {

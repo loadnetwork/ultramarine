@@ -2,7 +2,7 @@
 //! A regular application would have mempool implemented, a proper database and input methods like
 //! RPC.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
 use color_eyre::eyre;
@@ -18,17 +18,21 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha3::Digest;
 use tokio::time::Instant;
 use tracing::{debug, error, info};
+use ultramarine_blob_engine::{BlobEngine, BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
 use ultramarine_types::{
     address::Address,
+    // Phase 3: Import blob types for streaming
+    blob::BlobsBundle,
     codec::proto::ProtobufCodec,
     context::LoadContext,
-    engine_api::ExecutionBlock,
+    engine_api::{ExecutionBlock, ExecutionPayloadHeader},
     genesis::Genesis,
     height::Height,
-    proposal_part::{ProposalData, ProposalFin, ProposalInit, ProposalPart},
+    proposal_part::{BlobSidecar, ProposalData, ProposalFin, ProposalInit, ProposalPart},
     signing::Ed25519Provider,
     validator_set::ValidatorSet,
     value::Value,
+    value_metadata::ValueMetadata,
 };
 
 use crate::{
@@ -45,7 +49,13 @@ const CHUNK_SIZE: usize = 128 * 1024; // 128 KiB
 
 /// Represents the internal state of the application node
 /// Contains information about current height, round, proposals and blocks
-pub struct State {
+///
+/// Generic over `BlobEngine` to allow different blob storage backends.
+/// Defaults to `BlobEngineImpl<RocksDbBlobStore>` for production use.
+pub struct State<E = BlobEngineImpl<RocksDbBlobStore>>
+where
+    E: BlobEngine,
+{
     #[allow(dead_code)]
     ctx: LoadContext,
     genesis: Genesis,
@@ -56,6 +66,7 @@ pub struct State {
     streams_map: PartStreamsMap,
     #[allow(dead_code)]
     rng: StdRng,
+    blob_engine: E,
 
     pub current_height: Height,
     pub current_round: Round,
@@ -63,6 +74,10 @@ pub struct State {
     pub peers: HashSet<PeerId>,
 
     pub latest_block: Option<ExecutionBlock>,
+
+    // Track rounds with blobs for cleanup
+    // Key: height, Value: set of rounds that have blobs
+    blob_rounds: HashMap<Height, HashSet<i64>>,
 
     // For stats
     pub txs_count: u64,
@@ -94,8 +109,16 @@ fn seed_from_address(address: &Address) -> u64 {
     })
 }
 
-impl State {
+impl<E> State<E>
+where
+    E: BlobEngine,
+{
     /// Creates a new State instance with the given validator address and starting height
+    ///
+    /// # Arguments
+    ///
+    /// * `blob_engine` - The blob engine for verification and storage
+    /// * Other parameters remain the same
     pub fn new(
         genesis: Genesis,
         ctx: LoadContext,
@@ -103,6 +126,7 @@ impl State {
         address: Address,
         height: Height,
         store: Store,
+        blob_engine: E,
     ) -> Self {
         Self {
             genesis,
@@ -116,9 +140,11 @@ impl State {
             stream_nonce: 0,
             streams_map: PartStreamsMap::new(),
             rng: StdRng::seed_from_u64(seed_from_address(&address)),
+            blob_engine,
             peers: HashSet::new(),
 
             latest_block: None,
+            blob_rounds: HashMap::new(),
             txs_count: 0,
             chain_bytes: 0,
             start_time: Instant::now(),
@@ -128,6 +154,11 @@ impl State {
     /// Returns the earliest height available in the state
     pub async fn get_earliest_height(&self) -> Height {
         self.store.min_decided_value_height().await.unwrap_or_default()
+    }
+
+    /// Returns a reference to the blob engine for blob operations
+    pub fn blob_engine(&self) -> &E {
+        &self.blob_engine
     }
 
     /// Processes and adds a new proposal to the state if it's valid
@@ -170,8 +201,25 @@ impl State {
             return Ok(None);
         }
 
-        // Re-assemble the proposal from its parts
-        let (value, data) = assemble_value_from_parts(parts);
+        // Re-assemble the proposal from its parts with KZG verification and storage
+        let (value, data, has_blobs) = match self.assemble_and_store_blobs(parts.clone()).await {
+            Ok((value, data, has_blobs)) => (value, data, has_blobs),
+            Err(e) => {
+                error!(
+                    height = %self.current_height,
+                    round = %self.current_round,
+                    error = %e,
+                    "Received proposal with invalid blob KZG proofs or storage failure, rejecting"
+                );
+                return Ok(None);
+            }
+        };
+
+        // Track blob rounds for cleanup
+        if has_blobs {
+            let round_i64 = parts.round.as_i64();
+            self.blob_rounds.entry(parts.height).or_insert_with(HashSet::new).insert(round_i64);
+        }
 
         // Log first 32 bytes of proposal data and total size
         if data.len() >= 32 {
@@ -193,6 +241,69 @@ impl State {
     pub async fn store_undecided_proposal_data(&mut self, data: Bytes) -> eyre::Result<()> {
         self.store
             .store_undecided_block_data(self.current_height, self.current_round, data)
+            .await
+            .map_err(|e| eyre::Report::new(e))
+    }
+
+    pub async fn store_synced_value(
+        &mut self,
+        height: Height,
+        round: Round,
+        proposer: Address,
+        mut value: Value,
+        execution_payload_ssz: Bytes,
+        blob_sidecars: Vec<BlobSidecar>,
+    ) -> eyre::Result<ProposedValue<LoadContext>> {
+        #[allow(deprecated)]
+        {
+            value.extensions = Bytes::new();
+        }
+
+        let proposed_value = ProposedValue {
+            height,
+            round,
+            valid_round: Round::Nil,
+            proposer,
+            value,
+            validity: Validity::Valid,
+        };
+
+        self.store
+            .store_undecided_proposal(proposed_value.clone())
+            .await
+            .map_err(|e| eyre::Report::new(e))?;
+
+        self.store
+            .store_undecided_block_data(height, round, execution_payload_ssz)
+            .await
+            .map_err(|e| eyre::Report::new(e))?;
+
+        if !blob_sidecars.is_empty() {
+            let round_i64 = round.as_i64();
+            self.blob_engine
+                .verify_and_store(height, round_i64, &blob_sidecars)
+                .await
+                .map_err(|e| eyre::Report::new(e))?;
+            self.blob_engine
+                .mark_decided(height, round_i64)
+                .await
+                .map_err(|e| eyre::Report::new(e))?;
+            self.blob_rounds
+                .entry(height)
+                .or_insert_with(HashSet::new)
+                .insert(round_i64);
+        }
+
+        Ok(proposed_value)
+    }
+
+    pub async fn get_undecided_proposal(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
+        self.store
+            .get_undecided_proposal(height, round)
             .await
             .map_err(|e| eyre::Report::new(e))
     }
@@ -238,6 +349,26 @@ impl State {
 
         self.store.store_decided_value(&certificate, proposal.value).await?;
 
+        // Mark blobs as decided in blob engine
+        // CRITICAL: This MUST succeed to maintain data availability guarantee.
+        // If blob promotion fails, we cannot finalize the block because the execution layer
+        // would be unable to retrieve blobs for import, breaking the DA layer.
+        let round_i64 = certificate.round.as_i64();
+        self.blob_engine.mark_decided(certificate.height, round_i64).await.map_err(|e| {
+            error!(
+                height = %certificate.height,
+                round = %certificate.round,
+                error = %e,
+                "CRITICAL: Failed to mark blobs as decided - aborting commit to preserve DA"
+            );
+            eyre::eyre!(
+                "Cannot finalize block at height {} round {} without blob availability: {}",
+                certificate.height,
+                certificate.round,
+                e
+            )
+        })?;
+
         // Store block data for decided value
         let block_data = self.store.get_block_data(certificate.height, certificate.round).await?;
 
@@ -255,6 +386,54 @@ impl State {
         // Prune the store, keep the last 5 heights
         let retain_height = Height::new(certificate.height.as_u64().saturating_sub(5));
         self.store.prune(retain_height).await?;
+
+        // Clean up orphaned blobs from failed rounds before advancing height
+        // Any blobs that were stored but not marked as decided are orphaned and should be removed
+        if let Some(rounds) = self.blob_rounds.get(&certificate.height) {
+            for &round in rounds.iter() {
+                // Skip the decided round
+                if round != round_i64 {
+                    if let Err(e) = self.blob_engine.drop_round(certificate.height, round).await {
+                        error!(
+                            height = %certificate.height,
+                            round = round,
+                            error = %e,
+                            "Failed to drop orphaned blobs for failed round"
+                        );
+                        // Don't fail commit - this is cleanup
+                    } else {
+                        debug!(
+                            height = %certificate.height,
+                            round = round,
+                            "Dropped orphaned blobs for failed round"
+                        );
+                    }
+                }
+            }
+        }
+        // Remove blob tracking for current height (we're advancing)
+        self.blob_rounds.remove(&certificate.height);
+
+        // Prune blob engine - keep the same retention policy (last 5 heights)
+        // The prune_archived_before() call removes blobs that have been archived before the given
+        // height
+        match self.blob_engine.prune_archived_before(retain_height).await {
+            Ok(count) if count > 0 => {
+                debug!("Pruned {} blobs before height {}", count, retain_height.as_u64());
+            }
+            Ok(_) => {} // No blobs to prune
+            Err(e) => {
+                error!(
+                    error = %e,
+                    height = %retain_height,
+                    "Failed to prune blobs from blob engine"
+                );
+                // Don't fail the commit if blob pruning fails - just log the error
+            }
+        }
+
+        // Also clean up blob round tracking for old heights
+        self.blob_rounds.retain(|h, _| *h >= retain_height);
 
         // Move to next height
         self.current_height = self.current_height.increment();
@@ -283,7 +462,56 @@ impl State {
         assert_eq!(round, self.current_round);
 
         // We create a new value.
-        let value = Value::new(data);
+        // TODO: Phase 2 - Update this to use actual ExecutionPayloadHeader and blobs metadata
+        // For now, using deprecated from_bytes for backward compatibility
+        #[allow(deprecated)]
+        let value = Value::from_bytes(data);
+
+        let proposal = ProposedValue {
+            height,
+            round,
+            valid_round: Round::Nil,
+            proposer: self.address, // We are the proposer
+            value,
+            validity: Validity::Valid, // Our proposals are de facto valid
+        };
+
+        // Insert the new proposal into the undecided proposals.
+        self.store.store_undecided_proposal(proposal.clone()).await?;
+
+        Ok(LocallyProposedValue::new(proposal.height, proposal.round, proposal.value))
+    }
+
+    /// Phase 3: Creates a proposal value with proper metadata and blob commitments
+    ///
+    /// This method replaces the deprecated `propose_value()` pattern and correctly creates
+    /// a Value with ValueMetadata containing:
+    /// - ExecutionPayloadHeader (lightweight, ~516 bytes)
+    /// - KZG commitments from blobs (48 bytes × blob_count)
+    ///
+    /// This ensures consensus messages stay small (~2KB) while blob data streams separately.
+    pub async fn propose_value_with_blobs(
+        &mut self,
+        height: Height,
+        round: Round,
+        _data: Bytes, // Still stored separately for SSZ reconstruction
+        execution_payload: &alloy_rpc_types_engine::ExecutionPayloadV3,
+        blobs_bundle: Option<&BlobsBundle>,
+    ) -> eyre::Result<LocallyProposedValue<LoadContext>> {
+        assert_eq!(height, self.current_height);
+        assert_eq!(round, self.current_round);
+
+        // Phase 2: Extract lightweight header from execution payload
+        let header = ExecutionPayloadHeader::from_payload(execution_payload);
+
+        // Phase 2: Extract KZG commitments from blobs bundle
+        let commitments = blobs_bundle.map(|bundle| bundle.commitments.clone()).unwrap_or_default();
+
+        // Phase 2: Create ValueMetadata (~2KB) instead of embedding full data
+        let metadata = ValueMetadata::new(header, commitments);
+
+        // Phase 2: Create Value with metadata (NOT from_bytes!)
+        let value = Value::new(metadata);
 
         let proposal = ProposedValue {
             height,
@@ -311,12 +539,25 @@ impl State {
 
     /// Creates a stream message containing a proposal part.
     /// Updates internal sequence number and current proposal.
+    ///
+    /// Phase 3: Now accepts optional BlobsBundle for streaming blob sidecars
     pub fn stream_proposal(
         &mut self,
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
+        blobs_bundle: Option<BlobsBundle>,
     ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
-        let parts = self.make_proposal_parts(value, data);
+        self.stream_proposal_with_proposer(self.address, value, data, blobs_bundle)
+    }
+
+    pub fn stream_proposal_with_proposer(
+        &mut self,
+        proposer: Address,
+        value: LocallyProposedValue<LoadContext>,
+        data: Bytes,
+        blobs_bundle: Option<BlobsBundle>,
+    ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
+        let parts = self.make_proposal_parts(proposer, value, data, blobs_bundle);
 
         let stream_id = self.stream_id();
 
@@ -333,10 +574,13 @@ impl State {
         msgs.into_iter()
     }
 
+    /// Phase 3: Updated to stream blobs as BlobSidecar parts
     fn make_proposal_parts(
         &self,
+        proposer: Address,
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
+        blobs_bundle: Option<BlobsBundle>,
     ) -> Vec<ProposalPart> {
         let mut hasher = sha3::Keccak256::new();
         let mut parts = Vec::new();
@@ -346,14 +590,14 @@ impl State {
             parts.push(ProposalPart::Init(ProposalInit::new(
                 value.height,
                 value.round,
-                self.address,
+                proposer,
             )));
 
             hasher.update(value.height.as_u64().to_be_bytes().as_slice());
             hasher.update(value.round.as_i64().to_be_bytes().as_slice());
         }
 
-        // Data
+        // Data (execution payload)
         {
             for chunk in data.chunks(CHUNK_SIZE) {
                 let chunk_data = ProposalData::new(Bytes::copy_from_slice(chunk));
@@ -362,6 +606,23 @@ impl State {
             }
         }
 
+        // Blob sidecars (Phase 3: Stream blobs separately)
+        if let Some(bundle) = blobs_bundle {
+            for (index, ((blob, commitment), proof)) in
+                bundle.blobs.iter().zip(&bundle.commitments).zip(&bundle.proofs).enumerate()
+            {
+                let sidecar = BlobSidecar::new(index as u8, blob.clone(), *commitment, *proof);
+                parts.push(ProposalPart::BlobSidecar(sidecar));
+
+                // Include blob data in signature hash
+                hasher.update(&[index as u8]);
+                hasher.update(blob.data());
+                hasher.update(commitment.as_bytes());
+                hasher.update(proof.as_bytes());
+            }
+        }
+
+        // Fin (signature over all parts)
         {
             let hash = hasher.finalize().to_vec();
             let signature = self.signing_provider.sign(&hash);
@@ -374,6 +635,117 @@ impl State {
     /// Returns the set of validators.
     pub fn get_validator_set(&self) -> &ValidatorSet {
         &self.genesis.validator_set
+    }
+
+    /// Assemble value from proposal parts and store verified blobs
+    ///
+    /// This method:
+    /// 1. Extracts execution payload and blob sidecars from parts
+    /// 2. Verifies and stores blobs using the blob engine
+    /// 3. Creates Value with metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - KZG verification fails
+    /// - Blob storage fails
+    /// - Payload parsing fails
+    async fn assemble_and_store_blobs(
+        &self,
+        parts: ProposalParts,
+    ) -> Result<(ProposedValue<LoadContext>, Bytes, bool), String> {
+        // Extract execution payload data
+        let total_size: usize =
+            parts.parts.iter().filter_map(|part| part.as_data()).map(|data| data.bytes.len()).sum();
+
+        let mut data = Vec::with_capacity(total_size);
+        for part in parts.parts.iter().filter_map(|part| part.as_data()) {
+            data.extend_from_slice(&part.bytes);
+        }
+        let data = Bytes::from(data);
+
+        // Extract blob sidecars
+        let blob_sidecars: Vec<_> =
+            parts.parts.iter().filter_map(|part| part.as_blob_sidecar()).cloned().collect();
+
+        // Verify and store blobs
+        if !blob_sidecars.is_empty() {
+            debug!(
+                "Extracted {} blob sidecars from proposal at height {}, round {}",
+                blob_sidecars.len(),
+                parts.height,
+                parts.round
+            );
+
+            // Convert round to i64
+            let round_i64 = parts.round.as_i64();
+
+            // Verify and store blobs atomically
+            self.blob_engine
+                .verify_and_store(parts.height, round_i64, &blob_sidecars)
+                .await
+                .map_err(|e| format!("Blob engine error: {}", e))?;
+
+            info!(
+                "✅ Verified and stored {} blobs for height {}, round {}",
+                blob_sidecars.len(),
+                parts.height,
+                parts.round
+            );
+        }
+
+        // Parse execution payload and create Value
+        let value = if !data.is_empty() && !blob_sidecars.is_empty() {
+            use alloy_rpc_types_engine::ExecutionPayloadV3;
+            use ssz::Decode;
+
+            match ExecutionPayloadV3::from_ssz_bytes(&data) {
+                Ok(execution_payload) => {
+                    let header = ExecutionPayloadHeader::from_payload(&execution_payload);
+                    let commitments: Vec<_> =
+                        blob_sidecars.iter().map(|sidecar| sidecar.kzg_commitment).collect();
+
+                    let metadata = ValueMetadata::new(header, commitments);
+                    Value::new(metadata)
+                }
+                Err(e) => {
+                    debug!("Failed to parse ExecutionPayloadV3 from SSZ: {:?}", e);
+                    #[allow(deprecated)]
+                    Value::from_bytes(data.clone())
+                }
+            }
+        } else if !data.is_empty() {
+            use alloy_rpc_types_engine::ExecutionPayloadV3;
+            use ssz::Decode;
+
+            match ExecutionPayloadV3::from_ssz_bytes(&data) {
+                Ok(execution_payload) => {
+                    let header = ExecutionPayloadHeader::from_payload(&execution_payload);
+                    let metadata = ValueMetadata::new(header, vec![]);
+                    Value::new(metadata)
+                }
+                Err(_) =>
+                {
+                    #[allow(deprecated)]
+                    Value::from_bytes(data.clone())
+                }
+            }
+        } else {
+            #[allow(deprecated)]
+            Value::from_bytes(data.clone())
+        };
+
+        let proposed_value = ProposedValue {
+            height: parts.height,
+            round: parts.round,
+            valid_round: Round::Nil,
+            proposer: parts.proposer,
+            value,
+            validity: Validity::Valid,
+        };
+
+        let has_blobs = !blob_sidecars.is_empty();
+        Ok((proposed_value, data, has_blobs))
     }
 
     /// Verifies the signature of the proposal.
@@ -394,6 +766,13 @@ impl State {
                 }
                 ProposalPart::Data(data) => {
                     hasher.update(data.bytes.as_ref());
+                }
+                // Phase 3: Include blob sidecars in signature hash
+                ProposalPart::BlobSidecar(sidecar) => {
+                    hasher.update(&[sidecar.index]);
+                    hasher.update(sidecar.blob.data());
+                    hasher.update(sidecar.kzg_commitment.as_bytes());
+                    hasher.update(sidecar.kzg_proof.as_bytes());
                 }
                 ProposalPart::Fin(fin) => {
                     signature = Some(&fin.signature);
@@ -417,35 +796,6 @@ impl State {
 
         Ok(())
     }
-}
-
-/// Re-assemble a [`ProposedValue`] from its [`ProposalParts`].
-///
-/// This is done by multiplying all the factors in the parts.
-fn assemble_value_from_parts(parts: ProposalParts) -> (ProposedValue<LoadContext>, Bytes) {
-    // Calculate total size and allocate buffer
-    let total_size: usize =
-        parts.parts.iter().filter_map(|part| part.as_data()).map(|data| data.bytes.len()).sum();
-
-    let mut data = Vec::with_capacity(total_size);
-    // Concatenate all chunks
-    for part in parts.parts.iter().filter_map(|part| part.as_data()) {
-        data.extend_from_slice(&part.bytes);
-    }
-
-    // Convert the concatenated data vector into Bytes
-    let data = Bytes::from(data);
-
-    let proposed_value = ProposedValue {
-        height: parts.height,
-        round: parts.round,
-        valid_round: Round::Nil,
-        proposer: parts.proposer,
-        value: Value::new(data.clone()),
-        validity: Validity::Valid,
-    };
-
-    (proposed_value, data)
 }
 
 /// Decodes a Value from its byte representation using ProtobufCodec

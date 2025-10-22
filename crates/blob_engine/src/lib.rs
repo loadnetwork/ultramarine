@@ -1,0 +1,70 @@
+//! Blob engine for EIP-4844 blob sidecar lifecycle management
+//!
+//! This crate provides a complete blob lifecycle system:
+//! - **Verification**: KZG proof verification using c-kzg
+//! - **Storage**: Persistent storage with RocksDB backend
+//! - **Lifecycle**: State transitions (undecided → decided → archived)
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                      BlobEngine                         │
+//! │  (High-level orchestration & verification)              │
+//! └──────────────────┬──────────────────────────────────────┘
+//!                    │
+//!          ┌─────────┴──────────┐
+//!          │                    │
+//!    ┌─────▼──────┐     ┌──────▼────────┐
+//!    │ BlobStore  │     │ BlobVerifier  │
+//!    │  (trait)   │     │  (KZG crypto) │
+//!    └─────┬──────┘     └───────────────┘
+//!          │
+//!    ┌─────▼────────────┐
+//!    │ RocksDbBlobStore │
+//!    │ (persistence)    │
+//!    └──────────────────┘
+//! ```
+//!
+//! ## Usage
+//!
+//! ```no_run
+//! use ultramarine_blob_engine::{BlobEngine, BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
+//! use ultramarine_types::height::Height;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Initialize storage and engine
+//! let store = RocksDbBlobStore::open("./blob_data")?;
+//! let engine = BlobEngineImpl::new(store)?;
+//!
+//! // During proposal handling:
+//! // 1. Verify and store blobs
+//! engine.verify_and_store(height, round, &sidecars).await?;
+//!
+//! // 2. When block is decided:
+//! engine.mark_decided(height, round).await?;
+//!
+//! // 3. Retrieve for execution layer:
+//! let blobs = engine.get_for_import(height).await?;
+//!
+//! // 4. After archival:
+//! engine.mark_archived(height, &[0, 1, 2]).await?;
+//!
+//! // 5. Cleanup old blobs:
+//! let pruned = engine.prune_archived_before(old_height).await?;
+//! # Ok(())
+//! # }
+//! ```
+
+#![warn(missing_docs)]
+#![warn(clippy::all)]
+
+pub mod engine;
+pub mod error;
+pub mod store;
+mod verifier;
+
+// Re-export main types
+pub use engine::{BlobEngine, BlobEngineImpl};
+pub use error::{BlobEngineError, BlobStoreError, BlobVerificationError};
+pub use store::{BlobKey, BlobStore};

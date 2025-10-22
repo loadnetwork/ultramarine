@@ -14,6 +14,8 @@ use tracing::{debug, info};
 use ultramarine_types::{
     address::Address,
     aliases::{B256, BlockHash},
+    // Phase 1: Import blob types for generate_block_with_blobs()
+    blob::BlobsBundle,
 };
 
 use crate::{
@@ -271,6 +273,181 @@ impl ExecutionClient {
             // Additionally, the CRITICAL TODO for `suggested_fee_recipient` in this function
             // must be addressed before any real-world use to ensure transaction fees are
             // collected.
+            status => {
+                tracing::error!(
+                    ?status,
+                    "forkchoiceUpdated (with attributes) returned non-VALID status"
+                );
+                Err(eyre::eyre!("Invalid payload status: {}", status))
+            }
+        }
+    }
+
+    /// Generate a new execution block with blob bundle (Phase 1b - EIP-4844 integration)
+    ///
+    /// This method is similar to `generate_block()` but also retrieves and parses
+    /// the blob bundle from the Engine API v3 response. The blob bundle contains:
+    /// - KZG commitments (48 bytes each)
+    /// - KZG proofs (48 bytes each)
+    /// - Blob data (131,072 bytes each)
+    ///
+    /// ## Returns
+    ///
+    /// - `Ok((payload, Some(bundle)))` if the EL included blobs in the block
+    /// - `Ok((payload, None))` if the EL produced a block without blobs
+    /// - `Err(...)` on any execution layer error or invalid response
+    ///
+    /// ## Usage in Consensus (Phase 2)
+    ///
+    /// When proposing a block, the consensus layer will:
+    /// 1. Call this method to get the payload + blob bundle
+    /// 2. Extract lightweight `ExecutionPayloadHeader` from the payload
+    /// 3. Create `ValueMetadata` with header + commitments (for voting)
+    /// 4. Stream full payload via `ProposalPart::Data`
+    /// 5. Stream blobs via `ProposalPart::BlobSidecar` (Phase 3)
+    ///
+    /// ## Example
+    ///
+    /// ```rust,ignore
+    /// let (payload, maybe_bundle) = client.generate_block_with_blobs(&latest_block).await?;
+    ///
+    /// // Extract header for consensus voting
+    /// let header = ExecutionPayloadHeader::from_payload(&payload);
+    ///
+    /// // Extract commitments for ValueMetadata
+    /// let commitments = maybe_bundle.map(|b| b.commitments).unwrap_or_default();
+    ///
+    /// // Create metadata for consensus
+    /// let metadata = ValueMetadata::new(header, commitments);
+    /// ```
+    ///
+    /// ## Engine API v3 Response Format
+    ///
+    /// The `getPayloadV3` response includes a `blobsBundle` field:
+    ///
+    /// ```json
+    /// {
+    ///   "executionPayload": { ... },
+    ///   "blockValue": "0x...",
+    ///   "blobsBundle": {
+    ///     "commitments": ["0x...", "0x..."],  // KZG commitments (hex, 48 bytes each)
+    ///     "proofs": ["0x...", "0x..."],        // KZG proofs (hex, 48 bytes each)
+    ///     "blobs": ["0x...", "0x..."]          // Blob data (hex, 131072 bytes each)
+    ///   },
+    ///   "shouldOverrideBuilder": false
+    /// }
+    /// ```
+    ///
+    /// If no blob transactions were included, `blobsBundle` may be absent or have empty arrays.
+    ///
+    /// ## Implementation
+    ///
+    /// This method uses `EngineApi::get_payload_with_blobs()` which calls `getPayloadV3`
+    /// and parses the full response including the blob bundle. The blob bundle is then
+    /// converted from Alloy's `BlobsBundleV1` to our internal `BlobsBundle` type and
+    /// validated for structure correctness.
+    pub async fn generate_block_with_blobs(
+        &self,
+        latest_block: &ultramarine_types::engine_api::ExecutionBlock,
+    ) -> eyre::Result<(ExecutionPayloadV3, Option<BlobsBundle>)> {
+        debug!("🟠 generate_block_with_blobs on top of {:?}", latest_block);
+
+        let block_hash = latest_block.block_hash;
+        let payload_attributes = PayloadAttributes {
+            // Unix timestamp for when the payload is expected to be executed.
+            // It should be greater than that of forkchoiceState.headBlockHash.
+            timestamp: latest_block.timestamp + 1,
+
+            // TODO: This is a placeholder value. In a real consensus client, this value
+            // must be generated according to the consensus protocol's specifications.
+            //
+            // In Ethereum PoS, this is the RANDAO mix from the Beacon Chain state, used for
+            // proposer selection.
+            //
+            // In a Tendermint-based system (like Malachite), proposer selection is
+            // deterministic (round-robin). The Host application would be responsible for
+            // generating a deterministic value here, such as a hash of the previous
+            // block's signatures, to satisfy the EVM's block header format.
+            prev_randao: latest_block.prev_randao,
+
+            // CRITICAL TODO: This is a placeholder address. In a production environment,
+            // this MUST be replaced with a user-configurable address to ensure
+            // the validator operator receives their earned transaction fees (tips).
+            suggested_fee_recipient: Address::repeat_byte(42).to_alloy_address(),
+
+            // Cannot be None in V3.
+            withdrawals: Some(vec![]),
+
+            // Cannot be None in V3.
+            parent_beacon_block_root: Some(block_hash),
+        };
+
+        let forkchoice_state = ForkchoiceState {
+            head_block_hash: block_hash,
+            finalized_block_hash: block_hash,
+            safe_block_hash: block_hash,
+        };
+
+        // Step 1: Call forkchoiceUpdatedV3 to start block production
+        let ForkchoiceUpdated { payload_status, payload_id } =
+            self.engine.forkchoice_updated(forkchoice_state, Some(payload_attributes)).await?;
+
+        tracing::debug!(
+            status = ?payload_status.status,
+            latest_valid_hash = ?payload_status.latest_valid_hash,
+            has_payload_id = %payload_id.is_some(),
+            head = ?block_hash,
+            "forkchoiceUpdated (with attributes) response for blob block"
+        );
+
+        if payload_status.latest_valid_hash != Some(block_hash) {
+            tracing::error!(
+                latest_valid_hash = ?payload_status.latest_valid_hash,
+                head = ?block_hash,
+                "engine_forkchoiceUpdatedV3 returned mismatched latest_valid_hash"
+            );
+            return Err(eyre::eyre!(
+                "engine_forkchoiceUpdatedV3 returned latestValidHash={:?} not matching head={:?}",
+                payload_status.latest_valid_hash,
+                block_hash
+            ));
+        }
+
+        match payload_status.status {
+            PayloadStatusEnum::Valid => {
+                let Some(payload_id) = payload_id else {
+                    tracing::error!("VALID status but payload_id is None after attributes");
+                    return Err(eyre::eyre!(
+                        "Engine API spec violation: VALID status with payload attributes must include payloadId"
+                    ));
+                };
+
+                // Step 2: Call getPayloadV3 to retrieve the block and blob bundle
+                //
+                // This uses the new get_payload_with_blobs() method which:
+                // 1. Calls getPayloadV3 via Engine API
+                // 2. Parses the full ExecutionPayloadEnvelopeV3 including blobs_bundle
+                // 3. Converts Alloy's BlobsBundleV1 to our BlobsBundle type
+                // 4. Validates the bundle structure
+                let (payload, blob_bundle) = self.engine.get_payload_with_blobs(payload_id).await?;
+
+                // Log block details including blob information
+                let blob_count = blob_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
+                tracing::info!(
+                    block_hash = ?payload.payload_inner.payload_inner.block_hash,
+                    parent_hash = ?payload.payload_inner.payload_inner.parent_hash,
+                    block_number = payload.payload_inner.payload_inner.block_number,
+                    txs = payload.payload_inner.payload_inner.transactions.len(),
+                    blob_gas_used = payload.blob_gas_used,
+                    excess_blob_gas = payload.excess_blob_gas,
+                    blob_count = blob_count,
+                    "Received execution payload with blobs from EL"
+                );
+
+                Ok((payload, blob_bundle))
+            }
+            // TODO: A production-ready client must handle all possible statuses gracefully.
+            // See comments in generate_block() for full status handling requirements.
             status => {
                 tracing::error!(
                     ?status,
