@@ -17,6 +17,7 @@ ultramarine-execution.workspace = true
 ultramarine-types.workspace = true
 
 malachitebft-app-channel.workspace = true
+malachitebft-engine.workspace = true
 malachitebft-proto.workspace = true
 
 alloy-consensus = { workspace = true }

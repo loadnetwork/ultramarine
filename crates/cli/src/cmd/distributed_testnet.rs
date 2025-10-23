@@ -5,13 +5,14 @@ use std::{path::Path, time::Duration};
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
 use itertools::Itertools;
-use malachitebft_app::Node;
+use malachitebft_app::node::{CanGeneratePrivateKey, CanMakeGenesis, CanMakePrivateKeyFile, Node};
 use malachitebft_config::*;
 use tracing::info;
 
 use crate::{
     args::Args,
     cmd::testnet::RuntimeFlavour,
+    config::Config,
     file::{save_config, save_genesis, save_priv_validator_key},
 };
 
@@ -89,7 +90,7 @@ impl DistributedTestnetCmd {
     /// Execute the testnet command
     pub fn run<N>(&self, node: &N, home_dir: &Path, logging: LoggingConfig) -> Result<()>
     where
-        N: Node,
+        N: Node + CanGeneratePrivateKey + CanMakeGenesis + CanMakePrivateKeyFile,
     {
         let runtime = match self.runtime {
             RuntimeFlavour::SingleThreaded => RuntimeConfig::SingleThreaded,
@@ -136,7 +137,7 @@ fn distributed_testnet<N>(
     deterministic: bool,
 ) -> Result<()>
 where
-    N: Node,
+    N: Node + CanGeneratePrivateKey + CanMakeGenesis + CanMakePrivateKeyFile,
 {
     let private_keys = crate::new::generate_private_keys(node, nodes, deterministic);
     let public_keys = private_keys.iter().map(|pk| node.get_public_key(pk)).collect();
@@ -213,6 +214,7 @@ fn generate_distributed_config(
     Config {
         moniker: format!("test-{index}"),
         consensus: ConsensusConfig {
+            enabled: true,
             timeouts: TimeoutConfig::default(),
             p2p: P2pConfig {
                 protocol: PubSubProtocol::default(),
@@ -250,13 +252,15 @@ fn generate_distributed_config(
                     selector,
                     num_outbound_peers,
                     num_inbound_peers,
+                    max_connections_per_peer: 5,
                     ephemeral_connection_timeout: Duration::from_millis(
                         ephemeral_connection_timeout_ms,
                     ),
                 },
-                transport,
                 ..Default::default()
             },
+            value_payload: ValuePayload::default(),
+            queue_capacity: 0,
         },
         mempool: MempoolConfig {
             p2p: P2pConfig {
@@ -269,18 +273,20 @@ fn generate_distributed_config(
                     selector,
                     num_outbound_peers: 0,
                     num_inbound_peers: 0,
+                    max_connections_per_peer: 5,
                     ephemeral_connection_timeout: Duration::from_secs(0),
                 },
-                transport,
                 ..Default::default()
             },
             max_tx_count: 10000,
             gossip_batch_size: 0,
+            load: MempoolLoadConfig::default(),
         },
-        sync: SyncConfig {
+        sync: ValueSyncConfig {
             enabled: false,
-            status_update_interval: Duration::from_secs(0),
-            request_timeout: Duration::from_secs(0),
+            status_update_interval: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(10),
+            ..Default::default()
         },
         metrics: MetricsConfig {
             enabled: true,

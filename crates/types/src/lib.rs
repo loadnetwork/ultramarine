@@ -11,7 +11,6 @@ pub mod proposal;
 pub mod proposal_part;
 pub mod proto;
 pub mod signing;
-pub mod sync;
 pub mod validator_set;
 pub mod value;
 pub mod vote;
@@ -37,3 +36,9 @@ pub mod value_metadata;
 // that are used ONLY within BlobSidecar for spec compatibility.
 // These types DO NOT leak into core Ultramarine consensus (Value, Malachite, etc.)
 pub(crate) mod ethereum_compat;
+
+// Phase 5.1: State synchronization types for EIP-4844 blob support
+// Added as part of pre-v0 sync implementation (FINAL_PLAN.md Phase 5.1)
+// Enables lagging peers to sync by receiving both execution payloads and blob data
+// in Malachite's RawDecidedValue.value_bytes
+pub mod sync;

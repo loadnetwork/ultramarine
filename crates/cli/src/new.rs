@@ -2,10 +2,12 @@
 use std::time::Duration;
 
 use itertools::Itertools;
-use malachitebft_app::Node;
+use malachitebft_app::node::{CanGeneratePrivateKey, CanMakeGenesis, Node};
 use malachitebft_config::*;
 use malachitebft_core_types::{PrivateKey, PublicKey};
 use rand::{Rng, SeedableRng, prelude::StdRng, rngs::OsRng, seq::IteratorRandom};
+
+use crate::config::Config;
 
 const MIN_VOTING_POWER: u64 = 1;
 const MAX_VOTING_POWER: u64 = 1;
@@ -21,7 +23,7 @@ pub fn generate_private_keys<N>(
     deterministic: bool,
 ) -> Vec<PrivateKey<N::Context>>
 where
-    N: Node,
+    N: Node + CanGeneratePrivateKey,
 {
     if deterministic {
         let mut rng = StdRng::seed_from_u64(0x42);
@@ -33,7 +35,7 @@ where
 
 /// Generate a Genesis file from the public keys and voting power.
 /// Voting power can be random or deterministically pseudo-random.
-pub fn generate_genesis<N: Node>(
+pub fn generate_genesis<N: Node + CanMakeGenesis>(
     node: &N,
     pks: Vec<PublicKey<N::Context>>,
     deterministic: bool,
@@ -72,6 +74,7 @@ pub fn generate_config(
     Config {
         moniker: format!("test-{index}"),
         consensus: ConsensusConfig {
+            enabled: true,
             timeouts: TimeoutConfig::default(),
             p2p: P2pConfig {
                 protocol: PubSubProtocol::default(),
@@ -98,13 +101,15 @@ pub fn generate_config(
                     selector,
                     num_outbound_peers,
                     num_inbound_peers,
+                    max_connections_per_peer: 5,
                     ephemeral_connection_timeout: Duration::from_millis(
                         ephemeral_connection_timeout_ms,
                     ),
                 },
-                transport,
                 ..Default::default()
             },
+            value_payload: ValuePayload::default(),
+            queue_capacity: 0,
         },
         mempool: MempoolConfig {
             p2p: P2pConfig {
@@ -120,17 +125,18 @@ pub fn generate_config(
                     selector,
                     num_outbound_peers,
                     num_inbound_peers,
+                    max_connections_per_peer: 5,
                     ephemeral_connection_timeout: Duration::from_millis(
                         ephemeral_connection_timeout_ms,
                     ),
                 },
-                transport,
                 ..Default::default()
             },
             max_tx_count: 10000,
             gossip_batch_size: 0,
+            load: MempoolLoadConfig::default(),
         },
-        sync: Default::default(),
+        sync: ValueSyncConfig::default(),
         metrics: MetricsConfig {
             enabled: true,
             listen_addr: format!("127.0.0.1:{metrics_port}").parse().unwrap(),

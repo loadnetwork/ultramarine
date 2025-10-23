@@ -3,10 +3,12 @@
 use std::path::Path;
 
 use clap::Parser;
-use malachitebft_app::Node;
+use malachitebft_app::node::{CanGeneratePrivateKey, CanMakeGenesis, CanMakePrivateKeyFile, Node};
 use malachitebft_config::{
-    BootstrapProtocol, Config, LoggingConfig, RuntimeConfig, Selector, TransportProtocol,
+    BootstrapProtocol, LoggingConfig, RuntimeConfig, Selector, TransportProtocol,
 };
+
+use crate::config::Config;
 use tracing::{info, warn};
 
 use crate::{
@@ -68,7 +70,7 @@ impl InitCmd {
         logging: LoggingConfig,
     ) -> Result<(), Error>
     where
-        N: Node,
+        N: Node + CanGeneratePrivateKey + CanMakePrivateKeyFile + CanMakeGenesis,
     {
         let config = &generate_config(
             0,
@@ -100,7 +102,7 @@ pub fn init<N>(
     overwrite: bool,
 ) -> Result<(), Error>
 where
-    N: Node,
+    N: Node + CanGeneratePrivateKey + CanMakePrivateKeyFile + CanMakeGenesis,
 {
     // Save configuration
     if config_file.exists() && !overwrite {

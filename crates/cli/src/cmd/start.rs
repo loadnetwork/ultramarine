@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use color_eyre::eyre;
-use malachitebft_app::Node;
+use malachitebft_app::node::Node;
 use malachitebft_config::MetricsConfig;
 use tracing::info;
 use url::Url;

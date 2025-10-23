@@ -1,8 +1,9 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use malachitebft_core_types::{
-    CertificateError, CommitCertificate, CommitSignature, NilOrVal, SignedExtension,
-    SignedProposal, SignedProposalPart, SignedVote, SigningProvider, VotingPower,
+    CommitCertificate, CommitSignature, NilOrVal, SignedMessage, VotingPower,
 };
+use malachitebft_signing::{Error as SigningError, SigningProvider, VerificationResult};
 pub use malachitebft_signing_ed25519::*;
 
 use crate::{
@@ -49,62 +50,88 @@ impl Ed25519Provider {
     }
 }
 
+#[async_trait]
 impl SigningProvider<LoadContext> for Ed25519Provider {
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sign_vote(&self, vote: Vote) -> SignedVote<LoadContext> {
+    async fn sign_vote(&self, vote: Vote) -> Result<SignedMessage<LoadContext, Vote>, SigningError> {
         let signature = self.sign(&vote.to_bytes());
-        SignedVote::new(vote, signature)
+        Ok(SignedMessage::new(vote, signature))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn verify_signed_vote(
+    async fn verify_signed_vote(
         &self,
         vote: &Vote,
         signature: &Signature,
         public_key: &PublicKey,
-    ) -> bool {
-        public_key.verify(&vote.to_bytes(), signature).is_ok()
+    ) -> Result<VerificationResult, SigningError> {
+        let is_valid = public_key.verify(&vote.to_bytes(), signature).is_ok();
+        Ok(VerificationResult::from_bool(is_valid))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sign_proposal(&self, proposal: Proposal) -> SignedProposal<LoadContext> {
+    async fn sign_proposal(&self, proposal: Proposal) -> Result<SignedMessage<LoadContext, Proposal>, SigningError> {
         let signature = self.private_key.sign(&proposal.to_bytes());
-        SignedProposal::new(proposal, signature)
+        Ok(SignedMessage::new(proposal, signature))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn verify_signed_proposal(
+    async fn verify_signed_proposal(
         &self,
         proposal: &Proposal,
         signature: &Signature,
         public_key: &PublicKey,
-    ) -> bool {
-        public_key.verify(&proposal.to_bytes(), signature).is_ok()
+    ) -> Result<VerificationResult, SigningError> {
+        let is_valid = public_key.verify(&proposal.to_bytes(), signature).is_ok();
+        Ok(VerificationResult::from_bool(is_valid))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sign_proposal_part(&self, proposal_part: ProposalPart) -> SignedProposalPart<LoadContext> {
+    async fn sign_proposal_part(&self, proposal_part: ProposalPart) -> Result<SignedMessage<LoadContext, ProposalPart>, SigningError> {
         let signature = self.private_key.sign(&proposal_part.to_sign_bytes());
-        SignedProposalPart::new(proposal_part, signature)
+        Ok(SignedMessage::new(proposal_part, signature))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn verify_signed_proposal_part(
+    async fn verify_signed_proposal_part(
         &self,
         proposal_part: &ProposalPart,
         signature: &Signature,
         public_key: &PublicKey,
-    ) -> bool {
-        public_key.verify(&proposal_part.to_sign_bytes(), signature).is_ok()
+    ) -> Result<VerificationResult, SigningError> {
+        let is_valid = public_key.verify(&proposal_part.to_sign_bytes(), signature).is_ok();
+        Ok(VerificationResult::from_bool(is_valid))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn verify_commit_signature(
+    async fn sign_vote_extension(&self, _extension: Bytes) -> Result<SignedMessage<LoadContext, Bytes>, SigningError> {
+        unimplemented!("Vote extensions not yet supported")
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn verify_signed_vote_extension(
+        &self,
+        _extension: &Bytes,
+        _signature: &Signature,
+        _public_key: &PublicKey,
+    ) -> Result<VerificationResult, SigningError> {
+        unimplemented!("Vote extensions not yet supported")
+    }
+}
+
+// Extension method for commit signature verification (removed from trait)
+impl Ed25519Provider {
+    /// Verify a commit signature against a certificate
+    ///
+    /// Note: This was removed from the SigningProvider trait in latest malachite.
+    /// Kept as an extension method for backward compatibility.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub async fn verify_commit_signature(
         &self,
         certificate: &CommitCertificate<LoadContext>,
         commit_sig: &CommitSignature<LoadContext>,
         validator: &Validator,
-    ) -> Result<VotingPower, CertificateError<LoadContext>> {
+    ) -> Result<VotingPower, String> {
         use malachitebft_core_types::Validator;
 
         // Reconstruct the vote that was signed
@@ -116,23 +143,14 @@ impl SigningProvider<LoadContext> for Ed25519Provider {
         );
 
         // Verify signature
-        if !self.verify_signed_vote(&vote, &commit_sig.signature, validator.public_key()) {
-            return Err(CertificateError::InvalidSignature(commit_sig.clone()));
+        let result = self.verify_signed_vote(&vote, &commit_sig.signature, validator.public_key())
+            .await
+            .map_err(|e| format!("Signature verification error: {:?}", e))?;
+
+        if result.is_invalid() {
+            return Err(format!("Invalid commit signature from validator {}", validator.address()));
         }
 
         Ok(validator.voting_power())
-    }
-
-    fn sign_vote_extension(&self, _extension: Bytes) -> SignedExtension<LoadContext> {
-        unimplemented!()
-    }
-
-    fn verify_signed_vote_extension(
-        &self,
-        _extension: &Bytes,
-        _signature: &Signature,
-        _public_key: &PublicKey,
-    ) -> bool {
-        unimplemented!()
     }
 }

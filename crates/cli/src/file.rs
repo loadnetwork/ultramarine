@@ -2,10 +2,17 @@
 
 use std::{fs, path::Path};
 
-use malachitebft_app::Node;
-use malachitebft_config::Config;
+use malachitebft_app::node::Node;
 
+use crate::config::Config;
 use crate::error::Error;
+
+/// Load configuration from file
+pub fn load_config(config_file: &Path) -> Result<Config, Error> {
+    let content = fs::read_to_string(config_file)
+        .map_err(|_| Error::OpenFile(config_file.to_path_buf()))?;
+    toml::from_str(&content).map_err(|e| Error::ToJSON(e.to_string()))
+}
 
 /// Save configuration to file
 pub fn save_config(config_file: &Path, config: &Config) -> Result<(), Error> {

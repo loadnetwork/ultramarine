@@ -2,8 +2,7 @@
 //! Example application using channels
 
 use color_eyre::eyre::{Result, eyre};
-use malachitebft_app_channel::app::Node;
-// use node::App;
+use malachitebft_app_channel::app::node::Node;
 use tracing::{info, trace};
 use ultramarine_cli::{
     args::{Args, Commands},
@@ -92,7 +91,7 @@ fn start(args: &Args, cmd: &StartCmd, logging: config::LoggingConfig) -> Result<
         .get_config_file_path()
         .map_err(|error| eyre!("Failed to get configuration file path: {error}"))?;
 
-    let mut config = config::load_config(&config_file, None)
+    let mut config = config::load_config(&config_file)
         .map_err(|error| eyre!("Failed to load configuration file: {error}"))?;
 
     config.logging = logging;

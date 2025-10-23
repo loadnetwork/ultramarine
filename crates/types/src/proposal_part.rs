@@ -120,34 +120,6 @@ impl BlobSidecar {
     }
 }
 
-impl Protobuf for BlobSidecar {
-    type Proto = proto::BlobSidecar;
-
-    fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
-        // Convert bytes::Bytes to alloy_primitives::Bytes for Blob::new
-        let blob_bytes = crate::aliases::Bytes::from(proto.blob.to_vec());
-
-        let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e.into()))?;
-        let kzg_commitment = KzgCommitment::from_slice(&proto.kzg_commitment)
-            .map_err(|e| ProtoError::Other(e.into()))?;
-        let kzg_proof =
-            KzgProof::from_slice(&proto.kzg_proof).map_err(|e| ProtoError::Other(e.into()))?;
-
-        Ok(Self { index: proto.index as u8, blob, kzg_commitment, kzg_proof })
-    }
-
-    fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
-        let blob_bytes: ::bytes::Bytes = self.blob.data().to_vec().into();
-
-        Ok(Self::Proto {
-            index: self.index as u32,
-            blob: blob_bytes,
-            kzg_commitment: self.kzg_commitment.as_bytes().to_vec().into(),
-            kzg_proof: self.kzg_proof.as_bytes().to_vec().into(),
-        })
-    }
-}
-
 /// ProposalPart represents a single part of a proposal stream
 ///
 /// ## Phase 3: Extended with BlobSidecar Support
@@ -279,7 +251,28 @@ impl Protobuf for ProposalPart {
             Part::Data(data) => Ok(Self::Data(ProposalData::new(data.bytes))),
 
             // Phase 3: Deserialize BlobSidecar from protobuf
-            Part::BlobSidecar(sidecar) => Ok(Self::BlobSidecar(BlobSidecar::from_proto(sidecar)?)),
+            Part::BlobSidecar(sidecar) => {
+                // Convert bytes::Bytes to alloy_primitives::Bytes for Blob::new
+                let blob_bytes = crate::aliases::Bytes::from(sidecar.blob.to_vec());
+
+                // Deserialize blob data (must be exactly 131,072 bytes)
+                let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e.into()))?;
+
+                // Deserialize KZG commitment (must be exactly 48 bytes)
+                let kzg_commitment = KzgCommitment::from_slice(&sidecar.kzg_commitment)
+                    .map_err(|e| ProtoError::Other(e.into()))?;
+
+                // Deserialize KZG proof (must be exactly 48 bytes)
+                let kzg_proof = KzgProof::from_slice(&sidecar.kzg_proof)
+                    .map_err(|e| ProtoError::Other(e.into()))?;
+
+                Ok(Self::BlobSidecar(BlobSidecar {
+                    index: sidecar.index as u8,
+                    blob,
+                    kzg_commitment,
+                    kzg_proof,
+                }))
+            }
 
             Part::Fin(fin) => Ok(Self::Fin(ProposalFin {
                 signature: fin
@@ -308,7 +301,17 @@ impl Protobuf for ProposalPart {
 
             // Phase 3: Serialize BlobSidecar to protobuf
             Self::BlobSidecar(sidecar) => {
-                Ok(Self::Proto { part: Some(Part::BlobSidecar(sidecar.to_proto()?)) })
+                // Convert alloy_primitives::Bytes to bytes::Bytes for protobuf
+                let blob_bytes: ::bytes::Bytes = sidecar.blob.data().to_vec().into();
+
+                Ok(Self::Proto {
+                    part: Some(Part::BlobSidecar(proto::BlobSidecar {
+                        index: sidecar.index as u32,
+                        blob: blob_bytes,
+                        kzg_commitment: sidecar.kzg_commitment.as_bytes().to_vec().into(),
+                        kzg_proof: sidecar.kzg_proof.as_bytes().to_vec().into(),
+                    })),
+                })
             }
 
             Self::Fin(fin) => Ok(Self::Proto {

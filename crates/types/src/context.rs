@@ -48,6 +48,7 @@ impl Context for LoadContext {
     }
 
     fn new_proposal(
+        &self,
         height: Height,
         round: Round,
         value: Value,
@@ -58,6 +59,7 @@ impl Context for LoadContext {
     }
 
     fn new_prevote(
+        &self,
         height: Height,
         round: Round,
         value_id: NilOrVal<ValueId>,
@@ -67,6 +69,7 @@ impl Context for LoadContext {
     }
 
     fn new_precommit(
+        &self,
         height: Height,
         round: Round,
         value_id: NilOrVal<ValueId>,

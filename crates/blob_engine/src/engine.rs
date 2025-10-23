@@ -61,13 +61,6 @@ pub trait BlobEngine: Send + Sync {
         sidecars: &[BlobSidecar],
     ) -> Result<(), BlobEngineError>;
 
-    /// Retrieve blobs stored for an undecided (height, round) proposal.
-    async fn get_undecided(
-        &self,
-        height: Height,
-        round: i64,
-    ) -> Result<Vec<BlobSidecar>, BlobEngineError>;
-
     /// Promote blobs from undecided to decided state
     ///
     /// Called when a block is finalized by consensus.
@@ -221,23 +214,6 @@ where
         );
 
         Ok(())
-    }
-
-    async fn get_undecided(
-        &self,
-        height: Height,
-        round: i64,
-    ) -> Result<Vec<BlobSidecar>, BlobEngineError> {
-        let blobs = self.store.get_undecided_blobs(height, round).await?;
-
-        debug!(
-            height = height.as_u64(),
-            round = round,
-            count = blobs.len(),
-            "Retrieved undecided blobs"
-        );
-
-        Ok(blobs)
     }
 
     async fn mark_decided(&self, height: Height, round: i64) -> Result<(), BlobEngineError> {
