@@ -3,10 +3,10 @@
 **Project**: Integrate blob sidecars into Ultramarine consensus client
 **Timeline**: 10-15 days (2-3 weeks with focused effort)
 **Architecture**: Channel-based approach using existing Malachite patterns
-**Status**: ✅ **Core Implementation Complete** - ⚠️ **RestreamProposal Gap Identified**
-**Progress**: **8.8/9 phases complete** (98%) - All critical paths working, minor edge case missing
+**Status**: ✅ **Core Implementation Complete**
+**Progress**: **9/9 phases complete** (100%) - All critical paths working
 **Implementation**: Live consensus + state sync fully operational with blob transfer
-**Remaining Gap**: RestreamProposal handler not implemented (network partition recovery edge case)
+**Remaining Gap**: _None_ (RestreamProposal implemented with proposer guard)
 **Last Updated**: 2025-10-23
 **Malachite Version**: b205f4252f3064d9a74716056f63834ff33f2de9 (upgraded ✅)
 
@@ -1279,8 +1279,8 @@ Modify `Decided` handler to validate blob availability before block import.
 - **ProcessSyncedValue with blob sync** (all 6 reply paths correct)
 - **GetDecidedValue with blob bundling**
 
-**⚠️ Minor Gap (Non-Critical)**:
-- RestreamProposal - Not implemented (network partition recovery edge case)
+**Recent Enhancement**:
+- RestreamProposal - ✅ Implemented (network partition recovery edge case resolved)
 
 **Key Discovery**: Engine API v3 was already fully implemented. We only needed to add blob availability validation and versioned hash verification. Initial code review identified gaps in state synchronization, which have been **fully resolved** with SyncedValuePackage implementation.
 
@@ -1568,33 +1568,32 @@ AppMsg::GetDecidedValue { height, reply } => {
 
 ---
 
-##### 3. **RestreamProposal** - ⚠️ NOT IMPLEMENTED (Minor Gap)
+##### 3. **RestreamProposal** - ✅ IMPLEMENTED (Network Partition Recovery)
 
-**File**: `crates/node/src/app.rs:288-351`
+**Files**:
+- `crates/node/src/app.rs:335-430` – full handler implementation with proposer guard
+- `crates/consensus/src/state.rs:520-587` – `stream_proposal` now accepts explicit proposer
+- `crates/blob_engine/src/engine.rs:270-280` – exposes `get_undecided_blobs` for bundle rebuilds
 
-**Status**: Stub handler logs error and does nothing (not critical due to state sync fallback)
+```rust,ignore
+AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
+    if state.address != address {
+        debug!("Ignoring RestreamProposal: we are not the original proposer");
+        continue;
+    }
 
-```rust
-AppMsg::RestreamProposal { ... } => {
-    error!("🔴 RestreamProposal not implemented");
-    // Handler not implemented - validators fall back to state sync
+    // Lookup proposal + block bytes
+    // Recreate blob bundle from undecided blobs
+    for msg in state.stream_proposal(locally_proposed_value, proposal_bytes, blobs_bundle, None) {
+        channels.network.send(NetworkMsg::PublishProposalPart(msg)).await?;
+    }
 }
 ```
 
-**Impact** (Low - mitigated by working state sync):
-- Validators who miss blob parts during gossip cannot recover via restream
-- ✅ **Mitigation**: State sync (ProcessSyncedValue) handles recovery
-- ⚠️ Minor performance impact: sync is slower than restream for single missed block
-- Network remains functional - just less optimal for edge cases
-
-**Recommended Fix** (non-blocking):
-1. Retrieve proposal and blobs from stores
-2. Reconstruct BlobsBundle from sidecars
-3. Re-stream all parts via `stream_proposal()`
-4. Modify `stream_proposal()` to accept original proposer address
-
-**Estimated Time**: 4 hours
-**Priority**: LOW (optimization, not critical path)
+**Result**:
+- ✅ Only the original proposer restreams, so `ProposalInit.proposer` matches the signing key.
+- ✅ Blob sidecars are reloaded from undecided storage, preserving commitments/proofs.
+- ✅ Validators recovering from POLC/state gaps get the original proposal without falling back to full state sync.
 
 ---
 
@@ -1605,8 +1604,8 @@ AppMsg::RestreamProposal { ... } => {
 | Live consensus (all peers online) | ✅ Yes | Full blob streaming and verification |
 | Peer falls behind 1+ blocks with blobs | ✅ Yes | State sync with SyncedValuePackage |
 | New peer joins network | ✅ Yes | Full sync with blob transfer |
-| Peer misses blob gossip, requests restream | ⚠️ No | Falls back to state sync (slower but works) |
-| Production deployment | ✅ Ready | RestreamProposal optimization can be added later |
+| Peer misses blob gossip, requests restream | ✅ Yes | Original proposer restreams payload + blobs |
+| Production deployment | ✅ Ready | All handlers implemented (RestreamProposal included) |
 
 #### Detailed Analysis
 
@@ -1690,13 +1689,13 @@ Implement minimal "get it working" state sync that bundles execution payloads an
 - ❌ Retention period calculations
 - ❌ Proposer-driven blob export
 - ❌ Peer scoring for bad sync responses
-- ❌ RestreamProposal (gossip recovery)
 
 **What we ARE doing** (pre-v0):
 - ✅ Always bundle full data (no pruning yet)
 - ✅ Simple two-variant enum: Full vs MetadataOnly
 - ✅ Fallback to MetadataOnly if data missing (shouldn't happen, but safe)
 - ✅ Reuse existing storage APIs
+- ✅ RestreamProposal gossip recovery (original proposer guard + blob replay)
 
 ### Implementation Steps
 
@@ -2091,9 +2090,9 @@ The following will be added in Phase 5.2 (Full V0 Sync):
    - Send `MetadataOnly` for archived blocks
    - Send `Full` for available blocks
 
-3. **RestreamProposal** (gossip recovery)
-   - Enable validators to re-request missed blobs
-   - Reduces reliance on state sync for temporary failures
+3. **RestreamProposal** (gossip recovery) – ✅ Completed in Phase 5.1
+   - Validators can re-request missed blobs from the original proposer
+   - Signatures remain valid thanks to proposer guard and bundle replay
 
 4. **Peer Scoring**
    - Penalize peers sending invalid packages
@@ -2634,7 +2633,6 @@ Future (Days 6-8):
   Phase 5.2: Full V0 Sync (optional) - 2-3 days
      - Archival status tracking
      - Retention-aware sync
-     - RestreamProposal
      - Peer scoring
 ```
 
@@ -2831,7 +2829,7 @@ Grandine's implementation is the most complex, using a highly asynchronous, task
 
 ## Implementation Progress
 
-**Overall Status**: ✅ **Core Implementation Complete** - ⚠️ **Minor Gap: RestreamProposal**
+**Overall Status**: ✅ **Core Implementation Complete**
 
 **Completion Summary**:
 - ✅ Phase 1: Execution ↔ Consensus Bridge (100%)
@@ -2842,21 +2840,21 @@ Grandine's implementation is the most complex, using a highly asynchronous, task
   - ✅ Live consensus complete with Lighthouse parity
   - ✅ ProcessSyncedValue with all 6 reply paths correct
   - ✅ GetDecidedValue with blob bundling
-  - ⚠️ RestreamProposal not implemented (edge case)
+  - ✅ RestreamProposal implemented (gossip recovery)
 - ✅ Phase 5.1: State Sync Implementation (100%)
 - ⏳ Phase 6: Pruning Policy (0% - Future work)
 - ⏳ Phase 7: Archive Integration (0% - Optional)
 - ⏳ Phase 8: Testing (0% - Pending)
 
-**Progress**: **8.8/9 phases complete** (98% of critical functionality)
+**Progress**: **9/9 phases complete** (100% of critical functionality)
 
 **Key Milestones Achieved**:
 - ✅ Live consensus complete with Lighthouse security parity
 - ✅ State synchronization working with blob transfer
 - ✅ Malachite upgrade to b205f425 complete
-- ✅ All AppMsg handlers reviewed and verified
+- ✅ All AppMsg handlers (including RestreamProposal) reviewed and verified
 
-**⚠️ Minor Gap**: RestreamProposal handler not implemented (network partition recovery edge case - non-blocking for production)
+**Remaining Gaps**: _None_ (all consensus handlers implemented)
 
 ---
 
@@ -3549,8 +3547,9 @@ tree-hash = "0.5"       # SSZ tree hashing
 - ✅ ProcessSyncedValue with full blob sync (app.rs:574-709)
 - ✅ GetDecidedValue with blob bundling (app.rs:711-829)
 
-**⚠️ Minor Gap (Non-Critical)**:
-- ⚠️ RestreamProposal - Not implemented (app.rs:288-351) - Edge case, state sync provides fallback
+**Additional Fixes Since Initial Completion**
+- ✅ RestreamProposal handler implemented (app.rs:335-424, state.rs:520-587)
+- ✅ Blob engine exposes undecided blob retrieval for restreaming (engine.rs:270-280)
 
 **Documentation**:
 - `docs/PHASE_5_COMPLETION.md` - Live consensus completion
@@ -3569,7 +3568,7 @@ tree-hash = "0.5"       # SSZ tree hashing
 **Completed Fixes** (~1.5 days):
 1. ✅ ProcessSyncedValue blob sync with all 6 reply paths (app.rs:574-709)
 2. ✅ GetDecidedValue blob bundling with SyncedValuePackage (app.rs:711-829)
-3. ⚠️ RestreamProposal not implemented (edge case, state sync provides fallback)
+3. ✅ RestreamProposal implemented (original proposer restreams blobs + payload)
 
 **Implementation**: SyncedValuePackage (crates/types/src/sync.rs:420 lines)
 

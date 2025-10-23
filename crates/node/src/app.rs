@@ -15,14 +15,13 @@ use malachitebft_app_channel::{
 };
 use malachitebft_engine::host::Next;
 use ssz::{Decode, Encode};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::{State, decode_value};
 use ultramarine_execution::client::ExecutionClient;
 use ultramarine_types::{
     aliases::{Block, BlockHash},
     blob::BlobsBundle,
-    codec::proto::ProtobufCodec,
     context::LoadContext,
     engine_api::ExecutionBlock,
     sync::SyncedValuePackage,
@@ -142,6 +141,52 @@ pub async fn run(
                 // which will be passed to the execution client (EL) on commit.
                 state.store_undecided_proposal_data(bytes.clone()).await?;
 
+                // CRITICAL FIX (Finding #1): Store blobs locally for our own proposal
+                // Without this, the proposer never stores its own blobs, causing get_for_import()
+                // to return empty when the block is decided, leading to blob count mismatch errors.
+                if let Some(ref bundle) = blobs_bundle {
+                    if !bundle.blobs.is_empty() {
+                        debug!(
+                            "Storing {} blobs locally for our own proposal at height {}, round {}",
+                            bundle.blobs.len(),
+                            height,
+                            round
+                        );
+
+                        // Convert BlobsBundle to Vec<BlobSidecar>
+                        let blob_sidecars: Vec<_> = bundle
+                            .blobs
+                            .iter()
+                            .enumerate()
+                            .map(|(index, blob)| {
+                                ultramarine_types::proposal_part::BlobSidecar::from_bundle_item(
+                                    index as u8,
+                                    blob.clone(),
+                                    bundle.commitments[index],
+                                    bundle.proofs[index],
+                                )
+                            })
+                            .collect();
+
+                        // Store and verify (same as validators do when receiving proposals)
+                        let round_i64 = round.as_i64();
+                        state
+                            .blob_engine()
+                            .verify_and_store(height, round_i64, &blob_sidecars)
+                            .await
+                            .map_err(|e| {
+                                error!("Failed to store our own blobs: {}", e);
+                                eyre!("Proposer blob storage failed: {}", e)
+                            })?;
+
+                        info!(
+                            "✅ Successfully stored {} blobs for height {} (proposer's own)",
+                            blob_sidecars.len(),
+                            height
+                        );
+                    }
+                }
+
                 // Send it to consensus
                 if reply.send(proposal.clone()).is_err() {
                     error!(%height, %round, "Failed to send GetValue reply; channel closed");
@@ -150,7 +195,8 @@ pub async fn run(
                 // Now what's left to do is to break down the value to propose into parts,
                 // and send those parts over the network to our peers, for them to re-assemble the full value.
                 // Phase 3: Stream with blobs!
-                for stream_message in state.stream_proposal(proposal, bytes, blobs_bundle) {
+                // Pass None for proposer since this is our own proposal
+                for stream_message in state.stream_proposal(proposal, bytes, blobs_bundle, None) {
                     info!(%height, %round, "Streaming proposal part: {stream_message:?}");
                     if let Err(e) = channels
                         .network
@@ -285,10 +331,22 @@ pub async fn run(
                 }
             }
 
-            AppMsg::RestreamProposal { height: _, round: _, valid_round: _, address: _, value_id: _ } => {
-                error!("🔴 RestreamProposal not implemented");
-                /*
-                info!(%height, %round, %value_id, %address, "Received request to restream proposal");
+            AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
+                // CRITICAL: Only the original proposer should handle RestreamProposal.
+                // The Fin part is signed with self.signing_provider, which must match the proposer
+                // address stamped in the Init part. If we're not the original proposer, our signature
+                // will fail verification on all peers (they'll look up the Init proposer's public key
+                // and find our signature doesn't match).
+                if state.validator_address() != &address {
+                    debug!(
+                        %height, %round, %address,
+                        our_address = %state.validator_address(),
+                        "Ignoring RestreamProposal: we are not the original proposer"
+                    );
+                    continue;
+                }
+
+                info!(%height, %round, %value_id, %address, "Restreaming our own proposal");
 
                 // The `valid_round` indicates the round in which the proposal gathered a POLC (Proof-of-Lock-Change).
                 // If it's `Round::Nil`, the proposal was for the original round.
@@ -298,34 +356,70 @@ pub async fn run(
                     valid_round
                 };
 
-                match state.store.get_undecided_proposal(height, proposal_round, value_id).await {
+                match state.load_undecided_proposal(height, proposal_round).await {
                     Ok(Some(proposal)) => {
-                        // Sanity check: ensure the proposal we found was from the correct original proposer.
+                        // Sanity check: verify stored proposal is indeed ours
+                        // (Should always pass since we checked validator_address() == address above)
                         if proposal.proposer != address {
                             error!(
-                                "Found proposal for restreaming, but its proposer ({}) does not match the requested address ({}).",
-                                proposal.proposer, address
+                                "Internal error: stored proposal proposer ({}) doesn't match our address ({})",
+                                proposal.proposer, state.validator_address()
                             );
-                            return;
+                            continue;
                         }
 
-                        // We found the proposal in our store. Now, we need to stream its parts.
-                        
-                        // TODO: The `state.stream_proposal` function uses the address of the *current* node (`self.address`)
-                        // when creating the `Init` part of the stream. For restreaming, it should use the address
-                        // of the *original* proposer, which is available here as `address`.
-                        // This requires either modifying `stream_proposal` to accept an optional proposer address,
-                        // or creating a new `restream_proposal` function in `state.rs`.
-                        
+                        // Get the block data bytes
+                        let proposal_bytes = match state.get_block_data(height, proposal_round).await
+                        {
+                            Some(bytes) => bytes,
+                            None => {
+                                warn!(
+                                    %height, %proposal_round, %value_id,
+                                    "Block data not found for restreaming; it may have been pruned"
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Get blobs from blob_engine if they exist
+                        let blobs_bundle = match state.blob_engine()
+                            .get_undecided_blobs(height, proposal_round.as_i64())
+                            .await
+                        {
+                            Ok(blob_sidecars) if !blob_sidecars.is_empty() => {
+                                // Reconstruct BlobsBundle from BlobSidecars
+                                let blobs = blob_sidecars.iter().map(|s| s.blob.clone()).collect();
+                                let commitments = blob_sidecars.iter().map(|s| s.kzg_commitment).collect();
+                                let proofs = blob_sidecars.iter().map(|s| s.kzg_proof).collect();
+
+                                Some(ultramarine_types::blob::BlobsBundle {
+                                    commitments,
+                                    proofs,
+                                    blobs,
+                                })
+                            }
+                            Ok(_) => None, // No blobs
+                            Err(e) => {
+                                error!(%height, %proposal_round, "Failed to get blobs: {}", e);
+                                None
+                            }
+                        };
+
+                        // Create the locally proposed value for streaming
                         let locally_proposed_value = LocallyProposedValue {
                             height,
                             round, // Note: we use the *current* round for the stream, not necessarily the original proposal round.
                             value: proposal.value,
                         };
 
-                        let proposal_bytes = Bytes::from(proposal.value.as_ssz_bytes());
-
-                        for stream_message in state.stream_proposal(locally_proposed_value, proposal_bytes) {
+                        // Stream the proposal with our address (we are the original proposer)
+                        // Pass explicit proposer so the Init part reflects the original proposer address
+                        for stream_message in state.stream_proposal(
+                            locally_proposed_value,
+                            proposal_bytes,
+                            blobs_bundle,
+                            Some(address), // Explicit proposer for restreaming
+                        ) {
                             info!(%height, %round, "Restreaming proposal part: {stream_message:?}");
                             if let Err(e) = channels.network.send(NetworkMsg::PublishProposalPart(stream_message)).await {
                                 error!("Failed to restream proposal part: {}", e);
@@ -337,9 +431,9 @@ pub async fn run(
                     Ok(None) => {
                         // This can happen if we've already pruned the proposal from our store.
                         warn!(
-                            %height, 
-                            %proposal_round, 
-                            %value_id, 
+                            %height,
+                            %proposal_round,
+                            %value_id,
                             "Could not find proposal to restream. It might have been pruned."
                         );
                     }
@@ -347,7 +441,6 @@ pub async fn run(
                         error!("Failed to access store to restream proposal: {}", e);
                     }
                 }
-                */
             }
 
             // On the receiving end of these proposal parts (ie. when we are not the proposer),

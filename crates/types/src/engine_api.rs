@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     address::Address,
     aliases::{B256, BlockHash, BlockNumber, BlockTimestamp, Bloom, Bytes, U256},
+    ethereum_compat::beacon_block_body::{tree_hash_transactions_ssz, tree_hash_withdrawals_ssz},
     proto,
     // Phase 2: KzgCommitment will be used in ValueMetadata
     // blob::KzgCommitment,
@@ -209,6 +210,15 @@ pub struct ExecutionPayloadHeader {
     /// Base fee per gas (EIP-1559)
     pub base_fee_per_gas: U256,
 
+    /// Extra data (builder metadata / vanity bytes)
+    pub extra_data: Bytes,
+
+    /// Root of transactions list (SSZ)
+    pub transactions_root: B256,
+
+    /// Root of withdrawals list (SSZ)
+    pub withdrawals_root: B256,
+
     /// Blob gas used (EIP-4844)
     pub blob_gas_used: u64,
 
@@ -242,6 +252,11 @@ impl ExecutionPayloadHeader {
     pub fn from_payload(payload: &ExecutionPayloadV3) -> Self {
         let inner = &payload.payload_inner.payload_inner;
 
+        let extra_data = inner.extra_data.clone();
+        let transactions_root = tree_hash_transactions_ssz(&inner.transactions)
+            .unwrap_or_else(|e| panic!("Failed to compute transactions_root: {}", e));
+        let withdrawals_root = tree_hash_withdrawals_ssz(&payload.payload_inner.withdrawals)
+            .unwrap_or_else(|e| panic!("Failed to compute withdrawals_root: {}", e));
         Self {
             block_hash: inner.block_hash,
             parent_hash: inner.parent_hash,
@@ -253,6 +268,9 @@ impl ExecutionPayloadHeader {
             gas_used: inner.gas_used,
             timestamp: inner.timestamp,
             base_fee_per_gas: inner.base_fee_per_gas,
+            extra_data,
+            transactions_root,
+            withdrawals_root,
             blob_gas_used: payload.blob_gas_used,
             excess_blob_gas: payload.excess_blob_gas,
             prev_randao: inner.prev_randao,
@@ -274,11 +292,13 @@ impl ExecutionPayloadHeader {
         8 + // gas_used
         8 + // timestamp
         32 + // base_fee_per_gas
+        self.extra_data.as_ref().len().min(32) + // extra_data (<= 32 bytes)
+        32 + // transactions_root
+        32 + // withdrawals_root
         8 + // blob_gas_used
         8 + // excess_blob_gas
         32 + // prev_randao
         20 // fee_recipient
-        // Total: 516 bytes
     }
 }
 
@@ -291,6 +311,9 @@ impl Protobuf for ExecutionPayloadHeader {
     fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
         // Helper to convert bytes to B256
         fn bytes_to_b256(bytes: &[u8]) -> Result<B256, ProtoError> {
+            if bytes.is_empty() {
+                return Ok(B256::ZERO);
+            }
             if bytes.len() != 32 {
                 return Err(ProtoError::Other(format!("Expected 32 bytes, got {}", bytes.len())));
             }
@@ -299,6 +322,9 @@ impl Protobuf for ExecutionPayloadHeader {
 
         // Helper to convert bytes to Bloom
         fn bytes_to_bloom(bytes: &[u8]) -> Result<Bloom, ProtoError> {
+            if bytes.is_empty() {
+                return Ok(Bloom::from([0u8; 256]));
+            }
             if bytes.len() != 256 {
                 return Err(ProtoError::Other(format!(
                     "Expected 256 bytes for bloom, got {}",
@@ -329,6 +355,9 @@ impl Protobuf for ExecutionPayloadHeader {
             gas_used: proto.gas_used,
             timestamp: proto.timestamp,
             base_fee_per_gas: bytes_to_u256(&proto.base_fee_per_gas)?,
+            extra_data: Bytes::from(proto.extra_data.to_vec()),
+            transactions_root: bytes_to_b256(&proto.transactions_root)?,
+            withdrawals_root: bytes_to_b256(&proto.withdrawals_root)?,
             blob_gas_used: proto.blob_gas_used,
             excess_blob_gas: proto.excess_blob_gas,
             prev_randao: bytes_to_b256(&proto.prev_randao)?,
@@ -348,6 +377,9 @@ impl Protobuf for ExecutionPayloadHeader {
             gas_used: self.gas_used,
             timestamp: self.timestamp,
             base_fee_per_gas: self.base_fee_per_gas.to_le_bytes::<32>().to_vec().into(),
+            extra_data: ::bytes::Bytes::from(self.extra_data.as_ref().to_vec()),
+            transactions_root: self.transactions_root.0.to_vec().into(),
+            withdrawals_root: self.withdrawals_root.0.to_vec().into(),
             blob_gas_used: self.blob_gas_used,
             excess_blob_gas: self.excess_blob_gas,
             prev_randao: self.prev_randao.0.to_vec().into(),

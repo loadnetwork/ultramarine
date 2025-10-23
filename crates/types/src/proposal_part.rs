@@ -47,13 +47,19 @@ enum RoundDef {
     Some(u32),
 }
 
-/// A blob sidecar containing blob data and cryptographic proofs (Phase 3: EIP-4844)
+/// A blob sidecar containing blob data and cryptographic proofs
+///
+/// **Phase 4**: Extended with Ethereum Deneb compatibility fields:
+/// - SignedBeaconBlockHeader (for proposer authentication)
+/// - KZG commitment inclusion proof (17-branch Merkle proof)
 ///
 /// This is streamed separately from the execution payload to keep consensus messages small.
 /// Each blob sidecar contains:
 /// - The actual blob data (131,072 bytes)
 /// - KZG commitment (48 bytes)
 /// - KZG proof (48 bytes) for verification
+/// - Signed beacon block header (proposer signature)
+/// - Merkle inclusion proof (17 × 32 = 544 bytes)
 ///
 /// ## Purpose
 ///
@@ -61,6 +67,7 @@ enum RoundDef {
 /// 1. Keep consensus messages lightweight (ValueMetadata only contains commitments)
 /// 2. Allow validators to verify blobs before voting
 /// 3. Enable efficient bandwidth usage (blobs are large)
+/// 4. Provide Ethereum Deneb spec compatibility for tooling
 ///
 /// ## Network Flow
 ///
@@ -69,14 +76,25 @@ enum RoundDef {
 ///    │                                   │
 ///    ├──> ProposalPart::Init            ├──> Store metadata
 ///    ├──> ProposalPart::Data            ├──> Store execution payload
-///    ├──> ProposalPart::BlobSidecar(0)  ├──> Store & verify blob 0
-///    ├──> ProposalPart::BlobSidecar(1)  ├──> Store & verify blob 1
+///    ├──> ProposalPart::BlobSidecar(0)  ├──> Verify signature + proof + KZG
+///    ├──> ProposalPart::BlobSidecar(1)  ├──> Verify signature + proof + KZG
 ///    ├──> ...                            ├──> ...
 ///    └──> ProposalPart::Fin             └──> Vote if all verified
 /// ```
+///
+/// ## Verification Layers (Phase 4)
+///
+/// 1. **Signature**: Verify signed_block_header with proposer's public key
+/// 2. **Merkle Proof**: Verify kzg_commitment_inclusion_proof against body_root
+/// 3. **KZG Proof**: Verify blob data matches kzg_commitment
+///
+/// ## Size
+///
+/// - Phase 3: ~131,169 bytes (blob + commitment + proof)
+/// - Phase 4: ~132,921 bytes (+1,752 bytes for header + proof)
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobSidecar {
-    /// Index of this blob (0-5 for Deneb, 0-8 for Electra)
+    /// Index of this blob (0-5 for Deneb, 0-8 for Electra, 0-1023 for Ultramarine)
     ///
     /// This index corresponds to the position in ValueMetadata.blob_kzg_commitments.
     /// It's used to match blobs with their commitments during verification.
@@ -99,24 +117,198 @@ pub struct BlobSidecar {
     /// This proof allows validators to verify that the blob data matches
     /// the commitment without trusting the proposer.
     pub kzg_proof: KzgProof,
+
+    /// Signed beacon block header (Phase 4: Deneb compatibility)
+    ///
+    /// Contains:
+    /// - BeaconBlockHeader with body_root that commits to all blob commitments
+    /// - Ed25519 signature from the proposer (Ultramarine uses Ed25519, not BLS)
+    ///
+    /// This provides proposer authentication and links the blob to the beacon block.
+    /// Size: ~192 bytes (header: 5 × 32 bytes + signature: 64 bytes)
+    pub signed_block_header: crate::ethereum_compat::SignedBeaconBlockHeader,
+
+    /// KZG commitment inclusion proof (Phase 4: Deneb compatibility)
+    ///
+    /// A 17-branch Merkle proof that proves:
+    /// 1. This kzg_commitment is in the blob_kzg_commitments list at position `index`
+    /// 2. The blob_kzg_commitments list is in BeaconBlockBody at field index 11
+    /// 3. The BeaconBlockBody hashes to `signed_block_header.message.body_root`
+    ///
+    /// This prevents a malicious proposer from sending the wrong commitment for a block.
+    /// Size: 17 × 32 = 544 bytes
+    pub kzg_commitment_inclusion_proof: Vec<alloy_primitives::B256>,
 }
 
 impl BlobSidecar {
-    /// Creates a new BlobSidecar
-    pub fn new(index: u8, blob: Blob, kzg_commitment: KzgCommitment, kzg_proof: KzgProof) -> Self {
-        Self { index, blob, kzg_commitment, kzg_proof }
+    /// Creates a new BlobSidecar (Phase 4: with header + proof)
+    pub fn new(
+        index: u8,
+        blob: Blob,
+        kzg_commitment: KzgCommitment,
+        kzg_proof: KzgProof,
+        signed_block_header: crate::ethereum_compat::SignedBeaconBlockHeader,
+        kzg_commitment_inclusion_proof: Vec<alloy_primitives::B256>,
+    ) -> Self {
+        Self {
+            index,
+            blob,
+            kzg_commitment,
+            kzg_proof,
+            signed_block_header,
+            kzg_commitment_inclusion_proof,
+        }
+    }
+
+    /// Creates a BlobSidecar with placeholder Phase 4 fields (temporary)
+    ///
+    /// This constructor is used during Phase 4 transition to allow Phase 3 code
+    /// to continue working. Once Phase 4 is complete, all callsites should be
+    /// updated to use `new()` with proper header and inclusion proof.
+    ///
+    /// TODO: Remove this method once Phase 4 is fully implemented
+    /// https://github.com/loadnetwork/ultramarine/issues/TBD
+    pub fn from_bundle_item(
+        index: u8,
+        blob: Blob,
+        kzg_commitment: KzgCommitment,
+        kzg_proof: KzgProof,
+    ) -> Self {
+        // Create placeholder signed block header
+        let placeholder_header = crate::ethereum_compat::BeaconBlockHeader::new(
+            0,                            // slot
+            0,                            // proposer_index
+            alloy_primitives::B256::ZERO, // parent_root
+            alloy_primitives::B256::ZERO, // state_root
+            alloy_primitives::B256::ZERO, // body_root
+        );
+
+        // Create placeholder signature (64 zero bytes)
+        let placeholder_signature = Signature::from_bytes([0u8; 64]);
+
+        let signed_block_header = crate::ethereum_compat::SignedBeaconBlockHeader::new(
+            placeholder_header,
+            placeholder_signature,
+        );
+
+        Self {
+            index,
+            blob,
+            kzg_commitment,
+            kzg_proof,
+            signed_block_header,
+            kzg_commitment_inclusion_proof: Vec::new(), // Empty proof vector
+        }
     }
 
     /// Calculate size in bytes for this sidecar
     ///
-    /// Size breakdown:
+    /// Size breakdown (Phase 4):
     /// - index: 1 byte
     /// - blob: 131,072 bytes
     /// - commitment: 48 bytes
     /// - proof: 48 bytes
-    /// Total: ~131,169 bytes
+    /// - signed_block_header: ~192 bytes (5 × 32 + 64)
+    /// - kzg_commitment_inclusion_proof: 544 bytes (17 × 32)
+    /// Total: ~132,905 bytes
     pub fn size_bytes(&self) -> usize {
-        1 + BYTES_PER_BLOB + 48 + 48
+        1 + BYTES_PER_BLOB + 48 + 48 + 192 + (self.kzg_commitment_inclusion_proof.len() * 32)
+    }
+}
+
+/// Protobuf conversion for BlobSidecar (Phase 4)
+///
+/// Enables standalone serialization/deserialization for use in SyncedValuePackage
+impl malachitebft_proto::Protobuf for BlobSidecar {
+    type Proto = crate::proto::BlobSidecar;
+
+    fn from_proto(proto: Self::Proto) -> Result<Self, malachitebft_proto::Error> {
+        // Convert bytes::Bytes to alloy_primitives::Bytes for Blob::new
+        let blob_bytes = crate::aliases::Bytes::from(proto.blob.to_vec());
+        let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e.into()))?;
+
+        let kzg_commitment = KzgCommitment::from_slice(&proto.kzg_commitment)
+            .map_err(|e| ProtoError::Other(e.into()))?;
+
+        let kzg_proof =
+            KzgProof::from_slice(&proto.kzg_proof).map_err(|e| ProtoError::Other(e.into()))?;
+
+        let signed_block_header = proto
+            .signed_block_header
+            .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("signed_block_header"))
+            .and_then(|proto_header| {
+                let message = proto_header
+                    .message
+                    .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("message"))?;
+
+                let header = crate::ethereum_compat::BeaconBlockHeader::new(
+                    message.slot,
+                    message.proposer_index,
+                    alloy_primitives::B256::from_slice(&message.parent_root),
+                    alloy_primitives::B256::from_slice(&message.state_root),
+                    alloy_primitives::B256::from_slice(&message.body_root),
+                );
+
+                let signature = proto_header
+                    .signature
+                    .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("signature"))
+                    .and_then(|sig| {
+                        let bytes = <[u8; 64]>::try_from(sig.bytes.as_ref()).map_err(|_| {
+                            ProtoError::Other("Invalid signature length".to_string())
+                        })?;
+                        Ok(Signature::from_bytes(bytes))
+                    })?;
+
+                Ok(crate::ethereum_compat::SignedBeaconBlockHeader::new(header, signature))
+            })?;
+
+        let kzg_commitment_inclusion_proof: Vec<alloy_primitives::B256> = proto
+            .kzg_commitment_inclusion_proof
+            .iter()
+            .map(|bytes| alloy_primitives::B256::from_slice(bytes))
+            .collect();
+
+        Ok(Self {
+            index: proto.index as u8,
+            blob,
+            kzg_commitment,
+            kzg_proof,
+            signed_block_header,
+            kzg_commitment_inclusion_proof,
+        })
+    }
+
+    fn to_proto(&self) -> Result<Self::Proto, malachitebft_proto::Error> {
+        use malachitebft_proto::Error as ProtoError;
+
+        // Convert SignedBeaconBlockHeader to proto
+        let signed_block_header = crate::proto::SignedBeaconBlockHeader {
+            message: Some(crate::proto::BeaconBlockHeader {
+                slot: self.signed_block_header.message.slot,
+                proposer_index: self.signed_block_header.message.proposer_index,
+                parent_root: self.signed_block_header.message.parent_root.to_vec().into(),
+                state_root: self.signed_block_header.message.state_root.to_vec().into(),
+                body_root: self.signed_block_header.message.body_root.to_vec().into(),
+            }),
+            signature: Some(crate::proto::Signature {
+                bytes: Bytes::copy_from_slice(
+                    self.signed_block_header.signature.to_bytes().as_ref(),
+                ),
+            }),
+        };
+
+        Ok(crate::proto::BlobSidecar {
+            index: self.index as u32,
+            blob: Bytes::copy_from_slice(self.blob.data()),
+            kzg_commitment: Bytes::from(self.kzg_commitment.as_bytes().to_vec()),
+            kzg_proof: Bytes::from(self.kzg_proof.as_bytes().to_vec()),
+            signed_block_header: Some(signed_block_header),
+            kzg_commitment_inclusion_proof: self
+                .kzg_commitment_inclusion_proof
+                .iter()
+                .map(|b256| Bytes::copy_from_slice(b256.as_slice()))
+                .collect(),
+        })
     }
 }
 
@@ -250,7 +442,7 @@ impl Protobuf for ProposalPart {
             })),
             Part::Data(data) => Ok(Self::Data(ProposalData::new(data.bytes))),
 
-            // Phase 3: Deserialize BlobSidecar from protobuf
+            // Phase 3/4: Deserialize BlobSidecar from protobuf
             Part::BlobSidecar(sidecar) => {
                 // Convert bytes::Bytes to alloy_primitives::Bytes for Blob::new
                 let blob_bytes = crate::aliases::Bytes::from(sidecar.blob.to_vec());
@@ -266,11 +458,45 @@ impl Protobuf for ProposalPart {
                 let kzg_proof = KzgProof::from_slice(&sidecar.kzg_proof)
                     .map_err(|e| ProtoError::Other(e.into()))?;
 
+                // Phase 4: Deserialize SignedBeaconBlockHeader
+                let signed_block_header = sidecar
+                    .signed_block_header
+                    .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("signed_block_header"))
+                    .and_then(|proto_header| {
+                        let message = proto_header
+                            .message
+                            .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("message"))?;
+
+                        let header = crate::ethereum_compat::BeaconBlockHeader::new(
+                            message.slot,
+                            message.proposer_index,
+                            alloy_primitives::B256::from_slice(&message.parent_root),
+                            alloy_primitives::B256::from_slice(&message.state_root),
+                            alloy_primitives::B256::from_slice(&message.body_root),
+                        );
+
+                        let signature = proto_header
+                            .signature
+                            .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("signature"))
+                            .and_then(decode_signature)?;
+
+                        Ok(crate::ethereum_compat::SignedBeaconBlockHeader::new(header, signature))
+                    })?;
+
+                // Phase 4: Deserialize kzg_commitment_inclusion_proof
+                let kzg_commitment_inclusion_proof: Vec<alloy_primitives::B256> = sidecar
+                    .kzg_commitment_inclusion_proof
+                    .iter()
+                    .map(|bytes| alloy_primitives::B256::from_slice(bytes))
+                    .collect();
+
                 Ok(Self::BlobSidecar(BlobSidecar {
                     index: sidecar.index as u8,
                     blob,
                     kzg_commitment,
                     kzg_proof,
+                    signed_block_header,
+                    kzg_commitment_inclusion_proof,
                 }))
             }
 
@@ -299,10 +525,34 @@ impl Protobuf for ProposalPart {
                 part: Some(Part::Data(proto::ProposalData { bytes: data.bytes.clone() })),
             }),
 
-            // Phase 3: Serialize BlobSidecar to protobuf
+            // Phase 3/4: Serialize BlobSidecar to protobuf
             Self::BlobSidecar(sidecar) => {
                 // Convert alloy_primitives::Bytes to bytes::Bytes for protobuf
                 let blob_bytes: ::bytes::Bytes = sidecar.blob.data().to_vec().into();
+
+                // Phase 4: Serialize SignedBeaconBlockHeader
+                let proto_header = proto::SignedBeaconBlockHeader {
+                    message: Some(proto::BeaconBlockHeader {
+                        slot: sidecar.signed_block_header.message.slot,
+                        proposer_index: sidecar.signed_block_header.message.proposer_index,
+                        parent_root: sidecar
+                            .signed_block_header
+                            .message
+                            .parent_root
+                            .to_vec()
+                            .into(),
+                        state_root: sidecar.signed_block_header.message.state_root.to_vec().into(),
+                        body_root: sidecar.signed_block_header.message.body_root.to_vec().into(),
+                    }),
+                    signature: Some(encode_signature(&sidecar.signed_block_header.signature)),
+                };
+
+                // Phase 4: Serialize kzg_commitment_inclusion_proof
+                let kzg_commitment_inclusion_proof: Vec<::bytes::Bytes> = sidecar
+                    .kzg_commitment_inclusion_proof
+                    .iter()
+                    .map(|b256| b256.to_vec().into())
+                    .collect();
 
                 Ok(Self::Proto {
                     part: Some(Part::BlobSidecar(proto::BlobSidecar {
@@ -310,6 +560,8 @@ impl Protobuf for ProposalPart {
                         blob: blob_bytes,
                         kzg_commitment: sidecar.kzg_commitment.as_bytes().to_vec().into(),
                         kzg_proof: sidecar.kzg_proof.as_bytes().to_vec().into(),
+                        signed_block_header: Some(proto_header),
+                        kzg_commitment_inclusion_proof,
                     })),
                 })
             }

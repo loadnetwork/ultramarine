@@ -20,7 +20,7 @@ use crate::{
     proposal_part::ProposalPart,
     proto,
     value::{Value, ValueId},
-    vote::{decode_votetype, encode_votetype, Vote},
+    vote::{Vote, decode_votetype, encode_votetype},
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -244,10 +244,12 @@ impl Codec<sync::Request<LoadContext>> for ProtobufCodec {
                 let start = req.range.start().as_u64();
                 let end = req.range.end().as_u64();
                 proto::SyncRequest {
-                    request: Some(proto::sync_request::Request::ValueRequest(proto::ValueRequest {
-                        height: start,
-                        end_height: if end != start { Some(end) } else { None },
-                    })),
+                    request: Some(proto::sync_request::Request::ValueRequest(
+                        proto::ValueRequest {
+                            height: start,
+                            end_height: if end != start { Some(end) } else { None },
+                        },
+                    )),
                 }
             }
         };
@@ -302,10 +304,12 @@ pub fn encode_sync_response(
                 .collect::<Result<Vec<_>, _>>()?;
 
             proto::SyncResponse {
-                response: Some(proto::sync_response::Response::ValueResponse(proto::ValueResponse {
-                    start_height: value_response.start_height.as_u64(),
-                    values,
-                })),
+                response: Some(proto::sync_response::Response::ValueResponse(
+                    proto::ValueResponse {
+                        start_height: value_response.start_height.as_u64(),
+                        values,
+                    },
+                )),
             }
         }
     };
@@ -386,9 +390,7 @@ pub fn decode_commit_signature(
 
     let address = s
         .validator_address
-        .ok_or_else(|| {
-            ProtoError::missing_field::<proto::CommitSignature>("validator_address")
-        })
+        .ok_or_else(|| ProtoError::missing_field::<proto::CommitSignature>("validator_address"))
         .and_then(Address::from_proto)?;
 
     Ok(CommitSignature { address, signature })

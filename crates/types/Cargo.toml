@@ -24,7 +24,6 @@ tree_hash.workspace = true
 tree_hash_derive.workspace = true
 ethereum_hashing.workspace = true
 
-bincode.workspace = true
 bytes.workspace = true
 hex.workspace = true
 malachitebft-app = { workspace = true }

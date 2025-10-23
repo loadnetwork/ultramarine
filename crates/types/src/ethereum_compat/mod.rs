@@ -33,12 +33,11 @@
 //! - Lighthouse: `lighthouse/consensus/types/src/`
 //! - EIP-4844: https://eips.ethereum.org/EIPS/eip-4844
 
+pub mod beacon_block_body;
 pub mod beacon_header;
 pub mod merkle;
 
 // Re-export key types for internal use
-// Note: These will be used when BlobSidecar is extended in Phase 4
-#[allow(unused_imports)]
+pub use beacon_block_body::BeaconBlockBodyMinimal;
 pub use beacon_header::{BeaconBlockHeader, SignedBeaconBlockHeader};
-#[allow(unused_imports)]
 pub use merkle::{generate_kzg_commitment_inclusion_proof, verify_kzg_commitment_inclusion_proof};

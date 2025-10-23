@@ -6,16 +6,15 @@ use std::{path::PathBuf, str::FromStr};
 use async_trait::async_trait;
 use color_eyre::eyre;
 use malachitebft_app_channel::app::{
-    node::{EngineHandle, Node, NodeHandle},
     events::{RxEvent, TxEvent},
     metrics::SharedRegistry,
+    node::{EngineHandle, Node, NodeHandle},
     types::{Keypair, core::VotingPower},
 };
-use ultramarine_cli::config::Config;
 use rand::{CryptoRng, RngCore};
 use tokio::task::JoinHandle;
 use ultramarine_blob_engine::{BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
-use ultramarine_cli::metrics;
+use ultramarine_cli::{config::Config, metrics};
 use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
 use ultramarine_execution::{
     client::ExecutionClient,
@@ -330,7 +329,9 @@ impl Node for App {
 }
 
 // Implementations of separate capability traits
-use malachitebft_app_channel::app::node::{CanGeneratePrivateKey, CanMakeGenesis, CanMakePrivateKeyFile};
+use malachitebft_app_channel::app::node::{
+    CanGeneratePrivateKey, CanMakeGenesis, CanMakePrivateKeyFile,
+};
 
 impl CanGeneratePrivateKey for App {
     fn generate_private_key<R>(&self, rng: R) -> PrivateKey

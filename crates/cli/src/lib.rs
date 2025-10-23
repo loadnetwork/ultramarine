@@ -12,6 +12,6 @@ mod config_wrapper;
 
 pub mod config {
     pub use malachitebft_config::*;
-    pub use super::config_wrapper::Config;
-    pub use super::file::load_config;
+
+    pub use super::{config_wrapper::Config, file::load_config};
 }

@@ -8,10 +8,15 @@
 //! - Lighthouse: `lighthouse/consensus/types/src/beacon_block_header.rs`
 
 use alloy_primitives::B256;
+use malachitebft_proto::{Error as ProtoError, Protobuf};
 use serde::{Deserialize, Serialize};
 use tree_hash_derive::TreeHash;
 
-use crate::signing::{PublicKey, Signature};
+use crate::{
+    codec::proto::{decode_signature, encode_signature},
+    proto,
+    signing::{PublicKey, Signature},
+};
 
 /// Beacon block header (Ethereum consensus spec)
 ///
@@ -86,6 +91,30 @@ impl BeaconBlockHeader {
         // Convert from tree_hash::Hash256 (FixedBytes<32>) to alloy_primitives::B256
         // Both are 32-byte fixed arrays, so we can copy the bytes
         B256::from_slice(root.as_ref())
+    }
+}
+
+impl Protobuf for BeaconBlockHeader {
+    type Proto = proto::BeaconBlockHeader;
+
+    fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        Ok(proto::BeaconBlockHeader {
+            slot: self.slot,
+            proposer_index: self.proposer_index,
+            parent_root: self.parent_root.to_vec().into(),
+            state_root: self.state_root.to_vec().into(),
+            body_root: self.body_root.to_vec().into(),
+        })
+    }
+
+    fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
+        Ok(Self {
+            slot: proto.slot,
+            proposer_index: proto.proposer_index,
+            parent_root: B256::from_slice(&proto.parent_root),
+            state_root: B256::from_slice(&proto.state_root),
+            body_root: B256::from_slice(&proto.body_root),
+        })
     }
 }
 
@@ -171,6 +200,29 @@ impl SignedBeaconBlockHeader {
         // Use Malachite's Ed25519 verification
         // PublicKey::verify returns Result<(), signature::Error>
         public_key.verify(message_root.as_slice(), &self.signature).is_ok()
+    }
+}
+
+impl Protobuf for SignedBeaconBlockHeader {
+    type Proto = proto::SignedBeaconBlockHeader;
+
+    fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        Ok(proto::SignedBeaconBlockHeader {
+            message: Some(self.message.to_proto()?),
+            signature: Some(encode_signature(&self.signature)),
+        })
+    }
+
+    fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
+        let message =
+            proto.message.ok_or_else(|| ProtoError::missing_field::<Self::Proto>("message"))?;
+        let signature =
+            proto.signature.ok_or_else(|| ProtoError::missing_field::<Self::Proto>("signature"))?;
+
+        Ok(Self {
+            message: BeaconBlockHeader::from_proto(message)?,
+            signature: decode_signature(signature)?,
+        })
     }
 }
 

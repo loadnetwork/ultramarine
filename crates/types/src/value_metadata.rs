@@ -364,7 +364,7 @@ mod tests {
     use super::*;
     use crate::{
         address::Address,
-        aliases::{B256, Bloom},
+        aliases::{B256, Bloom, Bytes},
     };
 
     /// Helper to create a test ExecutionPayloadHeader
@@ -380,6 +380,9 @@ mod tests {
             gas_used: 15_000_000,
             timestamp: 1234567890,
             base_fee_per_gas: crate::aliases::U256::from(1000000000u64),
+            extra_data: Bytes::from(vec![1u8; 8]),
+            transactions_root: B256::from([7u8; 32]),
+            withdrawals_root: B256::from([8u8; 32]),
             blob_gas_used: 262144, // 2 blobs worth
             excess_blob_gas: 0,
             prev_randao: B256::from([5u8; 32]),

@@ -60,9 +60,9 @@
 //! - Peer scoring
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use malachitebft_proto::{Error as ProtoError, Protobuf};
 
-use crate::{proposal_part::BlobSidecar, value::Value};
+use crate::{proposal_part::BlobSidecar, proto, value::Value};
 
 /// Synced block data package for state synchronization
 ///
@@ -77,9 +77,14 @@ use crate::{proposal_part::BlobSidecar, value::Value};
 ///
 /// ## Serialization
 ///
-/// Uses bincode for efficient binary serialization. The encoded bytes are placed
-/// directly into `RawDecidedValue.value_bytes`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Uses Protobuf for network serialization (idiomatic for Malachite-based clients).
+/// The encoded bytes are placed into `RawDecidedValue.value_bytes`.
+///
+/// Protobuf provides built-in schema versioning via:
+/// - Field numbers for backward compatibility
+/// - Optional fields for forward compatibility
+/// - oneof for enum variants
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncedValuePackage {
     /// Full block data (execution payload + blobs)
     ///
@@ -196,7 +201,7 @@ impl SyncedValuePackage {
         }
     }
 
-    /// Encode this package to bytes using bincode
+    /// Encode this package to bytes using Protobuf
     ///
     /// # Returns
     ///
@@ -204,15 +209,12 @@ impl SyncedValuePackage {
     ///
     /// # Errors
     ///
-    /// Returns error if bincode serialization fails (rare, usually indicates
-    /// a programming error like invalid data).
+    /// Returns error if protobuf serialization fails
     pub fn encode(&self) -> Result<Bytes, String> {
-        bincode::serialize(self)
-            .map(Bytes::from)
-            .map_err(|e| format!("Failed to encode SyncedValuePackage: {}", e))
+        Protobuf::to_bytes(self).map_err(|e| format!("Failed to encode SyncedValuePackage: {}", e))
     }
 
-    /// Decode a package from bytes using bincode
+    /// Decode a package from Protobuf bytes
     ///
     /// # Arguments
     ///
@@ -225,11 +227,11 @@ impl SyncedValuePackage {
     /// # Errors
     ///
     /// Returns error if:
-    /// - Bytes are not valid bincode
-    /// - Bytes represent a different type
+    /// - Bytes are not valid protobuf
+    /// - Required fields are missing
     /// - Data is corrupted
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        bincode::deserialize(bytes)
+        Protobuf::from_bytes(bytes)
             .map_err(|e| format!("Failed to decode SyncedValuePackage: {}", e))
     }
 
@@ -243,10 +245,10 @@ impl SyncedValuePackage {
     pub fn estimated_size(&self) -> usize {
         match self {
             Self::Full { value, execution_payload_ssz, blob_sidecars } => {
-                value.size_bytes()
-                    + execution_payload_ssz.len()
-                    + blob_sidecars.iter().map(|b| b.size_bytes()).sum::<usize>()
-                    + 100 // Overhead for enum tag, lengths, etc.
+                value.size_bytes() +
+                    execution_payload_ssz.len() +
+                    blob_sidecars.iter().map(|b| b.size_bytes()).sum::<usize>() +
+                    100 // Overhead for enum tag, lengths, etc.
             }
             Self::MetadataOnly { value } => {
                 value.size_bytes() + 50 // Overhead
@@ -255,10 +257,75 @@ impl SyncedValuePackage {
     }
 }
 
+/// Protobuf conversion for SyncedValuePackage
+///
+/// This enables network serialization using the standard Malachite codec pattern.
+impl Protobuf for SyncedValuePackage {
+    type Proto = proto::SyncedValuePackage;
+
+    fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
+        match proto.package {
+            Some(proto::synced_value_package::Package::Full(full)) => {
+                // Extract Value
+                let value = full
+                    .value
+                    .ok_or_else(|| ProtoError::missing_field::<proto::FullPackage>("value"))
+                    .and_then(Value::from_proto)?;
+
+                // Extract blob sidecars
+                let blob_sidecars = full
+                    .blob_sidecars
+                    .into_iter()
+                    .map(|proto_sidecar| BlobSidecar::from_proto(proto_sidecar))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(SyncedValuePackage::Full {
+                    value,
+                    execution_payload_ssz: full.execution_payload_ssz,
+                    blob_sidecars,
+                })
+            }
+            Some(proto::synced_value_package::Package::MetadataOnly(metadata)) => {
+                let value = metadata
+                    .value
+                    .ok_or_else(|| ProtoError::missing_field::<proto::MetadataOnlyPackage>("value"))
+                    .and_then(Value::from_proto)?;
+
+                Ok(SyncedValuePackage::MetadataOnly { value })
+            }
+            None => Err(ProtoError::missing_field::<proto::SyncedValuePackage>("package")),
+        }
+    }
+
+    fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        let package = match self {
+            SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
+                let proto_blob_sidecars = blob_sidecars
+                    .iter()
+                    .map(|sidecar| sidecar.to_proto())
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                proto::synced_value_package::Package::Full(proto::FullPackage {
+                    value: Some(value.to_proto()?),
+                    execution_payload_ssz: execution_payload_ssz.clone(),
+                    blob_sidecars: proto_blob_sidecars,
+                })
+            }
+            SyncedValuePackage::MetadataOnly { value } => {
+                proto::synced_value_package::Package::MetadataOnly(proto::MetadataOnlyPackage {
+                    value: Some(value.to_proto()?),
+                })
+            }
+        };
+
+        Ok(proto::SyncedValuePackage { package: Some(package) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::{Blob, KzgCommitment, KzgProof, BYTES_PER_BLOB};
+    use crate::blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof};
 
     #[test]
     fn test_synced_value_package_full_is_full() {
@@ -292,7 +359,8 @@ mod tests {
         let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
         let payload = Bytes::from(vec![1u8; 1024]);
         let blob = Blob::new(vec![0u8; BYTES_PER_BLOB].into()).unwrap();
-        let sidecar = BlobSidecar::new(0, blob, KzgCommitment([2u8; 48]), KzgProof([3u8; 48]));
+        let sidecar =
+            BlobSidecar::from_bundle_item(0, blob, KzgCommitment([2u8; 48]), KzgProof([3u8; 48]));
 
         let package = SyncedValuePackage::Full {
             value,
@@ -340,8 +408,12 @@ mod tests {
         // Create 3 test blobs
         for i in 0..3 {
             let blob = Blob::new(vec![i; BYTES_PER_BLOB].into()).unwrap();
-            let sidecar =
-                BlobSidecar::new(i, blob, KzgCommitment([i + 1; 48]), KzgProof([i + 2; 48]));
+            let sidecar = BlobSidecar::from_bundle_item(
+                i,
+                blob,
+                KzgCommitment([i + 1; 48]),
+                KzgProof([i + 2; 48]),
+            );
             sidecars.push(sidecar);
         }
 
@@ -371,7 +443,8 @@ mod tests {
         let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
         let payload = Bytes::from(vec![1u8; 1024]);
         let blob = Blob::new(vec![0u8; BYTES_PER_BLOB].into()).unwrap();
-        let sidecar = BlobSidecar::new(0, blob, KzgCommitment([2u8; 48]), KzgProof([3u8; 48]));
+        let sidecar =
+            BlobSidecar::from_bundle_item(0, blob, KzgCommitment([2u8; 48]), KzgProof([3u8; 48]));
 
         let package = SyncedValuePackage::Full {
             value,
@@ -415,5 +488,51 @@ mod tests {
         let result = SyncedValuePackage::decode(empty_bytes);
 
         assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to decode"));
+    }
+
+    #[test]
+    fn test_protobuf_roundtrip_metadata_only() {
+        #[allow(deprecated)]
+        let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
+        let package = SyncedValuePackage::MetadataOnly { value };
+
+        // Encode using protobuf
+        let encoded = package.encode().expect("Failed to encode");
+        assert!(!encoded.is_empty());
+
+        // Decode should succeed
+        let decoded = SyncedValuePackage::decode(&encoded).expect("Failed to decode");
+
+        // Should match original
+        assert_eq!(package, decoded);
+        assert!(!decoded.is_full());
+    }
+
+    #[test]
+    fn test_protobuf_roundtrip_full_package() {
+        #[allow(deprecated)]
+        let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
+        let payload = Bytes::from(vec![1u8; 1024]);
+        let blob = Blob::new(vec![0u8; BYTES_PER_BLOB].into()).unwrap();
+        let sidecar =
+            BlobSidecar::from_bundle_item(0, blob, KzgCommitment([2u8; 48]), KzgProof([3u8; 48]));
+
+        let package = SyncedValuePackage::Full {
+            value,
+            execution_payload_ssz: payload,
+            blob_sidecars: vec![sidecar],
+        };
+
+        // Encode using protobuf
+        let encoded = package.encode().expect("Failed to encode");
+        assert!(!encoded.is_empty());
+
+        // Decode
+        let decoded = SyncedValuePackage::decode(&encoded).expect("Failed to decode");
+
+        // Verify
+        assert_eq!(package, decoded);
+        assert!(decoded.is_full());
     }
 }
