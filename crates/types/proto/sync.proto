@@ -17,25 +17,17 @@ message Status {
 
 message ValueRequest {
     uint64 height = 1;
+    optional uint64 end_height = 2;
 }
 
 message ValueResponse {
-    uint64 height = 1;
-    SyncedValue value = 2;
+    uint64 start_height = 1;
+    repeated SyncedValue values = 2;
 }
 
 message SyncedValue {
     bytes value_bytes = 1;
     CommitCertificate certificate = 2;
-}
-
-// Encodes full execution payload bytes and blob sidecars for state sync.
-// Stored inside Value.extensions so we can piggyback on existing sync RPCs
-// without modifying Malachite's RawDecidedValue type.
-message SyncedValueExtensions {
-    uint32 version = 1;
-    bytes execution_payload_ssz = 2;
-    repeated BlobSidecar blob_sidecars = 3;
 }
 
 message CommitSignature {
@@ -44,15 +36,11 @@ message CommitSignature {
     Signature signature = 2;
 }
 
-message AggregatedSignature {
-    repeated CommitSignature signatures = 1;
-}
-
 message CommitCertificate {
     uint64 height = 1;
     uint32 round = 2;
     ValueId value_id = 3;
-    AggregatedSignature aggregated_signature = 4;
+    repeated CommitSignature signatures = 4;
 }
 
 message ProposedValue {
@@ -64,31 +52,16 @@ message ProposedValue {
     bool validity = 6;
 }
 
-message VoteSetRequest {
-  uint64 height = 1;
-  uint32 round = 2;
-}
-
-message VoteSetResponse {
-  uint64 height = 1;
-  uint32 round = 2;
-  VoteSet vote_set = 3;
-}
-
-message VoteSet {
-  repeated SignedMessage signed_votes = 1;
-}
+// VoteSet types removed - no longer supported in malachite sync protocol
 
 message SyncRequest {
   oneof request {
     ValueRequest value_request = 1;
-    VoteSetRequest vote_set_request = 2;
   }
 }
 
 message SyncResponse {
   oneof response {
     ValueResponse value_response = 1;
-    VoteSetResponse vote_set_response = 2;
   }
 }

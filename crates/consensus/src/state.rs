@@ -245,65 +245,34 @@ where
             .map_err(|e| eyre::Report::new(e))
     }
 
-    pub async fn store_synced_value(
+    /// Store execution payload data for a synced value at arbitrary height/round
+    ///
+    /// This is used by ProcessSyncedValue to store execution payloads received
+    /// during state sync, which may be for different heights/rounds than current.
+    pub async fn store_synced_block_data(
         &mut self,
         height: Height,
         round: Round,
-        proposer: Address,
-        mut value: Value,
-        execution_payload_ssz: Bytes,
-        blob_sidecars: Vec<BlobSidecar>,
-    ) -> eyre::Result<ProposedValue<LoadContext>> {
-        #[allow(deprecated)]
-        {
-            value.extensions = Bytes::new();
-        }
-
-        let proposed_value = ProposedValue {
-            height,
-            round,
-            valid_round: Round::Nil,
-            proposer,
-            value,
-            validity: Validity::Valid,
-        };
-
+        data: Bytes,
+    ) -> eyre::Result<()> {
         self.store
-            .store_undecided_proposal(proposed_value.clone())
+            .store_undecided_block_data(height, round, data)
             .await
-            .map_err(|e| eyre::Report::new(e))?;
-
-        self.store
-            .store_undecided_block_data(height, round, execution_payload_ssz)
-            .await
-            .map_err(|e| eyre::Report::new(e))?;
-
-        if !blob_sidecars.is_empty() {
-            let round_i64 = round.as_i64();
-            self.blob_engine
-                .verify_and_store(height, round_i64, &blob_sidecars)
-                .await
-                .map_err(|e| eyre::Report::new(e))?;
-            self.blob_engine
-                .mark_decided(height, round_i64)
-                .await
-                .map_err(|e| eyre::Report::new(e))?;
-            self.blob_rounds
-                .entry(height)
-                .or_insert_with(HashSet::new)
-                .insert(round_i64);
-        }
-
-        Ok(proposed_value)
+            .map_err(|e| eyre::Report::new(e))
     }
 
-    pub async fn get_undecided_proposal(
-        &self,
-        height: Height,
-        round: Round,
-    ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
+    /// Store a synced proposal value
+    ///
+    /// This is used by ProcessSyncedValue to store the ProposedValue received
+    /// during state sync. The proposal MUST be stored before consensus decides,
+    /// otherwise the commit() method will fail when it tries to retrieve the
+    /// undecided proposal.
+    pub async fn store_synced_proposal(
+        &mut self,
+        value: ProposedValue<LoadContext>,
+    ) -> eyre::Result<()> {
         self.store
-            .get_undecided_proposal(height, round)
+            .store_undecided_proposal(value)
             .await
             .map_err(|e| eyre::Report::new(e))
     }
@@ -547,17 +516,7 @@ where
         data: Bytes,
         blobs_bundle: Option<BlobsBundle>,
     ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
-        self.stream_proposal_with_proposer(self.address, value, data, blobs_bundle)
-    }
-
-    pub fn stream_proposal_with_proposer(
-        &mut self,
-        proposer: Address,
-        value: LocallyProposedValue<LoadContext>,
-        data: Bytes,
-        blobs_bundle: Option<BlobsBundle>,
-    ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
-        let parts = self.make_proposal_parts(proposer, value, data, blobs_bundle);
+        let parts = self.make_proposal_parts(value, data, blobs_bundle);
 
         let stream_id = self.stream_id();
 
@@ -577,7 +536,6 @@ where
     /// Phase 3: Updated to stream blobs as BlobSidecar parts
     fn make_proposal_parts(
         &self,
-        proposer: Address,
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
         blobs_bundle: Option<BlobsBundle>,
@@ -590,7 +548,7 @@ where
             parts.push(ProposalPart::Init(ProposalInit::new(
                 value.height,
                 value.round,
-                proposer,
+                self.address,
             )));
 
             hasher.update(value.height.as_u64().to_be_bytes().as_slice());

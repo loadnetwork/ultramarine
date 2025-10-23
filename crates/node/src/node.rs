@@ -6,11 +6,12 @@ use std::{path::PathBuf, str::FromStr};
 use async_trait::async_trait;
 use color_eyre::eyre;
 use malachitebft_app_channel::app::{
-    EngineHandle, Node, NodeHandle,
+    node::{EngineHandle, Node, NodeHandle},
     events::{RxEvent, TxEvent},
     metrics::SharedRegistry,
-    types::{Keypair, config::Config, core::VotingPower},
+    types::{Keypair, core::VotingPower},
 };
+use ultramarine_cli::config::Config;
 use rand::{CryptoRng, RngCore};
 use tokio::task::JoinHandle;
 use ultramarine_blob_engine::{BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
@@ -76,6 +77,7 @@ impl NodeHandle<LoadContext> for Handle {
 #[async_trait]
 impl Node for App {
     type Context = LoadContext;
+    type Config = Config;
     type Genesis = Genesis;
     type PrivateKeyFile = PrivateKey;
     type SigningProvider = Ed25519Provider;
@@ -85,15 +87,12 @@ impl Node for App {
         self.home_dir.to_owned()
     }
 
-    fn get_signing_provider(&self, private_key: PrivateKey) -> Self::SigningProvider {
-        Ed25519Provider::new(private_key)
+    fn load_config(&self) -> eyre::Result<Self::Config> {
+        Ok(self.config.clone())
     }
 
-    fn generate_private_key<R>(&self, rng: R) -> PrivateKey
-    where
-        R: RngCore + CryptoRng,
-    {
-        PrivateKey::generate(rng)
+    fn get_signing_provider(&self, private_key: PrivateKey) -> Self::SigningProvider {
+        Ed25519Provider::new(private_key)
     }
 
     fn get_address(&self, pk: &PublicKey) -> Address {
@@ -113,26 +112,14 @@ impl Node for App {
         file
     }
 
-    fn load_private_key_file(&self) -> std::io::Result<Self::PrivateKeyFile> {
+    fn load_private_key_file(&self) -> eyre::Result<Self::PrivateKeyFile> {
         let private_key = std::fs::read_to_string(&self.private_key_file)?;
-        serde_json::from_str(&private_key).map_err(|e| e.into())
+        Ok(serde_json::from_str(&private_key)?)
     }
 
-    fn make_private_key_file(&self, private_key: PrivateKey) -> Self::PrivateKeyFile {
-        private_key
-    }
-
-    fn load_genesis(&self) -> std::io::Result<Self::Genesis> {
+    fn load_genesis(&self) -> eyre::Result<Self::Genesis> {
         let genesis = std::fs::read_to_string(&self.genesis_file)?;
-        serde_json::from_str(&genesis).map_err(|e| e.into())
-    }
-
-    fn make_genesis(&self, validators: Vec<(PublicKey, VotingPower)>) -> Self::Genesis {
-        let validators = validators.into_iter().map(|(pk, vp)| Validator::new(pk, vp));
-
-        let validator_set = ValidatorSet::new(validators);
-
-        Genesis { validator_set }
+        Ok(serde_json::from_str(&genesis)?)
     }
 
     async fn start(&self) -> eyre::Result<Handle> {
@@ -154,12 +141,13 @@ impl Node for App {
 
         let codec = ProtobufCodec;
 
-        // Start malachite engine
+        // Start malachite engine with separate WAL and network codecs
         let (mut channels, engine_handle) = malachitebft_app_channel::start_engine(
             ctx,
-            codec,
             self.clone(),
             self.config.clone(),
+            codec, // wal_codec
+            codec, // net_codec (same codec for both)
             self.start_height,
             initial_validator_set,
         )
@@ -338,5 +326,31 @@ impl Node for App {
     async fn run(self) -> eyre::Result<()> {
         let handles = self.start().await?;
         handles.app.await.map_err(Into::into)
+    }
+}
+
+// Implementations of separate capability traits
+use malachitebft_app_channel::app::node::{CanGeneratePrivateKey, CanMakeGenesis, CanMakePrivateKeyFile};
+
+impl CanGeneratePrivateKey for App {
+    fn generate_private_key<R>(&self, rng: R) -> PrivateKey
+    where
+        R: RngCore + CryptoRng,
+    {
+        PrivateKey::generate(rng)
+    }
+}
+
+impl CanMakePrivateKeyFile for App {
+    fn make_private_key_file(&self, private_key: PrivateKey) -> Self::PrivateKeyFile {
+        private_key
+    }
+}
+
+impl CanMakeGenesis for App {
+    fn make_genesis(&self, validators: Vec<(PublicKey, VotingPower)>) -> Self::Genesis {
+        let validators = validators.into_iter().map(|(pk, vp)| Validator::new(pk, vp));
+        let validator_set = ValidatorSet::new(validators);
+        Genesis { validator_set }
     }
 }

@@ -3,17 +3,17 @@ use alloy_rpc_types_engine::ExecutionPayloadV3;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
 use malachitebft_app_channel::{
-    AppMsg, Channels, ConsensusMsg, NetworkMsg,
+    AppMsg, Channels, NetworkMsg,
     app::{
         streaming::StreamContent,
         types::{
             LocallyProposedValue, ProposedValue,
-            codec::Codec,
             core::{Round, Validity},
             sync::RawDecidedValue,
         },
     },
 };
+use malachitebft_engine::host::Next;
 use ssz::{Decode, Encode};
 use tracing::{debug, error, info};
 use ultramarine_blob_engine::BlobEngine;
@@ -25,7 +25,7 @@ use ultramarine_types::{
     codec::proto::ProtobufCodec,
     context::LoadContext,
     engine_api::ExecutionBlock,
-    sync::SyncedValueExtensions,
+    sync::SyncedValuePackage,
 };
 
 pub async fn run(
@@ -72,7 +72,7 @@ pub async fn run(
                 info!(start_height = %state.current_height, "Sending StartHeight to consensus engine.");
 
                 if reply
-                    .send(ConsensusMsg::StartHeight(
+                    .send((
                         state.current_height,
                         state.get_validator_set().clone(),
                     ))
@@ -87,13 +87,19 @@ pub async fn run(
             }
             // The next message to handle is the `StartRound` message, signaling to the app
             // that consensus has entered a new round (including the initial round 0)
-            AppMsg::StartedRound { height, round, proposer } => {
-                info!(%height, %round, %proposer, "🟢🟢 Started round");
+            AppMsg::StartedRound { height, round, proposer, role, reply_value } => {
+                info!(%height, %round, %proposer, ?role, "🟢🟢 Started round");
 
                 // We can use that opportunity to update our internal state
                 state.current_height = height;
                 state.current_round = round;
                 state.current_proposer = Some(proposer);
+
+                // Reply with any undecided values for this round (empty for now)
+                // This is needed for crash recovery
+                if reply_value.send(vec![]).is_err() {
+                    error!("🔴 Failed to send StartedRound reply_value");
+                }
             }
             // At some point, we may end up being the proposer for that round, and the consensus
             // engine will then ask us for a value to propose to the other validators.
@@ -267,19 +273,7 @@ pub async fn run(
                 }
             }
 
-            AppMsg::PeerJoined { peer_id } => {
-                info!(%peer_id, "🟢🟢 Peer joined our local view of network");
-
-                // You might want to track connected peers in your state
-                state.peers.insert(peer_id);
-            }
-
-            AppMsg::PeerLeft { peer_id } => {
-                info!(%peer_id, "🔴 Peer left our local view of network");
-
-                // Remove the peer from tracking
-                state.peers.remove(&peer_id);
-            }
+            // NOTE: PeerJoined and PeerLeft variants were removed in latest malachite
 
             // In order to figure out if we can help a peer that is lagging behind,
             // the engine may ask us for the height of the earliest available value in our store.
@@ -393,21 +387,8 @@ pub async fn run(
                 }
             }
 
-            // In some cases, e.g. to verify the signature of a vote received at a higher height
-            // than the one we are at (e.g. because we are lagging behind a little bit),
-            // the engine may ask us for the validator set at that height.
-            //
-            // In our case, our validator set stays constant between heights so we can
-            // send back the validator set found in our genesis state.
-            // TODO: For a production client, this is a major simplification. This handler
-            // must be updated to support dynamic validator sets. The `state.get_validator_set()`
-            // function should be modified to accept the `height` parameter and look up the
-            // correct historical validator set for that height.
-            AppMsg::GetValidatorSet { height: _, reply } => {
-                if reply.send(state.get_validator_set().clone()).is_err() {
-                    error!("🔴 Failed to send GetValidatorSet reply");
-                }
-            }
+            // NOTE: GetValidatorSet variant was removed in latest malachite
+            // Validator set is now provided via ConsensusReady message
 
             // After some time, consensus will finally reach a decision on the value
             // to commit for the current height, and will notify the application,
@@ -571,7 +552,7 @@ pub async fn run(
 
                 // And then we instruct consensus to start the next height
                 if reply
-                    .send(ConsensusMsg::StartHeight(
+                    .send(Next::Start(
                         state.current_height,
                         state.get_validator_set().clone(),
                     ))
@@ -589,25 +570,124 @@ pub async fn run(
             // application to decode it from its wire format and send back the decoded
             // value to consensus.
             //
-            // TODO: store the received value somewhere here
+            // PHASE 5.1 (Pre-V0 Sync): Unwrap SyncedValuePackage and store payload + blobs
             AppMsg::ProcessSyncedValue { height, round, proposer, value_bytes, reply } => {
-                info!(%height, %round, "🟢🟢 Processing synced value");
+                info!(%height, %round, "🟢🟢 Processing synced value - unwrapping package");
 
-                let value = decode_value(value_bytes);
+                // Decode the sync package
+                let package = match SyncedValuePackage::decode(&value_bytes) {
+                    Ok(pkg) => pkg,
+                    Err(e) => {
+                        error!(%height, %round, "Failed to decode SyncedValuePackage: {}", e);
+                        // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
+                        let _ = reply.send(None);
+                        continue;
+                    }
+                };
 
-                // We send to consensus to see if it has been decided on
-                if reply
-                    .send(ProposedValue {
-                        height,
-                        round,
-                        valid_round: Round::Nil,
-                        proposer,
-                        value,
-                        validity: Validity::Valid,
-                    })
-                    .is_err()
-                {
-                    error!("Failed to send ProcessSyncedValue reply");
+                match package {
+                    SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
+                        info!(
+                            %height,
+                            %round,
+                            payload_size = execution_payload_ssz.len(),
+                            blob_count = blob_sidecars.len(),
+                            "Received Full sync package"
+                        );
+
+                        // 1. Store execution payload
+                        if let Err(e) = state
+                            .store_synced_block_data(height, round, execution_payload_ssz)
+                            .await
+                        {
+                            error!(%height, %round, "Failed to store synced payload: {}", e);
+                            // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
+                            let _ = reply.send(None);
+                            continue;
+                        }
+
+                        // 2. Store and verify blobs (if any)
+                        if !blob_sidecars.is_empty() {
+                            // Convert Round to i64 for blob engine
+                            let round_i64 = round.as_i64();
+
+                            if let Err(e) = state
+                                .blob_engine()
+                                .verify_and_store(height, round_i64, &blob_sidecars)
+                                .await
+                            {
+                                error!(%height, %round, "Failed to verify/store blobs: {}", e);
+                                // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
+                                let _ = reply.send(None);
+                                continue;
+                            }
+
+                            // 3. Mark blobs as decided immediately
+                            // (Synced values are already decided, skip UNDECIDED state)
+                            if let Err(e) = state.blob_engine().mark_decided(height, round_i64).await {
+                                error!(%height, %round, "Failed to mark blobs decided: {}", e);
+                                // Don't fail here, just log - blobs are stored and verified
+                            }
+                        }
+
+                        // 4. Build the ProposedValue
+                        let proposed_value = ProposedValue {
+                            height,
+                            round,
+                            valid_round: Round::Nil,
+                            proposer,
+                            value,
+                            validity: Validity::Valid,
+                        };
+
+                        // 5. CRITICAL: Store the proposal BEFORE replying to consensus
+                        // The commit() method later requires this proposal to be in the store,
+                        // otherwise it will abort with "Trying to commit a value that is not decided"
+                        if let Err(e) = state.store_synced_proposal(proposed_value.clone()).await {
+                            error!(%height, %round, "Failed to store synced proposal: {}", e);
+                            // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
+                            let _ = reply.send(None);
+                            continue;
+                        }
+
+                        // 6. Send to consensus
+                        // Now it's safe to reply - when consensus decides, commit() will find the proposal
+                        // Wrap in Some() per Malachite protocol (expects Option<ProposedValue>)
+                        if reply.send(Some(proposed_value)).is_err() {
+                            error!("Failed to send ProcessSyncedValue success reply");
+                        } else {
+                            info!(%height, %round, "✅ Successfully processed Full sync package");
+                        }
+                    }
+
+                    SyncedValuePackage::MetadataOnly { value: _value } => {
+                        // CRITICAL ERROR: MetadataOnly should NEVER happen in pre-v0
+                        // We have no pruning, so data should always be available.
+                        // If we receive MetadataOnly, it means:
+                        // 1. The peer is buggy/malicious, OR
+                        // 2. Our GetDecidedValue is broken
+                        //
+                        // We MUST NOT proceed because:
+                        // - We have no execution payload bytes
+                        // - When consensus decides, Decided handler will call
+                        //   state.get_block_data() which returns None
+                        // - Node will crash with "Missing block bytes for decided value"
+                        //
+                        // Better to fail fast here than crash later.
+                        error!(
+                            %height,
+                            %round,
+                            "🔴 CRITICAL: Received MetadataOnly sync package in pre-v0! \
+                            This should NEVER happen (no pruning yet). \
+                            Peer may be buggy or storage is corrupted. \
+                            Skipping this synced value to prevent node crash."
+                        );
+
+                        // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
+                        // This synced value is invalid for pre-v0 and must be rejected
+                        let _ = reply.send(None);
+                        continue;
+                    }
                 }
                                 /*
                 // TODO: This handler is critical for state sync to work correctly.
@@ -668,16 +748,85 @@ pub async fn run(
             // then the engine might ask the application to provide with the value
             // that was decided at some lower height. In that case, we fetch it from our store
             // and send it to consensus.
+            //
+            // PHASE 5.1 (Pre-V0 Sync): Bundle execution payload + blobs for syncing peers
             AppMsg::GetDecidedValue { height, reply } => {
-                info!(%height, "🟢🟢 GetDecidedValue");
+                info!(%height, "🟢🟢 GetDecidedValue - bundling payload + blobs for sync");
+
                 let decided_value = state.get_decided_value(height).await;
 
-                let raw_decided_value = decided_value.map(|decided_value| RawDecidedValue {
-                    certificate: decided_value.certificate,
-                    value_bytes: ProtobufCodec
-                        .encode(&decided_value.value)
-                        .expect("Not correct value bytes"),
-                });
+                let raw_decided_value = match decided_value {
+                    Some(decided_value) => {
+                        // Get round from certificate
+                        let round = decided_value.certificate.round;
+
+                        // Attempt to retrieve execution payload bytes
+                        let payload_bytes = state.get_block_data(height, round).await;
+
+                        // Attempt to retrieve blob sidecars
+                        let blob_sidecars_result = state.blob_engine().get_for_import(height).await;
+
+                        // Build the sync package
+                        let package = match (payload_bytes, blob_sidecars_result) {
+                            (Some(payload), Ok(blobs)) if !blobs.is_empty() => {
+                                info!(
+                                    %height,
+                                    %round,
+                                    blob_count = blobs.len(),
+                                    payload_size = payload.len(),
+                                    "Sending Full sync package"
+                                );
+                                SyncedValuePackage::Full {
+                                    value: decided_value.value.clone(),
+                                    execution_payload_ssz: payload,
+                                    blob_sidecars: blobs,
+                                }
+                            }
+                            (Some(payload), Ok(_blobs)) => {
+                                // No blobs, but have payload
+                                info!(
+                                    %height,
+                                    %round,
+                                    payload_size = payload.len(),
+                                    "Sending Full sync package (no blobs)"
+                                );
+                                SyncedValuePackage::Full {
+                                    value: decided_value.value.clone(),
+                                    execution_payload_ssz: payload,
+                                    blob_sidecars: vec![],
+                                }
+                            }
+                            _ => {
+                                // In pre-v0 this shouldn't happen (no pruning yet)
+                                // But provide safe fallback
+                                error!(
+                                    %height,
+                                    %round,
+                                    "Payload or blobs missing, sending MetadataOnly (this shouldn't happen in pre-v0!)"
+                                );
+                                SyncedValuePackage::MetadataOnly {
+                                    value: decided_value.value.clone(),
+                                }
+                            }
+                        };
+
+                        // Encode package into value_bytes
+                        match package.encode() {
+                            Ok(value_bytes) => Some(RawDecidedValue {
+                                certificate: decided_value.certificate,
+                                value_bytes,
+                            }),
+                            Err(e) => {
+                                error!(%height, %round, "Failed to encode SyncedValuePackage: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        info!(%height, "No decided value found at this height");
+                        None
+                    }
+                };
 
                 if reply.send(raw_decided_value).is_err() {
                     error!("Failed to send GetDecidedValue reply");

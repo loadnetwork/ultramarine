@@ -4,7 +4,7 @@ use std::{path::Path, str::FromStr};
 
 use clap::Parser;
 use color_eyre::{Result, eyre::eyre};
-use malachitebft_app::Node;
+use malachitebft_app::node::{CanGeneratePrivateKey, CanMakeGenesis, CanMakePrivateKeyFile, Node};
 use malachitebft_config::*;
 use tracing::info;
 
@@ -106,7 +106,7 @@ impl TestnetCmd {
     /// Execute the testnet command
     pub fn run<N>(&self, node: &N, home_dir: &Path, logging: LoggingConfig) -> Result<()>
     where
-        N: Node,
+        N: Node + CanGeneratePrivateKey + CanMakeGenesis + CanMakePrivateKeyFile,
     {
         let runtime = match self.runtime {
             RuntimeFlavour::SingleThreaded => RuntimeConfig::SingleThreaded,
@@ -149,7 +149,7 @@ pub fn testnet<N>(
     deterministic: bool,
 ) -> std::result::Result<(), Error>
 where
-    N: Node,
+    N: Node + CanGeneratePrivateKey + CanMakeGenesis + CanMakePrivateKeyFile,
 {
     let private_keys = crate::new::generate_private_keys(node, nodes, deterministic);
     let public_keys = private_keys.iter().map(|pk| node.get_public_key(pk)).collect();
