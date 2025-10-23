@@ -35,7 +35,7 @@ pub mod value_metadata;
 // This module contains Ethereum-specific types (BeaconBlockHeader, merkle proofs)
 // that are used ONLY within BlobSidecar for spec compatibility.
 // These types DO NOT leak into core Ultramarine consensus (Value, Malachite, etc.)
-pub(crate) mod ethereum_compat;
+pub mod ethereum_compat;
 
 // Phase 5.1: State synchronization types for EIP-4844 blob support
 // Added as part of pre-v0 sync implementation (FINAL_PLAN.md Phase 5.1)

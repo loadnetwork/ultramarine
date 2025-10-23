@@ -7,11 +7,10 @@ use malachitebft_app::node::{CanGeneratePrivateKey, CanMakeGenesis, CanMakePriva
 use malachitebft_config::{
     BootstrapProtocol, LoggingConfig, RuntimeConfig, Selector, TransportProtocol,
 };
-
-use crate::config::Config;
 use tracing::{info, warn};
 
 use crate::{
+    config::Config,
     error::Error,
     file::{save_config, save_genesis, save_priv_validator_key},
     new::{generate_config, generate_genesis, generate_private_keys},

@@ -23,8 +23,9 @@ rocksdb = "0.22"
 tokio.workspace = true
 async-trait.workspace = true
 
-# Serialization
-bincode = "1.3"
+# Serialization (protobuf for consistency with network layer)
+malachitebft-proto.workspace = true
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true

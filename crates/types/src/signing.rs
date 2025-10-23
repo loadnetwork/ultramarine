@@ -53,7 +53,10 @@ impl Ed25519Provider {
 #[async_trait]
 impl SigningProvider<LoadContext> for Ed25519Provider {
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn sign_vote(&self, vote: Vote) -> Result<SignedMessage<LoadContext, Vote>, SigningError> {
+    async fn sign_vote(
+        &self,
+        vote: Vote,
+    ) -> Result<SignedMessage<LoadContext, Vote>, SigningError> {
         let signature = self.sign(&vote.to_bytes());
         Ok(SignedMessage::new(vote, signature))
     }
@@ -70,7 +73,10 @@ impl SigningProvider<LoadContext> for Ed25519Provider {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn sign_proposal(&self, proposal: Proposal) -> Result<SignedMessage<LoadContext, Proposal>, SigningError> {
+    async fn sign_proposal(
+        &self,
+        proposal: Proposal,
+    ) -> Result<SignedMessage<LoadContext, Proposal>, SigningError> {
         let signature = self.private_key.sign(&proposal.to_bytes());
         Ok(SignedMessage::new(proposal, signature))
     }
@@ -87,7 +93,10 @@ impl SigningProvider<LoadContext> for Ed25519Provider {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn sign_proposal_part(&self, proposal_part: ProposalPart) -> Result<SignedMessage<LoadContext, ProposalPart>, SigningError> {
+    async fn sign_proposal_part(
+        &self,
+        proposal_part: ProposalPart,
+    ) -> Result<SignedMessage<LoadContext, ProposalPart>, SigningError> {
         let signature = self.private_key.sign(&proposal_part.to_sign_bytes());
         Ok(SignedMessage::new(proposal_part, signature))
     }
@@ -104,7 +113,10 @@ impl SigningProvider<LoadContext> for Ed25519Provider {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn sign_vote_extension(&self, _extension: Bytes) -> Result<SignedMessage<LoadContext, Bytes>, SigningError> {
+    async fn sign_vote_extension(
+        &self,
+        _extension: Bytes,
+    ) -> Result<SignedMessage<LoadContext, Bytes>, SigningError> {
         unimplemented!("Vote extensions not yet supported")
     }
 
@@ -143,7 +155,8 @@ impl Ed25519Provider {
         );
 
         // Verify signature
-        let result = self.verify_signed_vote(&vote, &commit_sig.signature, validator.public_key())
+        let result = self
+            .verify_signed_vote(&vote, &commit_sig.signature, validator.public_key())
             .await
             .map_err(|e| format!("Signature verification error: {:?}", e))?;
 

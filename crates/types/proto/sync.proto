@@ -65,3 +65,24 @@ message SyncResponse {
     ValueResponse value_response = 1;
   }
 }
+
+// Phase 5: SyncedValuePackage for state synchronization with blobs
+// This goes inside RawDecidedValue.value_bytes field
+message SyncedValuePackage {
+  oneof package {
+    FullPackage full = 1;
+    MetadataOnlyPackage metadata_only = 2;
+  }
+}
+
+// Full block data with execution payload and blobs
+message FullPackage {
+  Value value = 1;                        // Value metadata for consensus
+  bytes execution_payload_ssz = 2;        // Raw execution payload bytes
+  repeated BlobSidecar blob_sidecars = 3; // Blob sidecars (~131KB each)
+}
+
+// Metadata-only fallback (for pruned data)
+message MetadataOnlyPackage {
+  Value value = 1;  // Just the Value metadata
+}

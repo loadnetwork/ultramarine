@@ -271,10 +271,7 @@ where
         &mut self,
         value: ProposedValue<LoadContext>,
     ) -> eyre::Result<()> {
-        self.store
-            .store_undecided_proposal(value)
-            .await
-            .map_err(|e| eyre::Report::new(e))
+        self.store.store_undecided_proposal(value).await.map_err(|e| eyre::Report::new(e))
     }
 
     /// Retrieves a decided block at the given height
@@ -285,6 +282,23 @@ where
     /// Retrieves a decided block data at the given height
     pub async fn get_block_data(&self, height: Height, round: Round) -> Option<Bytes> {
         self.store.get_block_data(height, round).await.ok().flatten()
+    }
+
+    /// Returns the validator address associated with this state.
+    pub fn validator_address(&self) -> &Address {
+        &self.address
+    }
+
+    /// Retrieves an undecided proposal for restreaming or diagnostics.
+    pub async fn load_undecided_proposal(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
+        self.store
+            .get_undecided_proposal(height, round)
+            .await
+            .map_err(|e| eyre::Report::new(e))
     }
 
     /// Commits a value with the given certificate, updating internal state
@@ -510,13 +524,22 @@ where
     /// Updates internal sequence number and current proposal.
     ///
     /// Phase 3: Now accepts optional BlobsBundle for streaming blob sidecars
+    ///
+    /// # Arguments
+    ///
+    /// * `proposer` - Optional proposer address. If None, uses self.address (for our own
+    ///   proposals). If Some, uses the provided address (for restreaming others' proposals).
     pub fn stream_proposal(
         &mut self,
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
         blobs_bundle: Option<BlobsBundle>,
+        proposer: Option<Address>, // For RestreamProposal support
     ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
-        let parts = self.make_proposal_parts(value, data, blobs_bundle);
+        // Use provided proposer (for restreaming) or default to self.address (for our own
+        // proposals)
+        let proposer_address = proposer.unwrap_or(self.address);
+        let parts = self.make_proposal_parts(value, data, blobs_bundle, proposer_address);
 
         let stream_id = self.stream_id();
 
@@ -539,6 +562,7 @@ where
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
         blobs_bundle: Option<BlobsBundle>,
+        proposer: Address, // Explicit proposer (for restreaming)
     ) -> Vec<ProposalPart> {
         let mut hasher = sha3::Keccak256::new();
         let mut parts = Vec::new();
@@ -548,7 +572,7 @@ where
             parts.push(ProposalPart::Init(ProposalInit::new(
                 value.height,
                 value.round,
-                self.address,
+                proposer, // Use provided proposer, not self.address
             )));
 
             hasher.update(value.height.as_u64().to_be_bytes().as_slice());
@@ -569,7 +593,8 @@ where
             for (index, ((blob, commitment), proof)) in
                 bundle.blobs.iter().zip(&bundle.commitments).zip(&bundle.proofs).enumerate()
             {
-                let sidecar = BlobSidecar::new(index as u8, blob.clone(), *commitment, *proof);
+                let sidecar =
+                    BlobSidecar::from_bundle_item(index as u8, blob.clone(), *commitment, *proof);
                 parts.push(ProposalPart::BlobSidecar(sidecar));
 
                 // Include blob data in signature hash

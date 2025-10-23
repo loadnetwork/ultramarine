@@ -23,11 +23,31 @@ message ExecutionPayloadHeader {
     uint64 excess_blob_gas = 12;
     bytes prev_randao = 13;         // 32 bytes
     bytes fee_recipient = 14;       // 20 bytes
+    bytes extra_data = 15;          // up to 32 bytes
+    bytes transactions_root = 16;   // 32 bytes
+    bytes withdrawals_root = 17;    // 32 bytes
 }
 
 // KZG commitment (48 bytes)
 message KzgCommitment {
     bytes data = 1;  // 48 bytes
+}
+
+// Phase 4: Ethereum Deneb compatibility - Beacon block header
+// This matches the Ethereum consensus spec BeaconBlockHeader structure
+message BeaconBlockHeader {
+    uint64 slot = 1;               // Slot number (height in our case)
+    uint64 proposer_index = 2;     // Validator index of proposer
+    bytes parent_root = 3;         // 32 bytes - root of previous header
+    bytes state_root = 4;          // 32 bytes - root of state after execution
+    bytes body_root = 5;           // 32 bytes - root of BeaconBlockBody
+}
+
+// Phase 4: Signed beacon block header with Ed25519 signature
+// Note: Ultramarine uses Ed25519 instead of BLS12-381
+message SignedBeaconBlockHeader {
+    BeaconBlockHeader message = 1;
+    Signature signature = 2;       // Ed25519 signature (64 bytes)
 }
 
 // Phase 2: Lightweight value metadata (~2KB)
@@ -103,11 +123,16 @@ message ProposalData {
 }
 
 // Phase 3: Blob sidecar for streaming blobs separately from execution payload
+// Phase 4: Extended with Ethereum Deneb compatibility fields
 message BlobSidecar {
-    uint32 index = 1;              // Blob index (0-5 for Deneb, 0-8 for Electra)
-    bytes blob = 2;                // Blob data (131,072 bytes)
-    bytes kzg_commitment = 3;      // KZG commitment (48 bytes)
-    bytes kzg_proof = 4;           // KZG proof (48 bytes)
+    uint32 index = 1;                          // Blob index (0-5 for Deneb, 0-8 for Electra, 0-1023 for Ultramarine)
+    bytes blob = 2;                            // Blob data (131,072 bytes)
+    bytes kzg_commitment = 3;                  // KZG commitment (48 bytes)
+    bytes kzg_proof = 4;                       // KZG proof (48 bytes)
+
+    // Phase 4: Ethereum Deneb compatibility fields
+    SignedBeaconBlockHeader signed_block_header = 5;  // Signed header (~192 bytes)
+    repeated bytes kzg_commitment_inclusion_proof = 6; // 17-branch Merkle proof (17 × 32 = 544 bytes)
 }
 
 message ProposalFin {

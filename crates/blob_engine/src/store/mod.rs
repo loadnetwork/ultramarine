@@ -1,6 +1,8 @@
 /// ! Blob storage abstraction and implementations
 use async_trait::async_trait;
-use ultramarine_types::{height::Height, proposal_part::BlobSidecar};
+use ultramarine_types::{
+    ethereum_compat::BeaconBlockHeader, height::Height, proposal_part::BlobSidecar,
+};
 
 use crate::error::BlobStoreError;
 
@@ -117,4 +119,23 @@ pub trait BlobStore: Send + Sync + Clone {
     ///
     /// Returns the number of blobs deleted.
     async fn prune_before(&self, height: Height) -> Result<usize, BlobStoreError>;
+
+    /// Store a beacon block header for Phase 4 compatibility
+    ///
+    /// Headers are stored by height and used to compute parent_root for subsequent blocks.
+    /// This enables the SignedBeaconBlockHeader to link blocks in the Ethereum-compatible chain.
+    async fn put_beacon_header(
+        &self,
+        height: Height,
+        header: &BeaconBlockHeader,
+    ) -> Result<(), BlobStoreError>;
+
+    /// Get the beacon block header for a given height
+    ///
+    /// Returns None if no header exists at this height.
+    /// Used to retrieve the previous header's hash as parent_root for the next block.
+    async fn get_beacon_header(
+        &self,
+        height: Height,
+    ) -> Result<Option<BeaconBlockHeader>, BlobStoreError>;
 }

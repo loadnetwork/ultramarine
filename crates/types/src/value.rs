@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     // Phase 2: Import types needed for Value refactor
+    aliases::Bytes as AlloyBytes,
     blob::KzgCommitment,
     engine_api::ExecutionPayloadHeader,
     proto,
@@ -237,6 +238,9 @@ impl Value {
                     gas_used: 0,
                     timestamp: 0,
                     base_fee_per_gas: Default::default(),
+                    extra_data: AlloyBytes::from(Vec::<u8>::new()),
+                    transactions_root: Default::default(),
+                    withdrawals_root: Default::default(),
                     blob_gas_used: 0,
                     excess_blob_gas: 0,
                     prev_randao: Default::default(),
@@ -326,6 +330,9 @@ impl Protobuf for Value {
                     gas_used: 0,
                     timestamp: 0,
                     base_fee_per_gas: Default::default(),
+                    extra_data: AlloyBytes::from(Vec::<u8>::new()),
+                    transactions_root: Default::default(),
+                    withdrawals_root: Default::default(),
                     blob_gas_used: 0,
                     excess_blob_gas: 0,
                     prev_randao: Default::default(),
@@ -355,7 +362,7 @@ mod tests {
     use super::*;
     use crate::{
         address::Address,
-        aliases::{B256, Bloom, U256},
+        aliases::{B256, Bloom, Bytes, U256},
     };
 
     fn create_test_header() -> ExecutionPayloadHeader {
@@ -370,6 +377,9 @@ mod tests {
             gas_used: 15_000_000,
             timestamp: 1234567890,
             base_fee_per_gas: U256::from(1000000000u64),
+            extra_data: Bytes::from(vec![0u8; 4]),
+            transactions_root: B256::from([7u8; 32]),
+            withdrawals_root: B256::from([8u8; 32]),
             blob_gas_used: 262144,
             excess_blob_gas: 0,
             prev_randao: B256::from([6u8; 32]),

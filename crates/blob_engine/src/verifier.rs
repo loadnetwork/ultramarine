@@ -352,7 +352,7 @@ mod tests {
         let commitment = KzgCommitment([0u8; 48]);
         let proof = KzgProof([0u8; 48]);
 
-        let sidecar = BlobSidecar::new(0, blob, commitment, proof);
+        let sidecar = BlobSidecar::from_bundle_item(0, blob, commitment, proof);
 
         // This should fail with invalid proof since we're using dummy data
         let result = verifier.verify_blob_sidecar(&sidecar);

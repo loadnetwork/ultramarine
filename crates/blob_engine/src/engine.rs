@@ -119,6 +119,24 @@ pub trait BlobEngine: Send + Sync {
     ///
     /// Number of blobs deleted
     async fn prune_archived_before(&self, height: Height) -> Result<usize, BlobEngineError>;
+
+    /// Retrieve undecided blobs for a specific (height, round)
+    ///
+    /// Used for restreaming proposals where we need to send the original blob sidecars.
+    ///
+    /// # Arguments
+    ///
+    /// * `height` - Block height
+    /// * `round` - Consensus round
+    ///
+    /// # Returns
+    ///
+    /// Vector of blob sidecars, sorted by index
+    async fn get_undecided_blobs(
+        &self,
+        height: Height,
+        round: i64,
+    ) -> Result<Vec<BlobSidecar>, BlobEngineError>;
 }
 
 /// Default blob engine implementation
@@ -255,6 +273,23 @@ where
 
         Ok(count)
     }
+
+    async fn get_undecided_blobs(
+        &self,
+        height: Height,
+        round: i64,
+    ) -> Result<Vec<BlobSidecar>, BlobEngineError> {
+        let blobs = self.store.get_undecided_blobs(height, round).await?;
+
+        debug!(
+            height = height.as_u64(),
+            round = round,
+            count = blobs.len(),
+            "Retrieved undecided blobs"
+        );
+
+        Ok(blobs)
+    }
 }
 
 #[cfg(test)]
@@ -272,7 +307,7 @@ mod tests {
         let blob = Blob::new(Bytes::from(blob_data)).unwrap();
         let commitment = KzgCommitment([index; 48]);
         let proof = KzgProof([index; 48]);
-        BlobSidecar::new(index, blob, commitment, proof)
+        BlobSidecar::from_bundle_item(index, blob, commitment, proof)
     }
 
     #[tokio::test]
