@@ -17,11 +17,10 @@ use malachitebft_engine::host::Next;
 use ssz::{Decode, Encode};
 use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
-use ultramarine_consensus::state::{State, decode_value};
+use ultramarine_consensus::state::State;
 use ultramarine_execution::client::ExecutionClient;
 use ultramarine_types::{
     aliases::{Block, BlockHash},
-    blob::BlobsBundle,
     context::LoadContext,
     engine_api::ExecutionBlock,
     sync::SyncedValuePackage,
@@ -141,50 +140,45 @@ pub async fn run(
                 // which will be passed to the execution client (EL) on commit.
                 state.store_undecided_proposal_data(bytes.clone()).await?;
 
+                // Transform bundle into signed header + sidecars with inclusion proofs
+                let (signed_header, sidecars) = state
+                    .prepare_blob_sidecar_parts(&proposal, blobs_bundle.as_ref())
+                    .map_err(|e| eyre!("Failed to prepare blob sidecars: {}", e))?;
+
+                state
+                    .persist_blob_sidecar_header(height, &signed_header)
+                    .await
+                    .map_err(|e| eyre!("Failed to persist blob sidecar header: {}", e))?;
+
                 // CRITICAL FIX (Finding #1): Store blobs locally for our own proposal
                 // Without this, the proposer never stores its own blobs, causing get_for_import()
                 // to return empty when the block is decided, leading to blob count mismatch errors.
-                if let Some(ref bundle) = blobs_bundle {
-                    if !bundle.blobs.is_empty() {
-                        debug!(
-                            "Storing {} blobs locally for our own proposal at height {}, round {}",
-                            bundle.blobs.len(),
-                            height,
-                            round
-                        );
+                let round_i64 = round.as_i64();
+                let sidecars_slice = sidecars.as_slice();
+                if !sidecars_slice.is_empty() {
+                    debug!(
+                        "Storing {} blobs locally for our own proposal at height {}, round {}",
+                        sidecars_slice.len(),
+                        height,
+                        round
+                    );
+                }
 
-                        // Convert BlobsBundle to Vec<BlobSidecar>
-                        let blob_sidecars: Vec<_> = bundle
-                            .blobs
-                            .iter()
-                            .enumerate()
-                            .map(|(index, blob)| {
-                                ultramarine_types::proposal_part::BlobSidecar::from_bundle_item(
-                                    index as u8,
-                                    blob.clone(),
-                                    bundle.commitments[index],
-                                    bundle.proofs[index],
-                                )
-                            })
-                            .collect();
+                state
+                    .blob_engine()
+                    .verify_and_store(height, round_i64, sidecars_slice)
+                    .await
+                    .map_err(|e| {
+                        error!("Failed to store our own blobs: {}", e);
+                        eyre!("Proposer blob storage failed: {}", e)
+                    })?;
 
-                        // Store and verify (same as validators do when receiving proposals)
-                        let round_i64 = round.as_i64();
-                        state
-                            .blob_engine()
-                            .verify_and_store(height, round_i64, &blob_sidecars)
-                            .await
-                            .map_err(|e| {
-                                error!("Failed to store our own blobs: {}", e);
-                                eyre!("Proposer blob storage failed: {}", e)
-                            })?;
-
-                        info!(
-                            "✅ Successfully stored {} blobs for height {} (proposer's own)",
-                            blob_sidecars.len(),
-                            height
-                        );
-                    }
+                if !sidecars_slice.is_empty() {
+                    info!(
+                        "✅ Successfully stored {} blobs for height {} (proposer's own)",
+                        sidecars_slice.len(),
+                        height
+                    );
                 }
 
                 // Send it to consensus
@@ -196,7 +190,14 @@ pub async fn run(
                 // and send those parts over the network to our peers, for them to re-assemble the full value.
                 // Phase 3: Stream with blobs!
                 // Pass None for proposer since this is our own proposal
-                for stream_message in state.stream_proposal(proposal, bytes, blobs_bundle, None) {
+                let stream_sidecars = if sidecars.is_empty() {
+                    None
+                } else {
+                    Some(sidecars.as_slice())
+                };
+
+                for stream_message in state.stream_proposal(proposal, bytes, stream_sidecars, None)
+                {
                     info!(%height, %round, "Streaming proposal part: {stream_message:?}");
                     if let Err(e) = channels
                         .network
@@ -382,23 +383,13 @@ pub async fn run(
                         };
 
                         // Get blobs from blob_engine if they exist
-                        let blobs_bundle = match state.blob_engine()
+                        let blob_sidecars = match state
+                            .blob_engine()
                             .get_undecided_blobs(height, proposal_round.as_i64())
                             .await
                         {
-                            Ok(blob_sidecars) if !blob_sidecars.is_empty() => {
-                                // Reconstruct BlobsBundle from BlobSidecars
-                                let blobs = blob_sidecars.iter().map(|s| s.blob.clone()).collect();
-                                let commitments = blob_sidecars.iter().map(|s| s.kzg_commitment).collect();
-                                let proofs = blob_sidecars.iter().map(|s| s.kzg_proof).collect();
-
-                                Some(ultramarine_types::blob::BlobsBundle {
-                                    commitments,
-                                    proofs,
-                                    blobs,
-                                })
-                            }
-                            Ok(_) => None, // No blobs
+                            Ok(sidecars) if !sidecars.is_empty() => Some(sidecars),
+                            Ok(_) => None,
                             Err(e) => {
                                 error!(%height, %proposal_round, "Failed to get blobs: {}", e);
                                 None
@@ -417,7 +408,7 @@ pub async fn run(
                         for stream_message in state.stream_proposal(
                             locally_proposed_value,
                             proposal_bytes,
-                            blobs_bundle,
+                            blob_sidecars.as_deref(),
                             Some(address), // Explicit proposer for restreaming
                         ) {
                             info!(%height, %round, "Restreaming proposal part: {stream_message:?}");

@@ -33,7 +33,7 @@ use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::B256;
 use ethereum_hashing::hash32_concat;
 use serde::{Deserialize, Serialize};
-use tree_hash::{Hash256, MerkleHasher, TreeHash, BYTES_PER_CHUNK};
+use tree_hash::{BYTES_PER_CHUNK, Hash256, MerkleHasher, TreeHash};
 
 use crate::{aliases::Bytes, blob::KzgCommitment, engine_api::ExecutionPayloadHeader};
 
@@ -359,8 +359,7 @@ fn compute_execution_payload_header_root(header: &ExecutionPayloadHeader) -> B25
     hasher.write(header.receipts_root.as_slice()).expect("hash receipts_root");
 
     // logs_bloom (256 bytes) → hash to 32
-    let bloom_root =
-        tree_hash_fixed_vector(header.logs_bloom.as_slice()).expect("hash logs_bloom");
+    let bloom_root = tree_hash_fixed_vector(header.logs_bloom.as_slice()).expect("hash logs_bloom");
     hasher.write(bloom_root.as_slice()).expect("hash logs_bloom");
 
     // prev_randao (32 bytes) → use directly

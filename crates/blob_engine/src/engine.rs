@@ -105,7 +105,7 @@ pub trait BlobEngine: Send + Sync {
     ///
     /// * `height` - Block height
     /// * `indices` - Blob indices to delete
-    async fn mark_archived(&self, height: Height, indices: &[u8]) -> Result<(), BlobEngineError>;
+    async fn mark_archived(&self, height: Height, indices: &[u16]) -> Result<(), BlobEngineError>;
 
     /// Prune all decided blobs before a given height
     ///
@@ -258,7 +258,7 @@ where
         Ok(())
     }
 
-    async fn mark_archived(&self, height: Height, indices: &[u8]) -> Result<(), BlobEngineError> {
+    async fn mark_archived(&self, height: Height, indices: &[u16]) -> Result<(), BlobEngineError> {
         self.store.delete_archived(height, indices).await?;
 
         debug!(height = height.as_u64(), count = indices.len(), "Marked blobs as archived");
@@ -302,11 +302,12 @@ mod tests {
     use super::*;
     use crate::store::rocksdb::RocksDbBlobStore;
 
-    fn create_test_blob(index: u8) -> BlobSidecar {
-        let blob_data = vec![index; 131_072];
+    fn create_test_blob(index: u16) -> BlobSidecar {
+        let byte = index as u8;
+        let blob_data = vec![byte; 131_072];
         let blob = Blob::new(Bytes::from(blob_data)).unwrap();
-        let commitment = KzgCommitment([index; 48]);
-        let proof = KzgProof([index; 48]);
+        let commitment = KzgCommitment([byte; 48]);
+        let proof = KzgProof([byte; 48]);
         BlobSidecar::from_bundle_item(index, blob, commitment, proof)
     }
 

@@ -17,7 +17,7 @@
 //! ValueMetadata {
 //!     execution_payload_header: ExecutionPayloadHeader,  // ~516 bytes
 //!     blob_kzg_commitments: Vec<KzgCommitment>,         // 48 bytes × 6-9 = ~288-432 bytes
-//!     blob_count: u8,                                    // 1 byte
+//!     blob_count: u16,                                   // 2 bytes
 //!     total_blob_bytes: u32,                             // 4 bytes
 //! }
 //!
@@ -56,7 +56,7 @@
 //! - FINAL_PLAN.md Phase 2: Value Refactor
 //! - EIP-4844: https://eips.ethereum.org/EIPS/eip-4844
 
-use core::fmt;
+use core::{convert::TryFrom, fmt};
 
 use malachitebft_proto::{Error as ProtoError, Protobuf};
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,7 @@ pub struct ValueMetadata {
     /// were received via ProposalParts streaming.
     ///
     /// **Invariant**: Must equal `blob_kzg_commitments.len()`
-    pub blob_count: u8,
+    pub blob_count: u16,
 
     /// Total size of blob data in bytes
     ///
@@ -174,7 +174,8 @@ impl ValueMetadata {
         execution_payload_header: ExecutionPayloadHeader,
         blob_kzg_commitments: Vec<KzgCommitment>,
     ) -> Self {
-        let blob_count = blob_kzg_commitments.len() as u8;
+        let blob_count =
+            u16::try_from(blob_kzg_commitments.len()).expect("blob count exceeds u16::MAX");
         let total_blob_bytes = (blob_count as u32) * BYTES_PER_BLOB as u32;
 
         Self { execution_payload_header, blob_kzg_commitments, blob_count, total_blob_bytes }
@@ -252,8 +253,8 @@ impl ValueMetadata {
     /// ```
     pub fn size_bytes(&self) -> usize {
         self.execution_payload_header.size_bytes()  // ~516 bytes
-            + (self.blob_count as usize * 48)       // Commitments
-            + 1                                      // blob_count
+            + (usize::from(self.blob_count) * 48)    // Commitments
+            + 2                                      // blob_count
             + 4 // total_blob_bytes
     }
 
@@ -279,7 +280,7 @@ impl ValueMetadata {
     /// ```
     pub fn validate(&self) -> Result<(), String> {
         // Check 1: blob_count matches commitment count
-        if self.blob_count as usize != self.blob_kzg_commitments.len() {
+        if usize::from(self.blob_count) != self.blob_kzg_commitments.len() {
             return Err(format!(
                 "blob_count mismatch: field={}, commitments={}",
                 self.blob_count,
@@ -289,7 +290,7 @@ impl ValueMetadata {
 
         // Check 2: Within protocol limit
         // This chain enforces a practical limit of 1024 blobs per block
-        if self.blob_count as usize > MAX_BLOBS_PER_BLOCK {
+        if usize::from(self.blob_count) > MAX_BLOBS_PER_BLOCK {
             return Err(format!(
                 "Too many blobs: got {}, max is {} (protocol limit)",
                 self.blob_count, MAX_BLOBS_PER_BLOCK
@@ -337,7 +338,9 @@ impl Protobuf for ValueMetadata {
             proto.blob_kzg_commitments.into_iter().map(KzgCommitment::from_proto).collect();
         let blob_kzg_commitments = blob_kzg_commitments?;
 
-        let blob_count = proto.blob_count as u8;
+        let blob_count = u16::try_from(proto.blob_count).map_err(|_| {
+            ProtoError::Other(format!("blob_count {} exceeds u16::MAX", proto.blob_count))
+        })?;
         let total_blob_bytes = proto.total_blob_bytes;
 
         Ok(Self { execution_payload_header, blob_kzg_commitments, blob_count, total_blob_bytes })
