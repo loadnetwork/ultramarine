@@ -8,7 +8,7 @@ use malachitebft_app_channel::app::types::{
     codec::Codec,
     core::{CommitCertificate, Round},
 };
-use malachitebft_proto::Error as ProtoError;
+use malachitebft_proto::{Error as ProtoError, Protobuf};
 use prost::Message;
 use redb::{ReadableDatabase, ReadableTable};
 use thiserror::Error;
@@ -16,6 +16,7 @@ use tracing::error;
 use ultramarine_types::{
     codec::{proto as codec, proto::ProtobufCodec},
     context::LoadContext,
+    ethereum_compat::SignedBeaconBlockHeader,
     height::Height,
     proto,
     value::Value,
@@ -81,6 +82,9 @@ const DECIDED_BLOCK_DATA_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
 const UNDECIDED_BLOCK_DATA_TABLE: redb::TableDefinition<UndecidedValueKey, Vec<u8>> =
     redb::TableDefinition::new("undecided_block_data");
 
+const BLOCK_HEADERS_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
+    redb::TableDefinition::new("block_headers");
+
 struct Db {
     db: redb::Database,
     metrics: DbMetrics,
@@ -88,7 +92,8 @@ struct Db {
 
 impl Db {
     fn new(path: impl AsRef<Path>, metrics: DbMetrics) -> Result<Self, StoreError> {
-        Ok(Self { db: redb::Database::create(path).map_err(StoreError::Database)?, metrics })
+        let db = redb::Database::create(path).map_err(StoreError::Database)?;
+        Ok(Self { db, metrics })
     }
 
     fn get_decided_value(&self, height: Height) -> Result<Option<DecidedValue>, StoreError> {
@@ -317,6 +322,7 @@ impl Db {
         let _ = tx.open_table(UNDECIDED_PROPOSALS_TABLE)?;
         let _ = tx.open_table(DECIDED_BLOCK_DATA_TABLE)?;
         let _ = tx.open_table(UNDECIDED_BLOCK_DATA_TABLE)?;
+        let _ = tx.open_table(BLOCK_HEADERS_TABLE)?;
 
         tx.commit()?;
 
@@ -399,6 +405,88 @@ impl Db {
 
         Ok(())
     }
+
+    fn insert_block_header(
+        &self,
+        height: Height,
+        header: &SignedBeaconBlockHeader,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let proto = header.to_proto()?;
+        let bytes = proto.encode_to_vec();
+        let write_bytes = bytes.len() as u64;
+
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(BLOCK_HEADERS_TABLE)?;
+            table.insert(height, bytes)?;
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+        self.metrics.add_write_bytes(write_bytes);
+
+        Ok(())
+    }
+
+    fn get_block_header(
+        &self,
+        height: Height,
+    ) -> Result<Option<SignedBeaconBlockHeader>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOCK_HEADERS_TABLE)?;
+
+        let header = if let Some(value) = table.get(&height)? {
+            let bytes = value.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::SignedBeaconBlockHeader::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            let header = SignedBeaconBlockHeader::from_proto(proto)?;
+
+            self.metrics.add_read_bytes(bytes.len() as u64);
+            self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
+
+            Some(header)
+        } else {
+            None
+        };
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(header)
+    }
+
+    fn get_latest_block_header(
+        &self,
+    ) -> Result<Option<(Height, SignedBeaconBlockHeader)>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOCK_HEADERS_TABLE)?;
+
+        let mut iter = table.iter()?;
+        let mut result = None;
+
+        if let Some(entry) = iter.next_back() {
+            let (height_guard, value_guard) = entry?;
+            let height = height_guard.value();
+            let bytes = value_guard.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::SignedBeaconBlockHeader::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            let header = SignedBeaconBlockHeader::from_proto(proto)?;
+
+            self.metrics.add_read_bytes(bytes.len() as u64);
+            self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
+
+            result = Some((height, header));
+        }
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(result)
+    }
 }
 
 #[derive(Clone)]
@@ -468,6 +556,32 @@ impl Store {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || db.prune(retain_height)).await?
     }
+
+    pub async fn put_blob_sidecar_header(
+        &self,
+        height: Height,
+        header: &SignedBeaconBlockHeader,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        let header = header.clone();
+        tokio::task::spawn_blocking(move || db.insert_block_header(height, &header)).await?
+    }
+
+    pub async fn get_blob_sidecar_header(
+        &self,
+        height: Height,
+    ) -> Result<Option<SignedBeaconBlockHeader>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_block_header(height)).await?
+    }
+
+    pub async fn get_latest_blob_sidecar_header(
+        &self,
+    ) -> Result<Option<(Height, SignedBeaconBlockHeader)>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_latest_block_header()).await?
+    }
+
     pub async fn get_block_data(
         &self,
         height: Height,

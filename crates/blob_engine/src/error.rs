@@ -33,7 +33,7 @@ pub enum BlobEngineError {
     #[error("Blob verification failed at height {height}, index {index}: {source}")]
     VerificationFailed {
         height: Height,
-        index: u8,
+        index: u16,
         #[source]
         source: BlobVerificationError,
     },
@@ -44,7 +44,7 @@ pub enum BlobEngineError {
 
     /// Blob not found
     #[error("Blob not found: height={height}, round={round}, index={index}")]
-    BlobNotFound { height: Height, round: i64, index: u8 },
+    BlobNotFound { height: Height, round: i64, index: u16 },
 
     /// No blobs found for height
     #[error("No blobs found for height {0}")]

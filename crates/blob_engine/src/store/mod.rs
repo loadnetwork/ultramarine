@@ -1,8 +1,8 @@
 /// ! Blob storage abstraction and implementations
+use std::convert::TryInto;
+
 use async_trait::async_trait;
-use ultramarine_types::{
-    ethereum_compat::BeaconBlockHeader, height::Height, proposal_part::BlobSidecar,
-};
+use ultramarine_types::{height::Height, proposal_part::BlobSidecar};
 
 use crate::error::BlobStoreError;
 
@@ -16,53 +16,53 @@ pub mod rocksdb;
 pub struct BlobKey {
     pub height: Height,
     pub round: i64, // Round can be negative (Nil = -1)
-    pub index: u8,
+    pub index: u16,
 }
 
 impl BlobKey {
     /// Create a new blob key
-    pub fn new(height: Height, round: i64, index: u8) -> Self {
+    pub fn new(height: Height, round: i64, index: u16) -> Self {
         Self { height, round, index }
     }
 
-    /// Encode key for undecided blobs: [height: u64 BE][round: i64 BE][index: u8]
+    /// Encode key for undecided blobs: [height: u64 BE][round: i64 BE][index: u16 BE]
     pub fn to_undecided_key(&self) -> Vec<u8> {
-        let mut key = Vec::with_capacity(17);
+        let mut key = Vec::with_capacity(18);
         key.extend_from_slice(&self.height.as_u64().to_be_bytes());
         key.extend_from_slice(&self.round.to_be_bytes());
-        key.push(self.index);
+        key.extend_from_slice(&self.index.to_be_bytes());
         key
     }
 
-    /// Encode key for decided blobs: [height: u64 BE][index: u8]
+    /// Encode key for decided blobs: [height: u64 BE][index: u16 BE]
     pub fn to_decided_key(&self) -> Vec<u8> {
-        let mut key = Vec::with_capacity(9);
+        let mut key = Vec::with_capacity(10);
         key.extend_from_slice(&self.height.as_u64().to_be_bytes());
-        key.push(self.index);
+        key.extend_from_slice(&self.index.to_be_bytes());
         key
     }
 
     /// Decode key from undecided format
     pub fn from_undecided_key(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 17 {
+        if bytes.len() != 18 {
             return None;
         }
 
         let height = u64::from_be_bytes(bytes[0..8].try_into().ok()?);
         let round = i64::from_be_bytes(bytes[8..16].try_into().ok()?);
-        let index = bytes[16];
+        let index = u16::from_be_bytes(bytes[16..18].try_into().ok()?);
 
         Some(Self { height: Height::new(height), round, index })
     }
 
     /// Decode key from decided format
     pub fn from_decided_key(bytes: &[u8], round: i64) -> Option<Self> {
-        if bytes.len() != 9 {
+        if bytes.len() != 10 {
             return None;
         }
 
         let height = u64::from_be_bytes(bytes[0..8].try_into().ok()?);
-        let index = bytes[8];
+        let index = u16::from_be_bytes(bytes[8..10].try_into().ok()?);
 
         Some(Self { height: Height::new(height), round, index })
     }
@@ -113,29 +113,10 @@ pub trait BlobStore: Send + Sync + Clone {
     /// Delete specific blobs after successful archival
     ///
     /// Called by the archiver after blobs have been persisted to long-term storage.
-    async fn delete_archived(&self, height: Height, indices: &[u8]) -> Result<(), BlobStoreError>;
+    async fn delete_archived(&self, height: Height, indices: &[u16]) -> Result<(), BlobStoreError>;
 
     /// Prune all decided blobs before a given height
     ///
     /// Returns the number of blobs deleted.
     async fn prune_before(&self, height: Height) -> Result<usize, BlobStoreError>;
-
-    /// Store a beacon block header for Phase 4 compatibility
-    ///
-    /// Headers are stored by height and used to compute parent_root for subsequent blocks.
-    /// This enables the SignedBeaconBlockHeader to link blocks in the Ethereum-compatible chain.
-    async fn put_beacon_header(
-        &self,
-        height: Height,
-        header: &BeaconBlockHeader,
-    ) -> Result<(), BlobStoreError>;
-
-    /// Get the beacon block header for a given height
-    ///
-    /// Returns None if no header exists at this height.
-    /// Used to retrieve the previous header's hash as parent_root for the next block.
-    async fn get_beacon_header(
-        &self,
-        height: Height,
-    ) -> Result<Option<BeaconBlockHeader>, BlobStoreError>;
 }

@@ -2,7 +2,10 @@
 //! A regular application would have mempool implemented, a proper database and input methods like
 //! RPC.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryFrom,
+};
 
 use bytes::Bytes;
 use color_eyre::eyre;
@@ -17,19 +20,24 @@ use malachitebft_app_channel::app::{
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha3::Digest;
 use tokio::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::{BlobEngine, BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
 use ultramarine_types::{
     address::Address,
     // Phase 3: Import blob types for streaming
+    aliases::B256,
     blob::BlobsBundle,
     codec::proto::ProtobufCodec,
     context::LoadContext,
     engine_api::{ExecutionBlock, ExecutionPayloadHeader},
+    ethereum_compat::{
+        BeaconBlockBodyMinimal, BeaconBlockHeader, SignedBeaconBlockHeader,
+        generate_kzg_commitment_inclusion_proof, verify_kzg_commitment_inclusion_proof,
+    },
     genesis::Genesis,
     height::Height,
     proposal_part::{BlobSidecar, ProposalData, ProposalFin, ProposalInit, ProposalPart},
-    signing::Ed25519Provider,
+    signing::{Ed25519Provider, Signature},
     validator_set::ValidatorSet,
     value::Value,
     value_metadata::ValueMetadata,
@@ -78,6 +86,9 @@ where
     // Track rounds with blobs for cleanup
     // Key: height, Value: set of rounds that have blobs
     blob_rounds: HashMap<Height, HashSet<i64>>,
+
+    // Hash tree root of the latest decided blob sidecar header (used as parent_root for proposals)
+    last_blob_sidecar_root: B256,
 
     // For stats
     pub txs_count: u64,
@@ -145,6 +156,7 @@ where
 
             latest_block: None,
             blob_rounds: HashMap::new(),
+            last_blob_sidecar_root: B256::ZERO,
             txs_count: 0,
             chain_bytes: 0,
             start_time: Instant::now(),
@@ -159,6 +171,132 @@ where
     /// Returns a reference to the blob engine for blob operations
     pub fn blob_engine(&self) -> &E {
         &self.blob_engine
+    }
+
+    pub async fn hydrate_blob_sidecar_root(&mut self) -> eyre::Result<()> {
+        if let Some((_, header)) =
+            self.store.get_latest_blob_sidecar_header().await.map_err(|e| eyre::Report::new(e))?
+        {
+            self.last_blob_sidecar_root = header.message.hash_tree_root();
+        }
+
+        Ok(())
+    }
+
+    pub async fn persist_blob_sidecar_header(
+        &self,
+        height: Height,
+        header: &SignedBeaconBlockHeader,
+    ) -> eyre::Result<()> {
+        self.store.put_blob_sidecar_header(height, header).await.map_err(|e| eyre::Report::new(e))
+    }
+
+    fn validator_index(&self, address: &Address) -> Option<u64> {
+        self.genesis
+            .validator_set
+            .validators
+            .iter()
+            .position(|v| &v.address == address)
+            .map(|idx| idx as u64)
+    }
+
+    fn build_sidecar_header_message(
+        &self,
+        height: Height,
+        proposer: &Address,
+        metadata: &ValueMetadata,
+        body_root: B256,
+    ) -> Result<BeaconBlockHeader, String> {
+        let parent_root =
+            if height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
+
+        let proposer_index = self
+            .validator_index(proposer)
+            .ok_or_else(|| format!("Proposer {} not found in validator set", proposer))?;
+
+        Ok(BeaconBlockHeader::new(
+            height.as_u64(),
+            proposer_index,
+            parent_root,
+            metadata.execution_payload_header.state_root,
+            body_root,
+        ))
+    }
+
+    pub fn prepare_blob_sidecar_parts(
+        &self,
+        value: &LocallyProposedValue<LoadContext>,
+        bundle: Option<&BlobsBundle>,
+    ) -> eyre::Result<(SignedBeaconBlockHeader, Vec<BlobSidecar>)> {
+        let metadata = &value.value.metadata;
+
+        let expected = metadata.blob_kzg_commitments.len();
+        if let Some(bundle) = bundle {
+            if expected != bundle.commitments.len() ||
+                expected != bundle.blobs.len() ||
+                expected != bundle.proofs.len()
+            {
+                return Err(eyre::eyre!(
+                    "Blob bundle length mismatch: metadata={} commitments={} blobs={} proofs={}",
+                    expected,
+                    bundle.commitments.len(),
+                    bundle.blobs.len(),
+                    bundle.proofs.len()
+                ));
+            }
+        } else if expected != 0 {
+            return Err(eyre::eyre!(
+                "Metadata contains {} commitments but no blob bundle was provided",
+                expected
+            ));
+        }
+
+        let commitments = metadata.blob_kzg_commitments.clone();
+        let body = BeaconBlockBodyMinimal::from_ultramarine_data(
+            commitments.clone(),
+            &metadata.execution_payload_header,
+        );
+        let body_root = body.compute_body_root();
+
+        let header_message = self
+            .build_sidecar_header_message(value.height, &self.address, metadata, body_root)
+            .map_err(|e| eyre::eyre!(e))?;
+
+        let signing_root = header_message.hash_tree_root();
+        let signature = self.signing_provider.sign(signing_root.as_slice());
+        let signed_header = SignedBeaconBlockHeader::new(header_message, signature);
+
+        let mut sidecars = Vec::new();
+        if let Some(bundle) = bundle {
+            sidecars.reserve(bundle.blobs.len());
+            for (index, ((blob, commitment), proof)) in
+                bundle.blobs.iter().zip(&bundle.commitments).zip(&bundle.proofs).enumerate()
+            {
+                if metadata.blob_kzg_commitments[index] != *commitment {
+                    return Err(eyre::eyre!("Blob commitment mismatch at index {}", index));
+                }
+
+                let inclusion_proof = generate_kzg_commitment_inclusion_proof(&commitments, index)
+                    .map_err(|e| {
+                        eyre::eyre!("Failed to create inclusion proof for blob {}: {}", index, e)
+                    })?;
+
+                let index_u16 = u16::try_from(index)
+                    .map_err(|_| eyre::eyre!("Blob index {} exceeds u16::MAX", index))?;
+
+                let sidecar = BlobSidecar::new(
+                    index_u16,
+                    blob.clone(),
+                    *commitment,
+                    *proof,
+                    signed_header.clone(),
+                    inclusion_proof,
+                );
+                sidecars.push(sidecar);
+            }
+        }
+
+        Ok((signed_header, sidecars))
     }
 
     /// Processes and adds a new proposal to the state if it's valid
@@ -295,10 +433,7 @@ where
         height: Height,
         round: Round,
     ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
-        self.store
-            .get_undecided_proposal(height, round)
-            .await
-            .map_err(|e| eyre::Report::new(e))
+        self.store.get_undecided_proposal(height, round).await.map_err(|e| eyre::Report::new(e))
     }
 
     /// Commits a value with the given certificate, updating internal state
@@ -364,6 +499,25 @@ where
 
         if let Some(data) = block_data {
             self.store.store_decided_block_data(certificate.height, data).await?;
+        }
+
+        match self.store.get_blob_sidecar_header(certificate.height).await {
+            Ok(Some(header)) => {
+                self.last_blob_sidecar_root = header.message.hash_tree_root();
+            }
+            Ok(None) => {
+                warn!(
+                    height = %certificate.height,
+                    "Blob sidecar header not found for decided block"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    height = %certificate.height,
+                    error = %e,
+                    "Failed to load blob sidecar header for decided block"
+                );
+            }
         }
 
         // Prune the store, keep the last 5 heights
@@ -533,13 +687,13 @@ where
         &mut self,
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
-        blobs_bundle: Option<BlobsBundle>,
+        blob_sidecars: Option<&[BlobSidecar]>,
         proposer: Option<Address>, // For RestreamProposal support
     ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
         // Use provided proposer (for restreaming) or default to self.address (for our own
         // proposals)
         let proposer_address = proposer.unwrap_or(self.address);
-        let parts = self.make_proposal_parts(value, data, blobs_bundle, proposer_address);
+        let parts = self.make_proposal_parts(value, data, blob_sidecars, proposer_address);
 
         let stream_id = self.stream_id();
 
@@ -561,7 +715,7 @@ where
         &self,
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
-        blobs_bundle: Option<BlobsBundle>,
+        blob_sidecars: Option<&[BlobSidecar]>,
         proposer: Address, // Explicit proposer (for restreaming)
     ) -> Vec<ProposalPart> {
         let mut hasher = sha3::Keccak256::new();
@@ -589,19 +743,15 @@ where
         }
 
         // Blob sidecars (Phase 3: Stream blobs separately)
-        if let Some(bundle) = blobs_bundle {
-            for (index, ((blob, commitment), proof)) in
-                bundle.blobs.iter().zip(&bundle.commitments).zip(&bundle.proofs).enumerate()
-            {
-                let sidecar =
-                    BlobSidecar::from_bundle_item(index as u8, blob.clone(), *commitment, *proof);
-                parts.push(ProposalPart::BlobSidecar(sidecar));
+        if let Some(sidecars) = blob_sidecars {
+            for sidecar in sidecars {
+                parts.push(ProposalPart::BlobSidecar(sidecar.clone()));
 
                 // Include blob data in signature hash
-                hasher.update(&[index as u8]);
-                hasher.update(blob.data());
-                hasher.update(commitment.as_bytes());
-                hasher.update(proof.as_bytes());
+                hasher.update(&sidecar.index.to_be_bytes());
+                hasher.update(sidecar.blob.data());
+                hasher.update(sidecar.kzg_commitment.as_bytes());
+                hasher.update(sidecar.kzg_proof.as_bytes());
             }
         }
 
@@ -650,9 +800,51 @@ where
         // Extract blob sidecars
         let blob_sidecars: Vec<_> =
             parts.parts.iter().filter_map(|part| part.as_blob_sidecar()).cloned().collect();
+        let has_blobs = !blob_sidecars.is_empty();
 
-        // Verify and store blobs
-        if !blob_sidecars.is_empty() {
+        use alloy_rpc_types_engine::ExecutionPayloadV3;
+        use ssz::Decode;
+
+        let mut metadata_opt = None;
+
+        let value = if !data.is_empty() {
+            match ExecutionPayloadV3::from_ssz_bytes(&data) {
+                Ok(execution_payload) => {
+                    let header = ExecutionPayloadHeader::from_payload(&execution_payload);
+                    let commitments = if has_blobs {
+                        blob_sidecars.iter().map(|sidecar| sidecar.kzg_commitment).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let metadata = ValueMetadata::new(header, commitments);
+                    metadata_opt = Some(metadata.clone());
+                    Value::new(metadata)
+                }
+                Err(e) => {
+                    if has_blobs {
+                        return Err(format!(
+                            "Failed to decode execution payload with blobs: {:?}",
+                            e
+                        ));
+                    }
+                    debug!("Failed to parse ExecutionPayloadV3 from SSZ: {:?}", e);
+                    #[allow(deprecated)]
+                    Value::from_bytes(data.clone())
+                }
+            }
+        } else {
+            if has_blobs {
+                return Err("Received blob sidecars without execution payload data".to_string());
+            }
+            #[allow(deprecated)]
+            Value::from_bytes(data.clone())
+        };
+
+        if has_blobs {
+            let metadata = metadata_opt
+                .as_ref()
+                .ok_or_else(|| "Missing metadata for blob proposal".to_string())?;
+
             debug!(
                 "Extracted {} blob sidecars from proposal at height {}, round {}",
                 blob_sidecars.len(),
@@ -660,14 +852,20 @@ where
                 parts.round
             );
 
-            // Convert round to i64
+            let signed_header = self
+                .verify_blob_sidecars(parts.height, &parts.proposer, metadata, &blob_sidecars)
+                .await?;
+
             let round_i64 = parts.round.as_i64();
 
-            // Verify and store blobs atomically
             self.blob_engine
                 .verify_and_store(parts.height, round_i64, &blob_sidecars)
                 .await
                 .map_err(|e| format!("Blob engine error: {}", e))?;
+
+            self.persist_blob_sidecar_header(parts.height, &signed_header)
+                .await
+                .map_err(|e| format!("Failed to store blob sidecar header: {}", e))?;
 
             info!(
                 "✅ Verified and stored {} blobs for height {}, round {}",
@@ -677,46 +875,30 @@ where
             );
         }
 
-        // Parse execution payload and create Value
-        let value = if !data.is_empty() && !blob_sidecars.is_empty() {
-            use alloy_rpc_types_engine::ExecutionPayloadV3;
-            use ssz::Decode;
+        if !has_blobs {
+            if let Some(metadata) = metadata_opt.as_ref() {
+                let body = BeaconBlockBodyMinimal::from_ultramarine_data(
+                    metadata.blob_kzg_commitments.clone(),
+                    &metadata.execution_payload_header,
+                );
+                let body_root = body.compute_body_root();
+                let header_message = self
+                    .build_sidecar_header_message(
+                        parts.height,
+                        &parts.proposer,
+                        metadata,
+                        body_root,
+                    )
+                    .map_err(|e| format!("Failed to build blob sidecar header: {}", e))?;
 
-            match ExecutionPayloadV3::from_ssz_bytes(&data) {
-                Ok(execution_payload) => {
-                    let header = ExecutionPayloadHeader::from_payload(&execution_payload);
-                    let commitments: Vec<_> =
-                        blob_sidecars.iter().map(|sidecar| sidecar.kzg_commitment).collect();
+                let signed_header =
+                    SignedBeaconBlockHeader::new(header_message, Signature::from_bytes([0u8; 64]));
 
-                    let metadata = ValueMetadata::new(header, commitments);
-                    Value::new(metadata)
-                }
-                Err(e) => {
-                    debug!("Failed to parse ExecutionPayloadV3 from SSZ: {:?}", e);
-                    #[allow(deprecated)]
-                    Value::from_bytes(data.clone())
-                }
+                self.persist_blob_sidecar_header(parts.height, &signed_header)
+                    .await
+                    .map_err(|e| format!("Failed to store blob sidecar header: {}", e))?;
             }
-        } else if !data.is_empty() {
-            use alloy_rpc_types_engine::ExecutionPayloadV3;
-            use ssz::Decode;
-
-            match ExecutionPayloadV3::from_ssz_bytes(&data) {
-                Ok(execution_payload) => {
-                    let header = ExecutionPayloadHeader::from_payload(&execution_payload);
-                    let metadata = ValueMetadata::new(header, vec![]);
-                    Value::new(metadata)
-                }
-                Err(_) =>
-                {
-                    #[allow(deprecated)]
-                    Value::from_bytes(data.clone())
-                }
-            }
-        } else {
-            #[allow(deprecated)]
-            Value::from_bytes(data.clone())
-        };
+        }
 
         let proposed_value = ProposedValue {
             height: parts.height,
@@ -726,9 +908,125 @@ where
             value,
             validity: Validity::Valid,
         };
-
-        let has_blobs = !blob_sidecars.is_empty();
         Ok((proposed_value, data, has_blobs))
+    }
+
+    async fn verify_blob_sidecars(
+        &self,
+        height: Height,
+        proposer: &Address,
+        metadata: &ValueMetadata,
+        sidecars: &[BlobSidecar],
+    ) -> Result<SignedBeaconBlockHeader, String> {
+        if sidecars.is_empty() {
+            return Err("verify_blob_sidecars called with empty sidecars".to_string());
+        }
+
+        let signed_header = sidecars[0].signed_block_header.clone();
+        for sidecar in sidecars.iter().skip(1) {
+            if sidecar.signed_block_header != signed_header {
+                return Err("Inconsistent signed headers across blob sidecars".to_string());
+            }
+        }
+
+        if signed_header.message.slot != height.as_u64() {
+            return Err(format!(
+                "Signed header slot {} does not match proposal height {}",
+                signed_header.message.slot,
+                height.as_u64()
+            ));
+        }
+
+        let proposer_index = self
+            .validator_index(proposer)
+            .ok_or_else(|| format!("Proposer {} not found in validator set", proposer))?;
+
+        if signed_header.message.proposer_index != proposer_index {
+            return Err(format!(
+                "Signed header proposer_index {} does not match expected {}",
+                signed_header.message.proposer_index, proposer_index
+            ));
+        }
+
+        let validator = self
+            .get_validator_set()
+            .get_by_address(proposer)
+            .ok_or_else(|| format!("Proposer {} not found in validator set", proposer))?;
+
+        if !signed_header.verify_signature(&validator.public_key) {
+            return Err("Invalid beacon header signature".to_string());
+        }
+
+        let commitments = &metadata.blob_kzg_commitments;
+        if commitments.len() != sidecars.len() {
+            return Err(format!(
+                "Metadata reports {} blobs but received {} sidecars",
+                commitments.len(),
+                sidecars.len()
+            ));
+        }
+
+        let body = BeaconBlockBodyMinimal::from_ultramarine_data(
+            commitments.clone(),
+            &metadata.execution_payload_header,
+        );
+        let computed_body_root = body.compute_body_root();
+
+        if signed_header.message.body_root != computed_body_root {
+            return Err("Beacon header body_root mismatch".to_string());
+        }
+
+        let expected_parent_root = if height.as_u64() == 0 {
+            B256::ZERO
+        } else {
+            let prev_height = Height::new(height.as_u64() - 1);
+            match self.store.get_blob_sidecar_header(prev_height).await {
+                Ok(Some(prev_header)) => prev_header.message.hash_tree_root(),
+                Ok(None) => {
+                    return Err(format!(
+                        "Missing blob sidecar header for parent height {}",
+                        prev_height.as_u64()
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to load blob sidecar header for parent height {}: {}",
+                        prev_height.as_u64(),
+                        e
+                    ));
+                }
+            }
+        };
+
+        if signed_header.message.parent_root != expected_parent_root {
+            return Err("Beacon header parent_root mismatch".to_string());
+        }
+
+        for sidecar in sidecars {
+            let index = usize::from(sidecar.index);
+            if index >= commitments.len() {
+                return Err(format!(
+                    "Blob index {} out of range {}",
+                    sidecar.index,
+                    commitments.len()
+                ));
+            }
+
+            if commitments[index] != sidecar.kzg_commitment {
+                return Err(format!("Commitment mismatch for blob index {}", sidecar.index));
+            }
+
+            if !verify_kzg_commitment_inclusion_proof(
+                &sidecar.kzg_commitment,
+                &sidecar.kzg_commitment_inclusion_proof,
+                index,
+                signed_header.message.body_root,
+            ) {
+                return Err(format!("Invalid KZG inclusion proof for blob index {}", sidecar.index));
+            }
+        }
+
+        Ok(signed_header)
     }
 
     /// Verifies the signature of the proposal.
@@ -752,7 +1050,7 @@ where
                 }
                 // Phase 3: Include blob sidecars in signature hash
                 ProposalPart::BlobSidecar(sidecar) => {
-                    hasher.update(&[sidecar.index]);
+                    hasher.update(&sidecar.index.to_be_bytes());
                     hasher.update(sidecar.blob.data());
                     hasher.update(sidecar.kzg_commitment.as_bytes());
                     hasher.update(sidecar.kzg_proof.as_bytes());

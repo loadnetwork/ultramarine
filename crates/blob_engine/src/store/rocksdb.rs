@@ -7,9 +7,7 @@ use malachitebft_proto::Protobuf;
 use prost::Message;
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use tracing::{debug, warn};
-use ultramarine_types::{
-    ethereum_compat::BeaconBlockHeader, height::Height, proposal_part::BlobSidecar,
-};
+use ultramarine_types::{height::Height, proposal_part::BlobSidecar};
 
 use super::{BlobKey, BlobStore};
 use crate::error::BlobStoreError;
@@ -20,15 +18,11 @@ const CF_UNDECIDED: &str = "undecided_blobs";
 /// Column family for decided blobs (height-only keys)
 const CF_DECIDED: &str = "decided_blobs";
 
-/// Column family for beacon block headers (Phase 4)
-const CF_HEADERS: &str = "beacon_headers";
-
 /// RocksDB-backed blob storage
 ///
-/// Uses three column families:
+/// Uses two column families:
 /// - `undecided_blobs`: Stores blobs from proposals that haven't been decided yet
 /// - `decided_blobs`: Stores blobs from finalized blocks
-/// - `beacon_headers`: Stores BeaconBlockHeaders for Phase 4 (Ethereum compatibility)
 ///
 /// This separation allows efficient cleanup of failed rounds while
 /// preserving decided blobs for execution layer handoff and archival.
@@ -57,10 +51,8 @@ impl RocksDbBlobStore {
         // Define column families
         let cf_undecided = ColumnFamilyDescriptor::new(CF_UNDECIDED, Options::default());
         let cf_decided = ColumnFamilyDescriptor::new(CF_DECIDED, Options::default());
-        let cf_headers = ColumnFamilyDescriptor::new(CF_HEADERS, Options::default());
 
-        let db =
-            DB::open_cf_descriptors(&db_opts, path, vec![cf_undecided, cf_decided, cf_headers])?;
+        let db = DB::open_cf_descriptors(&db_opts, path, vec![cf_undecided, cf_decided])?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -116,32 +108,6 @@ impl RocksDbBlobStore {
     /// Create a key prefix for scanning all decided blobs at a given height
     fn decided_prefix(height: Height) -> Vec<u8> {
         height.as_u64().to_be_bytes().to_vec()
-    }
-
-    /// Serialize a beacon block header using protobuf
-    ///
-    /// Uses protobuf for consistency with blob serialization and schema evolution.
-    fn serialize_header(header: &BeaconBlockHeader) -> Result<Vec<u8>, BlobStoreError> {
-        let proto = header.to_proto().map_err(|e| {
-            BlobStoreError::Serialization(format!("Failed to convert to proto: {}", e))
-        })?;
-
-        let mut buf = Vec::new();
-        proto.encode(&mut buf).map_err(|e| {
-            BlobStoreError::Serialization(format!("Failed to encode protobuf: {}", e))
-        })?;
-        Ok(buf)
-    }
-
-    /// Deserialize a beacon block header using protobuf
-    fn deserialize_header(bytes: &[u8]) -> Result<BeaconBlockHeader, BlobStoreError> {
-        let proto = ultramarine_types::proto::BeaconBlockHeader::decode(bytes).map_err(|e| {
-            BlobStoreError::Deserialization(format!("Failed to decode protobuf: {}", e))
-        })?;
-
-        BeaconBlockHeader::from_proto(proto).map_err(|e| {
-            BlobStoreError::Deserialization(format!("Failed to deserialize header: {}", e))
-        })
     }
 }
 
@@ -361,7 +327,7 @@ impl BlobStore for RocksDbBlobStore {
         .map_err(BlobStoreError::TaskJoin)?
     }
 
-    async fn delete_archived(&self, height: Height, indices: &[u8]) -> Result<(), BlobStoreError> {
+    async fn delete_archived(&self, height: Height, indices: &[u16]) -> Result<(), BlobStoreError> {
         let db = self.db.clone();
         let indices = indices.to_vec();
 
@@ -424,63 +390,6 @@ impl BlobStore for RocksDbBlobStore {
         .await
         .map_err(BlobStoreError::TaskJoin)?
     }
-
-    async fn put_beacon_header(
-        &self,
-        height: Height,
-        header: &BeaconBlockHeader,
-    ) -> Result<(), BlobStoreError> {
-        let db = self.db.clone();
-        let header = header.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(CF_HEADERS)
-                .ok_or_else(|| BlobStoreError::ColumnFamilyNotFound(CF_HEADERS.to_string()))?;
-
-            // Key: height (u64 big-endian)
-            let key = height.as_u64().to_be_bytes();
-            let value = Self::serialize_header(&header)?;
-
-            db.put_cf(cf, key, value)?;
-
-            debug!(height = height.as_u64(), "Stored beacon header");
-
-            Ok(())
-        })
-        .await
-        .map_err(BlobStoreError::TaskJoin)?
-    }
-
-    async fn get_beacon_header(
-        &self,
-        height: Height,
-    ) -> Result<Option<BeaconBlockHeader>, BlobStoreError> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(CF_HEADERS)
-                .ok_or_else(|| BlobStoreError::ColumnFamilyNotFound(CF_HEADERS.to_string()))?;
-
-            // Key: height (u64 big-endian)
-            let key = height.as_u64().to_be_bytes();
-
-            match db.get_cf(cf, key)? {
-                Some(bytes) => {
-                    let header = Self::deserialize_header(&bytes)?;
-                    debug!(height = height.as_u64(), "Retrieved beacon header");
-                    Ok(Some(header))
-                }
-                None => {
-                    debug!(height = height.as_u64(), "No beacon header found");
-                    Ok(None)
-                }
-            }
-        })
-        .await
-        .map_err(BlobStoreError::TaskJoin)?
-    }
 }
 
 #[cfg(test)]
@@ -492,11 +401,12 @@ mod tests {
 
     use super::*;
 
-    fn create_test_blob(index: u8) -> BlobSidecar {
-        let blob_data = vec![index; 131_072];
+    fn create_test_blob(index: u16) -> BlobSidecar {
+        let byte = index as u8;
+        let blob_data = vec![byte; 131_072];
         let blob = Blob::new(Bytes::from(blob_data)).unwrap();
-        let commitment = KzgCommitment([index; 48]);
-        let proof = KzgProof([index; 48]);
+        let commitment = KzgCommitment([byte; 48]);
+        let proof = KzgProof([byte; 48]);
         BlobSidecar::from_bundle_item(index, blob, commitment, proof)
     }
 
@@ -586,54 +496,6 @@ mod tests {
         // Height 100+ should still exist
         let remaining = store.get_decided_blobs(Height::new(105)).await.unwrap();
         assert_eq!(remaining.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_header_storage() {
-        use ultramarine_types::{aliases::B256, ethereum_compat::BeaconBlockHeader};
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let store = RocksDbBlobStore::open(temp_dir.path()).unwrap();
-
-        let height_100 = Height::new(100);
-        let height_101 = Height::new(101);
-
-        // Create test headers
-        let header_100 = BeaconBlockHeader::new(
-            100,                   // slot
-            42,                    // proposer_index
-            B256::from([1u8; 32]), // parent_root
-            B256::from([2u8; 32]), // state_root
-            B256::from([3u8; 32]), // body_root
-        );
-
-        let header_101 = BeaconBlockHeader::new(
-            101,
-            43,
-            B256::from([4u8; 32]),
-            B256::from([5u8; 32]),
-            B256::from([6u8; 32]),
-        );
-
-        // Store headers
-        store.put_beacon_header(height_100, &header_100).await.unwrap();
-        store.put_beacon_header(height_101, &header_101).await.unwrap();
-
-        // Retrieve and verify
-        let retrieved_100 = store.get_beacon_header(height_100).await.unwrap();
-        assert!(retrieved_100.is_some());
-        let retrieved_100 = retrieved_100.unwrap();
-        assert_eq!(retrieved_100.slot, 100);
-        assert_eq!(retrieved_100.proposer_index, 42);
-        assert_eq!(retrieved_100.body_root, B256::from([3u8; 32]));
-
-        let retrieved_101 = store.get_beacon_header(height_101).await.unwrap();
-        assert!(retrieved_101.is_some());
-        assert_eq!(retrieved_101.unwrap().slot, 101);
-
-        // Check non-existent header
-        let non_existent = store.get_beacon_header(Height::new(999)).await.unwrap();
-        assert!(non_existent.is_none());
     }
 
     /// Comprehensive integration test for the full blob lifecycle.

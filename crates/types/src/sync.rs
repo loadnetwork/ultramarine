@@ -409,7 +409,7 @@ mod tests {
         for i in 0..3 {
             let blob = Blob::new(vec![i; BYTES_PER_BLOB].into()).unwrap();
             let sidecar = BlobSidecar::from_bundle_item(
-                i,
+                i as u16,
                 blob,
                 KzgCommitment([i + 1; 48]),
                 KzgProof([i + 2; 48]),
@@ -433,7 +433,7 @@ mod tests {
         let blobs = decoded.blob_sidecars().unwrap();
         assert_eq!(blobs.len(), 3);
         for (i, sidecar) in blobs.iter().enumerate() {
-            assert_eq!(sidecar.index, i as u8);
+            assert_eq!(sidecar.index, i as u16);
         }
     }
 

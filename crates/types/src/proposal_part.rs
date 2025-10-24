@@ -1,4 +1,4 @@
-use core::fmt;
+use core::{convert::TryFrom, fmt};
 
 use bytes::Bytes;
 use malachitebft_core_types::Round;
@@ -98,7 +98,7 @@ pub struct BlobSidecar {
     ///
     /// This index corresponds to the position in ValueMetadata.blob_kzg_commitments.
     /// It's used to match blobs with their commitments during verification.
-    pub index: u8,
+    pub index: u16,
 
     /// The blob data (exactly 131,072 bytes)
     ///
@@ -143,7 +143,7 @@ pub struct BlobSidecar {
 impl BlobSidecar {
     /// Creates a new BlobSidecar (Phase 4: with header + proof)
     pub fn new(
-        index: u8,
+        index: u16,
         blob: Blob,
         kzg_commitment: KzgCommitment,
         kzg_proof: KzgProof,
@@ -169,7 +169,7 @@ impl BlobSidecar {
     /// TODO: Remove this method once Phase 4 is fully implemented
     /// https://github.com/loadnetwork/ultramarine/issues/TBD
     pub fn from_bundle_item(
-        index: u8,
+        index: u16,
         blob: Blob,
         kzg_commitment: KzgCommitment,
         kzg_proof: KzgProof,
@@ -204,7 +204,7 @@ impl BlobSidecar {
     /// Calculate size in bytes for this sidecar
     ///
     /// Size breakdown (Phase 4):
-    /// - index: 1 byte
+    /// - index: 2 bytes
     /// - blob: 131,072 bytes
     /// - commitment: 48 bytes
     /// - proof: 48 bytes
@@ -212,7 +212,7 @@ impl BlobSidecar {
     /// - kzg_commitment_inclusion_proof: 544 bytes (17 × 32)
     /// Total: ~132,905 bytes
     pub fn size_bytes(&self) -> usize {
-        1 + BYTES_PER_BLOB + 48 + 48 + 192 + (self.kzg_commitment_inclusion_proof.len() * 32)
+        2 + BYTES_PER_BLOB + 48 + 48 + 192 + (self.kzg_commitment_inclusion_proof.len() * 32)
     }
 }
 
@@ -268,8 +268,12 @@ impl malachitebft_proto::Protobuf for BlobSidecar {
             .map(|bytes| alloy_primitives::B256::from_slice(bytes))
             .collect();
 
+        let index = u16::try_from(proto.index).map_err(|_| {
+            ProtoError::Other(format!("Blob index {} exceeds u16::MAX", proto.index))
+        })?;
+
         Ok(Self {
-            index: proto.index as u8,
+            index,
             blob,
             kzg_commitment,
             kzg_proof,
@@ -490,8 +494,15 @@ impl Protobuf for ProposalPart {
                     .map(|bytes| alloy_primitives::B256::from_slice(bytes))
                     .collect();
 
+                let index = u16::try_from(sidecar.index).map_err(|_| {
+                    ProtoError::Other(format!(
+                        "Blob index {} exceeds u16::MAX in ProposalPart::BlobSidecar",
+                        sidecar.index
+                    ))
+                })?;
+
                 Ok(Self::BlobSidecar(BlobSidecar {
-                    index: sidecar.index as u8,
+                    index,
                     blob,
                     kzg_commitment,
                     kzg_proof,

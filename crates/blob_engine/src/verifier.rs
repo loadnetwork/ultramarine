@@ -124,7 +124,7 @@ pub enum BlobVerificationError {
 
     /// KZG proof is invalid (verification returned false)
     #[error("KZG proof is invalid for blob at index {0}")]
-    InvalidProofValue(u8),
+    InvalidProofValue(u16),
 
     /// Empty blob list provided for batch verification
     #[error("Cannot verify empty blob list")]

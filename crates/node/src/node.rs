@@ -171,6 +171,8 @@ impl Node for App {
         let mut state =
             State::new(genesis, ctx, signing_provider, address, start_height, store, blob_engine);
 
+        state.hydrate_blob_sidecar_root().await?;
+
         // --- Initialize Execution Client ---
         // Development defaults: if Engine/Eth endpoints are not provided, derive them from
         // the moniker (test-0/1/2) to match compose.yaml port mapping.
