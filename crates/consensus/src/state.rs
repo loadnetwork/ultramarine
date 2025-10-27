@@ -27,6 +27,8 @@ use ultramarine_types::{
     // Phase 3: Import blob types for streaming
     aliases::B256,
     blob::BlobsBundle,
+    // Phase 4: Import three-layer metadata types
+    blob_metadata::BlobMetadata,
     codec::proto::ProtobufCodec,
     consensus_block_metadata::ConsensusBlockMetadata,
     context::LoadContext,
@@ -825,6 +827,8 @@ where
     /// - KZG commitments from blobs (48 bytes × blob_count)
     ///
     /// This ensures consensus messages stay small (~2KB) while blob data streams separately.
+    ///
+    /// Phase 4: Now also stores BlobMetadata (Layer 2) as undecided for future promotion.
     pub async fn propose_value_with_blobs(
         &mut self,
         height: Height,
@@ -843,7 +847,7 @@ where
         let commitments = blobs_bundle.map(|bundle| bundle.commitments.clone()).unwrap_or_default();
 
         // Phase 2: Create ValueMetadata (~2KB) instead of embedding full data
-        let metadata = ValueMetadata::new(header, commitments);
+        let metadata = ValueMetadata::new(header.clone(), commitments.clone());
 
         // Phase 2: Create Value with metadata (NOT from_bytes!)
         let value = Value::new(metadata);
@@ -859,6 +863,43 @@ where
 
         // Insert the new proposal into the undecided proposals.
         self.store.store_undecided_proposal(proposal.clone()).await?;
+
+        // Phase 4: Build and store BlobMetadata (Layer 2) as undecided
+        // This MUST be stored before commit can promote it to decided
+        let proposer_index = self.validator_index(&self.address);
+        let parent_blob_root = if height.as_u64() == 0 {
+            B256::ZERO
+        } else {
+            self.last_blob_sidecar_root
+        };
+
+        let blob_metadata = if commitments.is_empty() {
+            // Blobless block - still need metadata for parent-root chaining
+            BlobMetadata::blobless(height, parent_blob_root, &header, proposer_index)
+        } else {
+            // Blobbed block
+            BlobMetadata::new(height, parent_blob_root, commitments, header, proposer_index)
+        };
+
+        self.store
+            .put_blob_metadata_undecided(height, round, &blob_metadata)
+            .await
+            .map_err(|e| {
+                error!(
+                    height = %height,
+                    round = %round,
+                    error = %e,
+                    "Failed to store undecided BlobMetadata for proposal"
+                );
+                eyre::eyre!("Cannot propose without storing BlobMetadata: {}", e)
+            })?;
+
+        debug!(
+            height = %height,
+            round = %round,
+            blob_count = blob_metadata.blob_count(),
+            "Stored undecided BlobMetadata for proposal"
+        );
 
         Ok(LocallyProposedValue::new(proposal.height, proposal.round, proposal.value))
     }
@@ -1065,8 +1106,29 @@ where
                 .await
                 .map_err(|e| format!("Failed to store blob sidecar header: {}", e))?;
 
+            // Phase 4: Store BlobMetadata (Layer 2) as undecided after verification
+            let proposer_index = self.validator_index(&parts.proposer);
+            let parent_blob_root = if parts.height.as_u64() == 0 {
+                B256::ZERO
+            } else {
+                self.last_blob_sidecar_root
+            };
+
+            let blob_metadata = BlobMetadata::new(
+                parts.height,
+                parent_blob_root,
+                metadata.blob_kzg_commitments.clone(),
+                metadata.execution_payload_header.clone(),
+                proposer_index,
+            );
+
+            self.store
+                .put_blob_metadata_undecided(parts.height, parts.round, &blob_metadata)
+                .await
+                .map_err(|e| format!("Failed to store undecided BlobMetadata: {}", e))?;
+
             info!(
-                "✅ Verified and stored {} blobs for height {}, round {}",
+                "✅ Verified and stored {} blobs for height {}, round {} (BlobMetadata stored)",
                 blob_sidecars.len(),
                 parts.height,
                 parts.round
@@ -1095,6 +1157,31 @@ where
                 self.persist_blob_sidecar_header(parts.height, &signed_header)
                     .await
                     .map_err(|e| format!("Failed to store blob sidecar header: {}", e))?;
+
+                // Phase 4: Store blobless BlobMetadata (Layer 2) for parent-root chaining
+                let proposer_index = self.validator_index(&parts.proposer);
+                let parent_blob_root = if parts.height.as_u64() == 0 {
+                    B256::ZERO
+                } else {
+                    self.last_blob_sidecar_root
+                };
+
+                let blob_metadata = BlobMetadata::blobless(
+                    parts.height,
+                    parent_blob_root,
+                    &metadata.execution_payload_header,
+                    proposer_index,
+                );
+
+                self.store
+                    .put_blob_metadata_undecided(parts.height, parts.round, &blob_metadata)
+                    .await
+                    .map_err(|e| format!("Failed to store blobless BlobMetadata: {}", e))?;
+
+                debug!(
+                    "Stored blobless BlobMetadata for height {}, round {}",
+                    parts.height, parts.round
+                );
             }
         }
 
