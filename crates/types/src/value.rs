@@ -482,7 +482,7 @@ mod tests {
         let proto = proto::Value {
             value: 12345,
             metadata: None, // No metadata (old format)
-            extensions: Bytes::from(vec![1, 2, 3, 4]),
+            extensions: AlloyBytes::from(vec![1, 2, 3, 4]).into(),
         };
 
         let value = Value::from_proto(proto).expect("Failed to deserialize");
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(value.metadata.total_blob_bytes, 0);
         #[allow(deprecated)]
         {
-            assert_eq!(value.extensions, Bytes::from(vec![1, 2, 3, 4]));
+            assert_eq!(value.extensions.as_ref(), &[1, 2, 3, 4]);
         }
     }
 
