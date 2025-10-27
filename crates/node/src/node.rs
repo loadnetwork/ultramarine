@@ -171,7 +171,11 @@ impl Node for App {
         let mut state =
             State::new(genesis, ctx, signing_provider, address, start_height, store, blob_engine);
 
-        state.hydrate_blob_sidecar_root().await?;
+        // Phase 4: Hydrate blob parent root from BlobMetadata (Layer 2)
+        state.hydrate_blob_parent_root().await?;
+
+        // Phase 4: Cleanup stale undecided blob metadata from crashes/timeouts
+        state.cleanup_stale_blob_metadata().await?;
 
         // --- Initialize Execution Client ---
         // Development defaults: if Engine/Eth endpoints are not provided, derive them from
