@@ -42,3 +42,15 @@ pub mod ethereum_compat;
 // Enables lagging peers to sync by receiving both execution payloads and blob data
 // in Malachite's RawDecidedValue.value_bytes
 pub mod sync;
+
+// Phase 4.1: Three-layer architecture - Layer 1 (Pure BFT Consensus)
+// Added as part of blob header persistence redesign (PHASE4_PROGRESS.md)
+// Pure consensus-layer metadata using Tendermint/Malachite terminology.
+// Contains NO Ethereum types for technology neutrality.
+pub mod consensus_block_metadata;
+
+// Phase 4.1: Three-layer architecture - Layer 2 (Ethereum Compatibility)
+// Added as part of blob header persistence redesign (PHASE4_PROGRESS.md)
+// Ethereum EIP-4844 compatibility bridge that converts to BeaconBlockHeader
+// only when needed for BlobSidecar construction.
+pub mod blob_metadata;

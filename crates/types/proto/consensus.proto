@@ -154,3 +154,30 @@ message StreamMessage {
         bool fin = 4;
     }
 }
+
+// Phase 4: Three-layer architecture - Layer 1 (Pure BFT Consensus)
+// Pure consensus-layer block metadata using BFT terminology only.
+// Contains NO Ethereum types for technology neutrality.
+message ConsensusBlockMetadata {
+    uint64 height = 1;              // Block height (NOT "slot")
+    int32 round = 2;                // Consensus round
+    Address proposer = 3;           // Validator who proposed (NOT "proposer_index")
+    uint64 timestamp = 4;           // Unix timestamp (seconds)
+    bytes validator_set_hash = 5;   // B256 (32 bytes)
+    bytes execution_block_hash = 6; // B256 (32 bytes)
+    uint64 gas_limit = 7;
+    uint64 gas_used = 8;
+}
+
+// Phase 4: Three-layer architecture - Layer 2 (Ethereum Compatibility)
+// Ethereum EIP-4844 compatibility metadata.
+// This is the bridge between Ultramarine consensus and Ethereum blob format.
+// Conversion to BeaconBlockHeader happens only when building BlobSidecars.
+message BlobMetadata {
+    uint64 height = 1;                     // Block height (maps to Ethereum slot)
+    bytes parent_blob_root = 2;            // B256 (32 bytes) - chains blob headers
+    repeated bytes kzg_commitments = 3;    // 48 bytes each
+    uint32 blob_count = 4;                 // Number of blobs (0 for blobless)
+    ExecutionPayloadHeader execution_payload_header = 5;
+    optional uint64 proposer_index_hint = 6;
+}
