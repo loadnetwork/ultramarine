@@ -8,150 +8,194 @@
 
 ## 🎯 Goals
 
-- Persist every consensus-visible blob header in the consensus store (remove blob-engine dependency).
+- Persist every consensus-visible blob metadata record in the consensus store (remove blob-engine dependency).
 - Keep the in-memory parent-root cache consistent even when rounds fail or nodes restart.
 - Support multi-round proposals with clean header isolation.
 - Maintain a continuous parent-root chain, including blobless blocks.
-- Provide O(1) `get_latest_blob_header()` performance.
+- Provide O(1) `get_latest_blob_metadata()` performance.
 
 ---
 
 ## 📐 Design Overview
 
-### Storage Model
+We are adopting the **three-component metadata architecture** from the counterproposal.  
+Instead of storing `SignedBeaconBlockHeader` directly in the consensus store, we split responsibilities into three horizontal abstractions:
 
-| Column Family / Table      | Purpose                          | Key Format                     | Value                                |
-|---------------------------|----------------------------------|--------------------------------|--------------------------------------|
-| `block_headers_undecided` | Headers written pre-finalization | `(height:u64, round:i64)` (BE) | `ConsensusBlobHeader` protobuf       |
-| `block_headers_decided`   | Canonical finalized headers      | `height:u64` (BE)              | `ConsensusBlobHeader` protobuf       |
-| `block_headers_meta`      | Metadata (latest pointer, flags) | `b"latest_header_height"`      | `height:u64` (BE bytes)              |
+1. **Consensus metadata (conceptual Layer 1)** – pure Malachite/Tendermint naming (`height`, `round`, `proposer`) with no Ethereum leakage.
+2. **Blob metadata (conceptual Layer 2)** – Ethereum Deneb/EIP‑4844 bridge that can be swapped out for other DA formats.
+3. **Blob store (conceptual Layer 3)** – existing RocksDB engine that keeps raw blobs and execution payload bytes on a prunable window.
 
-### ConsensusBlobHeader Newtype
+These “layers” are conceptual only; they live side-by-side inside Ultramarine but with cleaner ownership boundaries.
+
+### Storage Model (redb)
+
+| Table                       | Purpose                                   | Key Format                     | Value                             |
+|----------------------------|-------------------------------------------|--------------------------------|-----------------------------------|
+| `consensus_block_metadata` | Canonical consensus info (kept forever)   | `height:u64` (BE)              | `ConsensusBlockMetadata` protobuf |
+| `blob_metadata_undecided`  | Round-scoped blob metadata pre-finalize   | `(height:u64, round:i64)` (BE) | `BlobMetadata` protobuf           |
+| `blob_metadata_decided`    | Finalized blob metadata (kept forever)    | `height:u64` (BE)              | `BlobMetadata` protobuf           |
+| `blob_metadata_meta`       | Latest pointers / migration flags         | `b"latest_height"` etc.        | Small byte payloads               |
+
+### Blob Store (RocksDB)
+
+| Column Family         | Purpose                                      |
+|-----------------------|----------------------------------------------|
+| `undecided_blobs`     | Raw blobs keyed by `(height, round)`         |
+| `decided_blobs`       | Raw blobs keyed by `height`                  |
+| `execution_payloads`* | Optional column for prunable payload bytes   |
+
+> *We can reuse existing decided/undecided block-data tables or add a dedicated column family; the pruning policy matches blobs.
+
+### Metadata Types
 
 ```rust
-pub struct ConsensusBlobHeader(pub SignedBeaconBlockHeader);
+/// Pure consensus-layer block metadata (Layer 1 abstraction)
+pub struct ConsensusBlockMetadata {
+    pub height: Height,
+    pub round: Round,
+    pub proposer: Address,
+    pub timestamp: u64,
+    pub validator_set_hash: B256,
+    pub execution_block_hash: B256,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+}
 ```
 
-- Consensus-friendly naming; Deneb compatibility remains internal.  
-- Provides helpers (`height()`, `hash_tree_root()`, `parent_root()`).  
-- Implements `malachitebft_proto::Protobuf` by delegating to the inner type.
+```rust
+/// Ethereum-facing blob metadata (Layer 2 abstraction)
+pub struct BlobMetadata {
+    pub height: Height,
+    pub parent_blob_root: B256,
+    pub kzg_commitments: Vec<KzgCommitment>,
+    pub blob_count: u16,
+    pub execution_state_root: B256,
+    pub execution_block_hash: B256,
+    pub proposer_index_hint: Option<u64>, // populated from Layer 1 when available
+}
+```
+
+`BlobMetadata::to_beacon_header()` resolves the proposer index by combining the stored hint with the validator set. This keeps sidecar verification intact even though consensus no longer stores `SignedBeaconBlockHeader`.
 
 ### Header Lifecycle
 
 ```
-┌──────────────────────────────┐
-│ UNDECIDED (height, round)    │  put_undecided_blob_header
-│ • Written on propose/receive │  • Idempotent write (compare bytes)
-│ • Multiple rounds per height │
-└──────────────▲───────────────┘
-               │  mark_blob_header_decided (single WriteBatch)
+┌─────────────────────────────────┐
+│ UNDECIDED (height, round)       │  put_undecided_blob_metadata
+│ • Written on propose/receive    │  • Idempotent write (compare bytes)
+│ • Multiple rounds per height    │
+└──────────────▲──────────────────┘
+               │  mark_blob_metadata_decided (single WriteBatch)
                │   1. Read undecided (h,r)
                │   2. Write decided (h)
                │   3. Update latest pointer
                │   4. Delete undecided (h,r)
                │
-┌──────────────┴───────────────┐
-│      DECIDED (height)        │  get_decided_blob_header
-│ • Exactly one canonical hdr  │  • Feeds parent-root & restarts
-└──────────────────────────────┘
+┌──────────────┴──────────────────┐
+│      DECIDED (height)           │  get_blob_metadata
+│ • Exactly one canonical record  │  • Feeds parent-root & restarts
+└─────────────────────────────────┘
 ```
 
 ### Cache Management (CRITICAL RULE)
 
-`last_blob_header_root` is updated **only** when the header is known-canonical:
+`last_blob_parent_root` is updated **only** when metadata is canonical:
 
-1. **Startup**: `hydrate_blob_header_root()` loads the latest decided header (if any).  
-2. **Finalization**: `commit()` updates the cache after `mark_blob_header_decided()`.
+1. **Startup**: `hydrate_blob_parent_root()` loads the latest decided metadata (if any).  
+2. **Finalization**: `commit()` promotes `(height, round)` metadata and refreshes the cache.
 
 ➡️ We do **not** mutate the cache during proposal or receive flows; failed rounds cannot corrupt the parent root.
 
 ### Restream & Recovery
 
-- Restream pulls headers via `store.get_undecided_blob_header(height, round)` (or decided fallback) — no blob-engine dependency.
-- `cleanup_stale_undecided_headers()` runs on startup to drop orphaned entries left behind by crashes/timeouts.
-- Height 0 parent root is `B256::ZERO`; heights > 0 must resolve the parent from the decided table (migration window may log warnings).
+- Restream pulls metadata via `store.get_undecided_blob_metadata(height, round)` with a decided fallback — no blob-engine dependency.
+- `cleanup_stale_blob_metadata()` runs on startup to drop orphaned entries left behind by crashes/timeouts.
+- Height 0 parent root is `B256::ZERO`; heights > 0 resolve the parent from the decided table (migration window may log warnings).
 
 ### Optional Migration Support
 
 - Iterate decided heights.  
-- For blobbed heights, read header from first sidecar and write into `block_headers_decided`.  
-- Update latest pointer and set `headers_migrated_v1` flag in metadata.  
-- Blobless heights remain empty and will repopulate after upgrade.  
-- During migration window, missing parent headers can be logged/warned instead of failing validation.
+- For blobbed heights, derive `BlobMetadata` from existing headers + commitments and write into `blob_metadata_decided`.  
+- Populate `consensus_block_metadata` from stored certificates / execution payload samples.  
+- Update latest pointer flags in `blob_metadata_meta`.  
+- Blobless heights use `BlobMetadata::blobless()` and will repopulate automatically after upgrade.  
+- During migration, missing parents can log warnings instead of hard failures.
 
 ---
 
 ## 🚀 Implementation Roadmap
 
-### Phase 1 – Core Storage (est. 6h)
+### Phase 1 – Core Types & Storage (est. 6h)
 
-1. **ConsensusBlobHeader newtype**  
-   - [ ] Create `crates/types/src/consensus_blob_header.rs`.  
-   - [ ] Add helper accessors + `Protobuf` passthrough.  
-   - [ ] Export from `crates/types/src/lib.rs`.  
-   - [ ] Unit test construction/hash helpers.
+1. **ConsensusBlockMetadata type**  
+   - [ ] Add `crates/types/src/consensus_block_metadata.rs`.  
+   - [ ] Define protobuf schema (`crates/types/proto/consensus.proto`).  
+   - [ ] Implement helpers (`hash()`, `proposer_index()`, etc.) and unit tests.  
+   - [ ] Export from `crates/types/src/lib.rs`.
 
-2. **Table definitions / initialization**  
-   - [ ] Add `block_headers_undecided`, `block_headers_decided`, `block_headers_meta`.  
-   - [ ] Ensure big-endian key encoding for deterministic iteration.  
-   - [ ] Confirm DB transactions cover multi-table writes; use RocksDB if redb batching proves insufficient.
+2. **BlobMetadata type**  
+   - [ ] Add `crates/types/src/blob_metadata.rs`.  
+   - [ ] Schema updates (`crates/types/proto/blob.proto`).  
+   - [ ] `blob_count: u16`, `to_beacon_header()` using proposer-index hint + validator set.  
+   - [ ] Helpers for `blobless()`, `compute_blob_root()`, and round-trip tests.
 
-3. **Store methods (idempotent + atomic)**  
-   - [ ] `put_undecided_blob_header` — compare existing bytes before writing.  
-   - [ ] `get_undecided_blob_header`.  
-   - [ ] `drop_undecided_blob_header`.  
-   - [ ] `mark_blob_header_decided` — single `WriteBatch`.  
-   - [ ] `get_decided_blob_header`.  
-   - [ ] `get_latest_blob_header` — O(1) via metadata pointer.  
-   - [ ] `get_all_undecided_headers_before` — supports startup cleanup.  
-   - [ ] Update async wrappers (spawn_blocking).  
-   - [ ] Update metrics (bytes/time) for reads/writes.
+3. **Table definitions / initialization**  
+   - [ ] Add `consensus_block_metadata`, `blob_metadata_undecided`, `blob_metadata_decided`, `blob_metadata_meta` tables to redb store.  
+   - [ ] Ensure big-endian encoding for deterministic iteration.  
+   - [ ] Introduce metadata-pointer helpers (latest height, migration flags).  
+   - [ ] Confirm atomic write batches cover undecided→decided promotion.
 
-### Phase 2 – State Integration (est. 5h)
+4. **Store methods (idempotent + atomic)**  
+   - [ ] `put_consensus_block_metadata`.  
+   - [ ] `put/get/drop_undecided_blob_metadata`.  
+   - [ ] `mark_blob_metadata_decided` (single write batch, updates metadata pointer).  
+   - [ ] `get_blob_metadata`, `get_latest_blob_metadata`.  
+   - [ ] `get_all_undecided_blob_metadata_before` for cleanup.  
+   - [ ] Async wrappers + metrics updates.
+
+### Phase 2 – State Integration (est. 5–6h)
 
 1. **Startup hydration & cleanup**  
-   - [ ] `hydrate_blob_header_root()` seeds cache from decided table (logs restored root).  
-   - [ ] `cleanup_stale_undecided_headers()` removes orphaned `(height, round)` entries (decided or beyond retention window).
+   - [ ] `hydrate_blob_parent_root()` seeds cache from decided metadata.  
+   - [ ] `cleanup_stale_blob_metadata()` removes orphaned `(height, round)` entries (decided or beyond retention).
 
 2. **Proposer flow**  
-   - [ ] `prepare_blob_sidecar_parts()` returns `(ConsensusBlobHeader, Vec<BlobSidecar>)`.  
-   - [ ] `build_blob_header_message()` uses cached parent (height 0 guard).  
-   - [ ] Sign header, wrap in `ConsensusBlobHeader`.  
-   - [ ] Call `put_undecided_blob_header(height, round, &header)` **before** streaming.  
+   - [ ] Build `ConsensusBlockMetadata` + `BlobMetadata` before streaming.  
+   - [ ] Store consensus metadata and undecided blob metadata prior to emitting parts.  
    - [ ] Cache remains untouched.  
-   - [ ] Continue with blob verification/storage and streaming.
+   - [ ] Continue with blob verification/storage and streaming using Layer 2 metadata.
 
 3. **Receiver flow**  
-   - [ ] After `verify_blob_sidecars`, store header via `put_undecided_blob_header`.  
-   - [ ] Blobless blocks produce placeholder-signed header (all-zero signature).  
+   - [ ] After `verify_blob_sidecars`, persist metadata via `put_undecided_blob_metadata`.  
+   - [ ] Blobless blocks call `BlobMetadata::blobless()`; no placeholder signatures needed.  
    - [ ] Cache unaffected.
 
 4. **Restream path**  
-   - [ ] Fetch header via `get_undecided_blob_header(height, proposal_round)` (fallback to decided if necessary).  
-   - [ ] Stream original sidecars with stored header.  
-   - [ ] Log/abort if header missing.
+   - [ ] Fetch metadata via `get_undecided_blob_metadata(height, proposal_round)` (fallback to decided).  
+   - [ ] Rebuild sidecars with stored metadata and proposer-index hint.  
+   - [ ] Abort with log if metadata missing.
 
 5. **Commit flow**  
-   - [ ] Call `mark_blob_header_decided(height, round)` (fatal on failure).  
-   - [ ] Read decided header and set `last_blob_header_root = header.hash_tree_root()`.  
-   - [ ] Log new root for observability.
+   - [ ] Promote metadata with `mark_blob_metadata_decided(height, round)` before blob-engine promotion.  
+   - [ ] Refresh `last_blob_parent_root` from decided metadata and log new root.  
+   - [ ] Persist consensus metadata alongside certificates as part of commit pipeline.
 
 6. **Verification adjustments**  
    - [ ] Guard `height == 0` (parent = zero).  
-   - [ ] Fetch parent from decided table; error if missing (migration window may warn).  
-   - [ ] Continue inclusion-proof, signature, commitment checks.
+   - [ ] Fetch parent from decided metadata; warn during migration if missing.  
+   - [ ] Continue inclusion-proof, signature, commitment checks using new helpers.
 
 7. **Round cleanup**  
-   - [ ] Ensure every timeout/round-drop path calls `drop_undecided_blob_header`.  
-   - [ ] Integrate with pruning routines.
+   - [ ] Ensure timeout/round-drop paths call `drop_undecided_blob_metadata`.  
+   - [ ] Integrate with pruning routines and blob-engine cleanup.
 
 ### Phase 3 – Tests (est. 6h)
 
 1. **Store unit tests**  
    - [ ] Undecided roundtrip.  
    - [ ] Multi-round isolation.  
-   - [ ] `mark_blob_header_decided` lifecycle (atomic promotion).  
-   - [ ] `get_latest_blob_header()` performance (<10ms with 1k entries).  
+   - [ ] `mark_blob_metadata_decided` lifecycle (atomic promotion).  
+   - [ ] `get_latest_blob_metadata()` performance (<10ms with 1k entries).  
    - [ ] Drop undecided entry.  
    - [ ] Idempotent writes.  
    - [ ] Height 0 guard.  
@@ -219,7 +263,7 @@ pub struct ConsensusBlobHeader(pub SignedBeaconBlockHeader);
 ## 🎯 Success Criteria
 
 - All phases complete with tests passing.  
-- `get_latest_blob_header()` verified O(1).  
+- `get_latest_blob_metadata()` verified O(1).  
 - Cache consistent across restarts and failed rounds.  
 - Parent-root chain unbroken for blobless blocks.  
 - Blob engine no longer persists headers.  
@@ -244,24 +288,24 @@ pub struct ConsensusBlobHeader(pub SignedBeaconBlockHeader);
 
 ### 2025-01-XX
 - [ ] Drafted updated design (this document).  
-- [ ] Next: implement ConsensusBlobHeader newtype (Phase 1.1).
+- [ ] Next: implement `ConsensusBlockMetadata` + `BlobMetadata` types (Phase 1).
 
 ---
 
 ## 🚀 Next Actions
 
-1. Implement `ConsensusBlobHeader` newtype (Phase 1.1).
+1. Implement metadata types + protobufs (Phase 1).
 2. Add new column families & table initialization (Phase 1.2).
 3. Implement storage methods with idempotency + atomic promotion (Phase 1.3).
 
 ---
 ---
 
-# 🔄 ALTERNATIVE DESIGN PROPOSAL (PENDING APPROVAL)
+# ✅ Adopted Three-Component Metadata Architecture
 
-**Status**: ⚠️ **NEEDS REVIEW**
-**Review Date**: Monday, January 27th, 2025
-**Reviewers**: Engineering Leads
+**Status**: 🟢 Approved  
+**Decision Date**: 2025-01-27 (architecture review)  
+**Focus**: Implement separation of consensus metadata, blob metadata, and prunable blob storage.
 
 ---
 
@@ -272,15 +316,15 @@ This alternative design proposes a **three-layer architecture** that cleanly sep
 2. **Blob metadata** (Ethereum EIP-4844 compatibility bridge)
 3. **Blob data storage** (prunable raw data)
 
-**Key Difference from Current Plan**: Instead of storing `ConsensusBlobHeader` (which wraps `SignedBeaconBlockHeader`) in consensus, we store two separate metadata structures that clearly separate consensus concerns from Ethereum compatibility.
+**Key Difference from Legacy Plan**: Instead of storing `ConsensusBlobHeader` (which wraps `SignedBeaconBlockHeader`) in consensus, we store two separate metadata structures that clearly separate consensus concerns from Ethereum compatibility.
 
 ---
 
 ## 🎯 Design Philosophy
 
-### Problem with Current Approach
+### Problem with Legacy Approach
 
-The current plan stores `ConsensusBlobHeader(SignedBeaconBlockHeader)` in the consensus store, which:
+The previous header-wrapper plan stored `ConsensusBlobHeader(SignedBeaconBlockHeader)` in the consensus store, which:
 - ❌ Leaks Ethereum terminology into consensus layer (`slot`, `proposer_index`, etc.)
 - ❌ Tightly couples consensus to Ethereum blob format
 - ❌ Makes it hard to swap DA layers (e.g., migrate to Celestia later)
@@ -306,7 +350,7 @@ The current plan stores `ConsensusBlobHeader(SignedBeaconBlockHeader)` in the co
 │     LAYER 2: BLOB METADATA (Ethereum Compatibility)          │
 │                    Keep Forever ♾️                          │
 ├─────────────────────────────────────────────────────────────┤
-│ blob_metadata:           height → BlobMetadata              │
+│ blob_metadata_decided:  height → BlobMetadata              │
 │ blob_metadata_undecided: (h, r) → BlobMetadata              │
 │                                                              │
 │ Contains: parent_blob_root, kzg_commitments, state_root    │
@@ -641,7 +685,7 @@ fn build_sidecars(
 
 ---
 
-## ✅ Advantages Over Current Plan
+## ✅ Advantages Over Legacy Plan
 
 ### 1. Clean Separation of Concerns
 
@@ -651,7 +695,7 @@ fn build_sidecars(
 | Layer 2 | Ethereum compat | EIP-4844 (`kzg_commitments`, `parent_blob_root`) |
 | Layer 3 | Data storage | Technology-neutral |
 
-**Current plan**: Mixes Ethereum types (`SignedBeaconBlockHeader`) into consensus layer.
+**Legacy plan**: Mixed Ethereum types (`SignedBeaconBlockHeader`) into consensus layer.
 
 ---
 
@@ -701,7 +745,7 @@ celestia_metadata: height → CelestiaMetadata {
 
 **Total metadata kept forever**: ~500 MB per 1M blocks ✅
 
-**Current plan**: Stores full `SignedBeaconBlockHeader` (~300+ bytes) in consensus.
+**Legacy plan**: Stored full `SignedBeaconBlockHeader` (~300+ bytes) in consensus.
 
 ---
 
@@ -797,72 +841,31 @@ Both handle edge cases, but three-layer is cleaner conceptually.
 
 ---
 
-## 📊 Comparison Matrix
+## 📊 Comparison Matrix (Legacy vs Adopted)
 
-| Aspect | Current Plan (ConsensusBlobHeader) | Three-Layer Plan |
-|--------|-------------------------------------|------------------|
+| Aspect | Legacy Header Wrapper | Adopted Three-Component Architecture |
+|--------|-----------------------|--------------------------------------|
 | **Consensus Purity** | ❌ Stores Ethereum types | ✅ Pure BFT types only |
 | **Naming** | ⚠️ Mixed (height + Ethereum header) | ✅ BFT-aligned (height, round, proposer) |
 | **Technology Neutral** | ❌ Tied to Ethereum blobs | ✅ Can swap DA layers |
-| **Storage Size** | ~300 bytes/block | ~500 bytes/block (two layers) |
-| **Complexity** | ⚠️ One type (simpler) | ⚠️ Two types (more complex) |
-| **Edge Cases** | ✅ All handled | ✅ All handled |
-| **Ethereum Compat** | ✅ Direct wrapper | ✅ Via conversion layer |
-| **Future Extensibility** | ❌ Hard to change | ✅ Easy to swap Layer 2 |
+| **Storage Size** | ~300 bytes/block | ~500 bytes/block (two metadata layers) |
+| **Complexity** | ⚠️ Simpler (single type) | ⚠️ Extra protobuf + tables |
+| **Edge Cases** | ✅ Handled | ✅ Handled |
+| **Ethereum Compat** | ✅ Direct wrapper | ✅ Via conversion shim |
+| **Future Extensibility** | ❌ Difficult | ✅ Straightforward |
 
 ---
 
-## ❓ Open Questions for Review
+## ✅ Resolved Considerations
 
-### 1. Is the added complexity worth it?
-
-**Trade-off**: Two types vs. one type
-- **Benefit**: Cleaner separation, technology neutrality
-- **Cost**: More code, more protobuf schemas
-
-### 2. Storage overhead acceptable?
-
-**Difference**: ~500 bytes vs ~300 bytes per block
-- **Extra cost**: 200 bytes × 1M blocks = 200 MB per million blocks
-- **Benefit**: Clean layer separation
-
-### 3. Migration path?
-
-**Question**: Do we migrate existing data or start fresh?
-- **Option A**: Wipe data (development phase, acceptable)
-- **Option B**: Migrate from single-table to two-layer
-
-### 4. Timeline impact?
-
-**Current plan**: 18 hours
-**Three-layer plan**: 18-20 hours (similar)
+- **Complexity vs. purity**: Extra protobuf/types accepted to keep consensus technology-neutral.  
+- **Storage overhead**: +200 bytes/block is acceptable for the data chain roadmap.  
+- **Migration**: Development phase allows either wipe or scripted import; documented in “Optional Migration Support”.  
+- **Timeline**: Phase 4 scope increases slightly (≈20 h total) but unblocks downstream work once delivered.  
+- **Sync behaviour**: Prunable payload/blob data stay out of sync snapshots; only Layers 1–2 replicate.
 
 ---
 
-## 🎯 Recommendation
-
-**Architecture Team to decide**:
-
-1. **If prioritizing purity and extensibility** → Three-layer design
-2. **If prioritizing simplicity and faster delivery** → Current plan (ConsensusBlobHeader)
-
-Both designs are technically sound and handle all edge cases. The key difference is philosophical: do we want consensus to be pure BFT, or is wrapping Ethereum types acceptable?
-
----
-
-## 📅 Review Checklist for Monday 27th
-
-- [ ] Review three-layer architecture diagram
-- [ ] Evaluate naming philosophy (BFT vs Ethereum terms)
-- [ ] Assess storage overhead (~200 bytes extra per block)
-- [ ] Consider future DA layer changes (Celestia, EigenDA)
-- [ ] Decide on migration strategy
-- [ ] Approve implementation plan OR stick with current plan
-- [ ] Set target completion date
-
----
-
-_**Prepared**: 2025-01-24_
-_**Review Date**: 2025-01-27 (Monday)_
-_**Status**: Awaiting Engineering Lead Approval_
-
+_**Prepared**: 2025-01-24_  
+_**Updated**: 2025-01-27 (decision recorded)_  
+_**Status**: Implementation pending (architecture locked)_
