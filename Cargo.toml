@@ -113,6 +113,7 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 url = "2"
 getrandom = { version = "0.2.14", features = ["std"] }
+tempfile = "3.13.0"
 
 [workspace.dependencies.malachitebft-app]
 package = "informalsystems-malachitebft-app"

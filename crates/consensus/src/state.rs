@@ -28,6 +28,7 @@ use ultramarine_types::{
     aliases::B256,
     blob::BlobsBundle,
     codec::proto::ProtobufCodec,
+    consensus_block_metadata::ConsensusBlockMetadata,
     context::LoadContext,
     engine_api::{ExecutionBlock, ExecutionPayloadHeader},
     ethereum_compat::{
@@ -173,12 +174,117 @@ where
         &self.blob_engine
     }
 
+    /// Phase 4: Hydrate blob parent root from latest decided BlobMetadata (Layer 2)
+    ///
+    /// This MUST be called on startup to restore the parent_root cache from Layer 2 metadata.
+    /// The cache is updated ONLY when metadata becomes canonical (at commit).
+    ///
+    /// # Cache Discipline
+    ///
+    /// - **Startup**: Load from `get_latest_blob_metadata()` (decided table)
+    /// - **Finalization**: Update in `commit()` after `mark_blob_metadata_decided()`
+    /// - **Never**: Update during propose/receive flows (failed rounds cannot corrupt cache)
+    pub async fn hydrate_blob_parent_root(&mut self) -> eyre::Result<()> {
+        if let Some((height, metadata)) =
+            self.store.get_latest_blob_metadata().await.map_err(|e| eyre::Report::new(e))?
+        {
+            let header = metadata.to_beacon_header();
+            self.last_blob_sidecar_root = header.hash_tree_root();
+            info!(
+                height = %height,
+                parent_root = ?self.last_blob_sidecar_root,
+                "Hydrated blob parent root from BlobMetadata"
+            );
+        } else {
+            info!("No BlobMetadata found, starting with zero parent root");
+            self.last_blob_sidecar_root = B256::ZERO;
+        }
+
+        Ok(())
+    }
+
+    /// Phase 4: Legacy method - kept for backward compatibility during migration
+    ///
+    /// DEPRECATED: Use `hydrate_blob_parent_root()` instead.
+    /// This method loads from old BlobSidecar headers and will be removed in Phase 4 cleanup.
+    #[deprecated(
+        since = "0.4.0",
+        note = "Use hydrate_blob_parent_root() with BlobMetadata instead"
+    )]
     pub async fn hydrate_blob_sidecar_root(&mut self) -> eyre::Result<()> {
         if let Some((_, header)) =
             self.store.get_latest_blob_sidecar_header().await.map_err(|e| eyre::Report::new(e))?
         {
             self.last_blob_sidecar_root = header.message.hash_tree_root();
         }
+
+        Ok(())
+    }
+
+    /// Phase 4: Cleanup stale undecided blob metadata on startup
+    ///
+    /// Removes orphaned `(height, round)` entries that were left behind due to:
+    /// - Node crashes before commit
+    /// - Timeouts/failed rounds
+    /// - Any entry from heights less than current_height
+    ///
+    /// # Recovery Guarantee
+    ///
+    /// This ensures bounded storage growth after crashes by removing all undecided
+    /// metadata below the current height. Safe because:
+    /// - If height H was decided, its metadata is in BLOB_METADATA_DECIDED_TABLE
+    /// - If height H was not decided, we'll re-propose at that height
+    /// - No valid restream can reference heights < current_height
+    pub async fn cleanup_stale_blob_metadata(&self) -> eyre::Result<()> {
+        let before_height = self.current_height;
+        let stale_entries = self
+            .store
+            .get_all_undecided_blob_metadata_before(before_height)
+            .await
+            .map_err(|e| eyre::Report::new(e))?;
+
+        if stale_entries.is_empty() {
+            debug!("No stale undecided blob metadata to clean up");
+            return Ok(());
+        }
+
+        info!(
+            count = stale_entries.len(),
+            before_height = %before_height,
+            "Cleaning up stale undecided blob metadata"
+        );
+
+        let mut deleted = 0;
+        let mut failed = 0;
+
+        for (height, round) in stale_entries {
+            match self.store.delete_blob_metadata_undecided(height, round).await {
+                Ok(()) => {
+                    deleted += 1;
+                    debug!(
+                        height = %height,
+                        round = %round,
+                        "Deleted stale undecided blob metadata"
+                    );
+                }
+                Err(e) => {
+                    failed += 1;
+                    warn!(
+                        height = %height,
+                        round = %round,
+                        error = %e,
+                        "Failed to delete stale undecided blob metadata"
+                    );
+                    // Continue cleanup even if one fails
+                }
+            }
+        }
+
+        info!(
+            deleted = deleted,
+            failed = failed,
+            "Finished cleaning up stale undecided blob metadata"
+        );
 
         Ok(())
     }
@@ -465,9 +571,117 @@ where
             Err(e) => return Err(e.into()),
         };
 
-        self.store.store_decided_value(&certificate, proposal.value).await?;
+        self.store.store_decided_value(&certificate, proposal.value.clone()).await?;
 
-        // Mark blobs as decided in blob engine
+        // Phase 4: Three-layer metadata promotion (Layer 1 → Layer 2 → Layer 3)
+        // This follows the architectural principle: Consensus → Ethereum → Blobs
+
+        // LAYER 1: Store ConsensusBlockMetadata (pure BFT consensus state)
+        // Build from certificate and proposal data
+
+        // Compute validator set hash using SSZ tree-hash for deterministic ordering
+        let validator_set_hash = {
+            use tree_hash::{Hash256 as TreeHash256, merkle_root};
+
+            let leaves: Vec<TreeHash256> = self
+                .genesis
+                .validator_set
+                .validators
+                .iter()
+                .map(|validator| TreeHash256::from_slice(&validator.address.into_inner()))
+                .collect();
+
+            if leaves.is_empty() {
+                B256::ZERO
+            } else {
+                let mut leaf_bytes = Vec::with_capacity(leaves.len() * 32);
+                for hash in &leaves {
+                    leaf_bytes.extend_from_slice(hash.as_ref());
+                }
+                let root = merkle_root(&leaf_bytes, leaves.len());
+                B256::from_slice(root.as_ref())
+            }
+        };
+
+        let consensus_metadata = ConsensusBlockMetadata::new(
+            certificate.height,
+            certificate.round,
+            proposal.proposer,
+            proposal.value.metadata.execution_payload_header.timestamp,
+            validator_set_hash,
+            proposal.value.metadata.execution_payload_header.block_hash,
+            proposal.value.metadata.execution_payload_header.gas_limit,
+            proposal.value.metadata.execution_payload_header.gas_used,
+        );
+
+        self.store
+            .put_consensus_block_metadata(certificate.height, &consensus_metadata)
+            .await
+            .map_err(|e| {
+                error!(
+                    height = %certificate.height,
+                    round = %certificate.round,
+                    error = %e,
+                    "Failed to store ConsensusBlockMetadata"
+                );
+                eyre::eyre!(
+                    "Cannot finalize block at height {} without consensus metadata: {}",
+                    certificate.height,
+                    e
+                )
+            })?;
+
+        // LAYER 2: Promote BlobMetadata from undecided → decided
+        // This MUST happen before blob engine promotion to maintain data consistency.
+        // If this fails, we abort the commit because the Ethereum compatibility layer is broken.
+        self.store
+            .mark_blob_metadata_decided(certificate.height, certificate.round)
+            .await
+            .map_err(|e| {
+                error!(
+                    height = %certificate.height,
+                    round = %certificate.round,
+                    error = %e,
+                    "CRITICAL: Failed to promote BlobMetadata - aborting commit"
+                );
+                eyre::eyre!(
+                    "Cannot finalize block at height {} round {} without BlobMetadata: {}",
+                    certificate.height,
+                    certificate.round,
+                    e
+                )
+            })?;
+
+        let metadata = self
+            .store
+            .get_blob_metadata(certificate.height)
+            .await
+            .map_err(|e| {
+                error!(
+                    height = %certificate.height,
+                    error = %e,
+                    "CRITICAL: Failed to load BlobMetadata after promotion"
+                );
+                eyre::eyre!("Failed to load BlobMetadata: {}", e)
+            })?
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "Promoted BlobMetadata missing for height {}",
+                    certificate.height.as_u64()
+                )
+            })?;
+
+        let header = metadata.to_beacon_header();
+        let new_root = header.hash_tree_root();
+        info!(
+            height = %certificate.height,
+            old_root = ?self.last_blob_sidecar_root,
+            new_root = ?new_root,
+            "Updated blob parent root from decided BlobMetadata"
+        );
+        self.last_blob_sidecar_root = new_root;
+
+        // LAYER 3: Mark blobs as decided in blob engine
         // CRITICAL: This MUST succeed to maintain data availability guarantee.
         // If blob promotion fails, we cannot finalize the block because the execution layer
         // would be unable to retrieve blobs for import, breaking the DA layer.
@@ -501,24 +715,8 @@ where
             self.store.store_decided_block_data(certificate.height, data).await?;
         }
 
-        match self.store.get_blob_sidecar_header(certificate.height).await {
-            Ok(Some(header)) => {
-                self.last_blob_sidecar_root = header.message.hash_tree_root();
-            }
-            Ok(None) => {
-                warn!(
-                    height = %certificate.height,
-                    "Blob sidecar header not found for decided block"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    height = %certificate.height,
-                    error = %e,
-                    "Failed to load blob sidecar header for decided block"
-                );
-            }
-        }
+        // Phase 4: Cache update moved above (after BlobMetadata promotion)
+        // Old blob sidecar header loading removed - we now use BlobMetadata
 
         // Prune the store, keep the last 5 heights
         let retain_height = Height::new(certificate.height.as_u64().saturating_sub(5));
