@@ -14,7 +14,9 @@ use redb::{ReadableDatabase, ReadableTable};
 use thiserror::Error;
 use tracing::error;
 use ultramarine_types::{
+    blob_metadata::BlobMetadata,
     codec::{proto as codec, proto::ProtobufCodec},
+    consensus_block_metadata::ConsensusBlockMetadata,
     context::LoadContext,
     ethereum_compat::SignedBeaconBlockHeader,
     height::Height,
@@ -65,6 +67,9 @@ pub enum StoreError {
 
     #[error("Failed to join on task: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
+
+    #[error("Blob metadata not found for height {height} round {round}")]
+    MissingBlobMetadata { height: u64, round: i64 },
 }
 
 const CERTIFICATES_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
@@ -84,6 +89,22 @@ const UNDECIDED_BLOCK_DATA_TABLE: redb::TableDefinition<UndecidedValueKey, Vec<u
 
 const BLOCK_HEADERS_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
     redb::TableDefinition::new("block_headers");
+
+// Phase 4: Three-layer architecture - metadata storage
+// Layer 1: Pure BFT consensus metadata (keep forever)
+const CONSENSUS_BLOCK_METADATA_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
+    redb::TableDefinition::new("consensus_block_metadata");
+
+// Layer 2: Blob metadata (keep forever)
+const BLOB_METADATA_DECIDED_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
+    redb::TableDefinition::new("blob_metadata_decided");
+
+const BLOB_METADATA_UNDECIDED_TABLE: redb::TableDefinition<UndecidedValueKey, Vec<u8>> =
+    redb::TableDefinition::new("blob_metadata_undecided");
+
+// Metadata pointer for O(1) latest blob metadata lookup
+const BLOB_METADATA_META_TABLE: redb::TableDefinition<&str, Vec<u8>> =
+    redb::TableDefinition::new("blob_metadata_meta");
 
 struct Db {
     db: redb::Database,
@@ -324,6 +345,12 @@ impl Db {
         let _ = tx.open_table(UNDECIDED_BLOCK_DATA_TABLE)?;
         let _ = tx.open_table(BLOCK_HEADERS_TABLE)?;
 
+        // Phase 4: Three-layer architecture tables
+        let _ = tx.open_table(CONSENSUS_BLOCK_METADATA_TABLE)?;
+        let _ = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+        let _ = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+        let _ = tx.open_table(BLOB_METADATA_META_TABLE)?;
+
         tx.commit()?;
 
         Ok(())
@@ -487,6 +514,335 @@ impl Db {
 
         Ok(result)
     }
+
+    // ========================================================================
+    // Phase 4: Three-layer architecture - metadata storage methods
+    // ========================================================================
+
+    /// Insert consensus block metadata (Layer 1)
+    ///
+    /// This stores pure BFT consensus metadata using Tendermint/Malachite terminology.
+    /// Idempotent: compares bytes before writing to avoid unnecessary disk I/O.
+    fn insert_consensus_block_metadata(
+        &self,
+        height: Height,
+        metadata: &ConsensusBlockMetadata,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let proto = metadata.to_proto()?;
+        let bytes = proto.encode_to_vec();
+        let write_bytes = bytes.len() as u64;
+
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(CONSENSUS_BLOCK_METADATA_TABLE)?;
+
+            // Idempotent write: only insert if value doesn't exist or differs
+            let should_write = if let Some(existing) = table.get(&height)? {
+                existing.value() != bytes.as_slice()
+            } else {
+                true
+            };
+
+            if should_write {
+                table.insert(height, bytes)?;
+            }
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+        self.metrics.add_write_bytes(write_bytes);
+
+        Ok(())
+    }
+
+    /// Get consensus block metadata (Layer 1)
+    fn get_consensus_block_metadata(
+        &self,
+        height: Height,
+    ) -> Result<Option<ConsensusBlockMetadata>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(CONSENSUS_BLOCK_METADATA_TABLE)?;
+
+        let metadata = if let Some(value) = table.get(&height)? {
+            let bytes = value.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::ConsensusBlockMetadata::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            let metadata = ConsensusBlockMetadata::from_proto(proto)?;
+
+            self.metrics.add_read_bytes(bytes.len() as u64);
+            self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
+
+            Some(metadata)
+        } else {
+            None
+        };
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(metadata)
+    }
+
+    /// Insert undecided blob metadata (Layer 2)
+    ///
+    /// Stores blob metadata for a specific (height, round) proposal.
+    /// Idempotent: compares bytes before writing.
+    fn insert_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+        metadata: &BlobMetadata,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let proto = metadata.to_proto()?;
+        let bytes = proto.encode_to_vec();
+        let write_bytes = bytes.len() as u64;
+
+        let key = (height, round);
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+
+            // Idempotent write: only insert if value doesn't exist or differs
+            let should_write = if let Some(existing) = table.get(&key)? {
+                existing.value() != bytes.as_slice()
+            } else {
+                true
+            };
+
+            if should_write {
+                table.insert(key, bytes)?;
+            }
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+        self.metrics.add_write_bytes(write_bytes);
+
+        Ok(())
+    }
+
+    /// Get undecided blob metadata (Layer 2)
+    fn get_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<Option<BlobMetadata>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+
+        let key = (height, round);
+        let metadata = if let Some(value) = table.get(&key)? {
+            let bytes = value.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::BlobMetadata::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            let metadata = BlobMetadata::from_proto(proto)?;
+
+            self.metrics.add_read_bytes(bytes.len() as u64);
+            self.metrics.add_key_read_bytes(size_of::<(Height, Round)>() as u64);
+
+            Some(metadata)
+        } else {
+            None
+        };
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(metadata)
+    }
+
+    /// Get decided blob metadata (Layer 2)
+    fn get_blob_metadata(&self, height: Height) -> Result<Option<BlobMetadata>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+
+        let metadata = if let Some(value) = table.get(&height)? {
+            let bytes = value.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::BlobMetadata::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            let metadata = BlobMetadata::from_proto(proto)?;
+
+            self.metrics.add_read_bytes(bytes.len() as u64);
+            self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
+
+            Some(metadata)
+        } else {
+            None
+        };
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(metadata)
+    }
+
+    /// Mark blob metadata as decided (atomic promotion)
+    ///
+    /// This is the CRITICAL method that ensures atomicity:
+    /// 1. Reads from undecided table
+    /// 2. Writes to decided table
+    /// 3. Updates latest metadata pointer
+    /// 4. Deletes from undecided table
+    ///
+    /// All operations happen in a single WriteBatch transaction.
+    fn mark_blob_metadata_decided(&self, height: Height, round: Round) -> Result<(), StoreError> {
+        let start = Instant::now();
+        let mut write_bytes = 0;
+
+        let key = (height, round);
+        let tx = self.db.begin_write()?;
+
+        // 1. Read from undecided table
+        let metadata_bytes = {
+            let table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+            if let Some(value) = table.get(&key)? {
+                let bytes = value.value().to_vec();
+                write_bytes += bytes.len() as u64;
+                bytes
+            } else {
+                // If not in undecided, check if already decided (idempotent)
+                let decided_table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+                if decided_table.get(&height)?.is_some() {
+                    // Already decided, this is idempotent - just return success
+                    return Ok(());
+                } else {
+                    return Err(StoreError::MissingBlobMetadata {
+                        height: height.as_u64(),
+                        round: round.as_i64(),
+                    });
+                }
+            }
+        };
+
+        // 2. Write to decided table
+        {
+            let mut table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+            table.insert(height, metadata_bytes.clone())?;
+        }
+
+        // 3. Update latest metadata pointer
+        {
+            let mut meta_table = tx.open_table(BLOB_METADATA_META_TABLE)?;
+            let height_bytes = height.as_u64().to_be_bytes().to_vec();
+            meta_table.insert("latest_height", height_bytes)?;
+        }
+
+        // 4. Delete from undecided table
+        {
+            let mut table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+            table.remove(&key)?;
+        }
+
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+        self.metrics.add_write_bytes(write_bytes);
+
+        Ok(())
+    }
+
+    /// Get latest blob metadata (O(1) via metadata pointer)
+    fn get_latest_blob_metadata(&self) -> Result<Option<(Height, BlobMetadata)>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+
+        // Read latest height from metadata pointer
+        let latest_height = {
+            let meta_table = tx.open_table(BLOB_METADATA_META_TABLE)?;
+            if let Some(value) = meta_table.get("latest_height")? {
+                let bytes = value.value();
+                if bytes.len() == 8 {
+                    let height_u64 = u64::from_be_bytes(bytes.try_into().unwrap());
+                    Some(Height::new(height_u64))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        // If we have a latest height, fetch the metadata
+        let result = if let Some(height) = latest_height {
+            let table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+            if let Some(value) = table.get(&height)? {
+                let bytes = value.value();
+                let mut buf = Bytes::copy_from_slice(&bytes);
+                let proto = proto::BlobMetadata::decode(&mut buf)
+                    .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+                let metadata = BlobMetadata::from_proto(proto)?;
+
+                self.metrics.add_read_bytes(bytes.len() as u64);
+                self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
+
+                Some((height, metadata))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(result)
+    }
+
+    /// Get all undecided blob metadata entries before a given height
+    ///
+    /// Used for startup cleanup to remove stale entries.
+    fn get_all_undecided_blob_metadata_before(
+        &self,
+        before_height: Height,
+    ) -> Result<Vec<(Height, Round)>, StoreError> {
+        let start = Instant::now();
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+
+        let mut keys = Vec::new();
+        for entry in table.iter()? {
+            let (key_guard, _) = entry?;
+            let (height, round) = key_guard.value();
+            if height >= before_height {
+                break;
+            }
+            keys.push((height, round));
+        }
+
+        self.metrics.observe_read_time(start.elapsed());
+
+        Ok(keys)
+    }
+
+    /// Delete undecided blob metadata entry
+    ///
+    /// Used during cleanup.
+    fn delete_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let key = (height, round);
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
+            table.remove(&key)?;
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -609,5 +965,145 @@ impl Store {
     ) -> Result<(), StoreError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || db.insert_decided_block_data(height, data)).await?
+    }
+
+    // ========================================================================
+    // Phase 4: Three-layer architecture - Store async wrappers
+    // ========================================================================
+
+    /// Insert consensus block metadata (Layer 1)
+    pub async fn put_consensus_block_metadata(
+        &self,
+        height: Height,
+        metadata: &ConsensusBlockMetadata,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        let metadata = metadata.clone();
+        tokio::task::spawn_blocking(move || db.insert_consensus_block_metadata(height, &metadata))
+            .await?
+    }
+
+    /// Get consensus block metadata (Layer 1)
+    pub async fn get_consensus_block_metadata(
+        &self,
+        height: Height,
+    ) -> Result<Option<ConsensusBlockMetadata>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_consensus_block_metadata(height)).await?
+    }
+
+    /// Insert undecided blob metadata (Layer 2)
+    pub async fn put_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+        metadata: &BlobMetadata,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        let metadata = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            db.insert_blob_metadata_undecided(height, round, &metadata)
+        })
+        .await?
+    }
+
+    /// Get undecided blob metadata (Layer 2)
+    pub async fn get_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<Option<BlobMetadata>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_blob_metadata_undecided(height, round)).await?
+    }
+
+    /// Get decided blob metadata (Layer 2)
+    pub async fn get_blob_metadata(
+        &self,
+        height: Height,
+    ) -> Result<Option<BlobMetadata>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_blob_metadata(height)).await?
+    }
+
+    /// Mark blob metadata as decided (atomic promotion)
+    ///
+    /// This is the critical method for committing metadata:
+    /// - Reads from undecided table
+    /// - Writes to decided table
+    /// - Updates latest pointer
+    /// - Deletes from undecided
+    ///
+    /// All in a single atomic transaction.
+    pub async fn mark_blob_metadata_decided(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.mark_blob_metadata_decided(height, round)).await?
+    }
+
+    /// Get latest blob metadata (O(1) via metadata pointer)
+    pub async fn get_latest_blob_metadata(
+        &self,
+    ) -> Result<Option<(Height, BlobMetadata)>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_latest_blob_metadata()).await?
+    }
+
+    /// Get all undecided blob metadata before a given height
+    ///
+    /// Used for startup cleanup.
+    pub async fn get_all_undecided_blob_metadata_before(
+        &self,
+        before_height: Height,
+    ) -> Result<Vec<(Height, Round)>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            db.get_all_undecided_blob_metadata_before(before_height)
+        })
+        .await?
+    }
+
+    /// Delete undecided blob metadata
+    ///
+    /// Used during cleanup.
+    pub async fn delete_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.delete_blob_metadata_undecided(height, round))
+            .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use malachitebft_app_channel::app::types::core::Round;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn mark_blob_metadata_decided_without_entry_returns_missing_error() {
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("store.redb");
+        let db = Db::new(&db_path, DbMetrics::new()).expect("db");
+        db.create_tables().expect("tables");
+
+        let height = Height::new(1);
+        let round = Round::new(0);
+
+        let err = db.mark_blob_metadata_decided(height, round).expect_err("expected error");
+        match err {
+            StoreError::MissingBlobMetadata { height: h, round: r } => {
+                assert_eq!(h, height.as_u64());
+                assert_eq!(r, round.as_i64());
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }
