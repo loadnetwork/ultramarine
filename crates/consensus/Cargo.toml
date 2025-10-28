@@ -41,4 +41,5 @@ url.workspace = true
 tree_hash.workspace = true
 
 [dev-dependencies]
+alloy-primitives.workspace = true
 tempfile.workspace = true

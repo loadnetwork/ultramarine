@@ -40,7 +40,7 @@ use ultramarine_types::{
     genesis::Genesis,
     height::Height,
     proposal_part::{BlobSidecar, ProposalData, ProposalFin, ProposalInit, ProposalPart},
-    signing::{Ed25519Provider, Signature},
+    signing::Ed25519Provider,
     validator_set::ValidatorSet,
     value::Value,
     value_metadata::ValueMetadata,
@@ -205,24 +205,6 @@ where
         Ok(())
     }
 
-    /// Phase 4: Legacy method - kept for backward compatibility during migration
-    ///
-    /// DEPRECATED: Use `hydrate_blob_parent_root()` instead.
-    /// This method loads from old BlobSidecar headers and will be removed in Phase 4 cleanup.
-    #[deprecated(
-        since = "0.4.0",
-        note = "Use hydrate_blob_parent_root() with BlobMetadata instead"
-    )]
-    pub async fn hydrate_blob_sidecar_root(&mut self) -> eyre::Result<()> {
-        if let Some((_, header)) =
-            self.store.get_latest_blob_sidecar_header().await.map_err(|e| eyre::Report::new(e))?
-        {
-            self.last_blob_sidecar_root = header.message.hash_tree_root();
-        }
-
-        Ok(())
-    }
-
     /// Phase 4: Cleanup stale undecided blob metadata on startup
     ///
     /// Removes orphaned `(height, round)` entries that were left behind due to:
@@ -289,14 +271,6 @@ where
         );
 
         Ok(())
-    }
-
-    pub async fn persist_blob_sidecar_header(
-        &self,
-        height: Height,
-        header: &SignedBeaconBlockHeader,
-    ) -> eyre::Result<()> {
-        self.store.put_blob_sidecar_header(height, header).await.map_err(|e| eyre::Report::new(e))
     }
 
     fn validator_index(&self, address: &Address) -> Option<u64> {
@@ -407,6 +381,89 @@ where
         Ok((signed_header, sidecars))
     }
 
+    fn build_beacon_header_from_blob_metadata(
+        &self,
+        metadata: &BlobMetadata,
+        proposer: &Address,
+    ) -> Result<BeaconBlockHeader, String> {
+        let proposer_index = metadata
+            .proposer_index_hint
+            .or_else(|| self.validator_index(proposer))
+            .ok_or_else(|| format!("Proposer {} not found in validator set", proposer))?;
+
+        let body_root = BeaconBlockBodyMinimal::from_ultramarine_data(
+            metadata.kzg_commitments.clone(),
+            &metadata.execution_payload_header,
+        )
+        .compute_body_root();
+
+        Ok(BeaconBlockHeader::new(
+            metadata.height.as_u64(),
+            proposer_index,
+            metadata.parent_blob_root,
+            metadata.execution_payload_header.state_root,
+            body_root,
+        ))
+    }
+
+    pub fn rebuild_blob_sidecars_for_restream(
+        &self,
+        metadata: &BlobMetadata,
+        proposer: &Address,
+        blobs: &[BlobSidecar],
+    ) -> eyre::Result<Vec<BlobSidecar>> {
+        let expected_count = usize::from(metadata.blob_count);
+        if expected_count != blobs.len() {
+            return Err(eyre::eyre!(
+                "Blob metadata count ({}) does not match stored blobs ({})",
+                expected_count,
+                blobs.len()
+            ));
+        }
+
+        let header_message = self
+            .build_beacon_header_from_blob_metadata(metadata, proposer)
+            .map_err(|e| eyre::eyre!(e))?;
+
+        let signing_root = header_message.hash_tree_root();
+        let signature = self.signing_provider.sign(signing_root.as_slice());
+        let signed_header = SignedBeaconBlockHeader::new(header_message, signature);
+
+        let commitments = metadata.kzg_commitments.clone();
+        let mut rebuilt = Vec::with_capacity(blobs.len());
+
+        for (index, original_sidecar) in blobs.iter().enumerate() {
+            let commitment = commitments
+                .get(index)
+                .ok_or_else(|| eyre::eyre!("Missing commitment for blob index {}", index))?;
+
+            if original_sidecar.kzg_commitment != *commitment {
+                return Err(eyre::eyre!("Commitment mismatch at index {} during restream", index));
+            }
+
+            let inclusion_proof = generate_kzg_commitment_inclusion_proof(&commitments, index)
+                .map_err(|e| {
+                    eyre::eyre!("Failed to create inclusion proof for blob {}: {}", index, e)
+                })?;
+
+            let index_u16 = u16::try_from(index)
+                .map_err(|_| eyre::eyre!("Blob index {} exceeds u16::MAX", index))?;
+
+            let rebuilt_sidecar = BlobSidecar::new(
+                index_u16,
+                original_sidecar.blob.clone(),
+                *commitment,
+                original_sidecar.kzg_proof,
+                signed_header.clone(),
+                inclusion_proof,
+            );
+
+            rebuilt.push(rebuilt_sidecar);
+        }
+
+        Ok(rebuilt)
+    }
+
     /// Processes and adds a new proposal to the state if it's valid
     /// Returns Some(ProposedValue) if the proposal was accepted, None otherwise
     pub async fn received_proposal_part(
@@ -464,7 +521,7 @@ where
         // Track blob rounds for cleanup
         if has_blobs {
             let round_i64 = parts.round.as_i64();
-            self.blob_rounds.entry(parts.height).or_insert_with(HashSet::new).insert(round_i64);
+            self.blob_rounds.entry(parts.height).or_default().insert(round_i64);
         }
 
         // Log first 32 bytes of proposal data and total size
@@ -530,6 +587,27 @@ where
         self.store.get_block_data(height, round).await.ok().flatten()
     }
 
+    /// Fetch blob metadata for a specific (height, round), falling back to decided metadata.
+    ///
+    /// This supports restreaming and diagnostics by guaranteeing we can rebuild blob headers
+    /// even after the round has advanced.
+    pub async fn load_blob_metadata_for_round(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> eyre::Result<Option<BlobMetadata>> {
+        if let Some(metadata) = self
+            .store
+            .get_blob_metadata_undecided(height, round)
+            .await
+            .map_err(|e| eyre::Report::new(e))?
+        {
+            return Ok(Some(metadata));
+        }
+
+        self.store.get_blob_metadata(height).await.map_err(|e| eyre::Report::new(e))
+    }
+
     /// Returns the validator address associated with this state.
     pub fn validator_address(&self) -> &Address {
         &self.address
@@ -590,7 +668,12 @@ where
                 .validator_set
                 .validators
                 .iter()
-                .map(|validator| TreeHash256::from_slice(&validator.address.into_inner()))
+                .map(|validator| {
+                    let address_bytes = validator.address.into_inner();
+                    let mut padded = [0u8; 32];
+                    padded[..address_bytes.len()].copy_from_slice(&address_bytes);
+                    TreeHash256::from_slice(&padded)
+                })
                 .collect();
 
             if leaves.is_empty() {
@@ -730,6 +813,28 @@ where
             for &round in rounds.iter() {
                 // Skip the decided round
                 if round != round_i64 {
+                    let Some(round_u32) = u32::try_from(round).ok() else {
+                        warn!(
+                            height = %certificate.height,
+                            round = round,
+                            "Invalid negative round encountered during metadata cleanup"
+                        );
+                        continue;
+                    };
+
+                    if let Err(e) = self
+                        .store
+                        .delete_blob_metadata_undecided(certificate.height, Round::new(round_u32))
+                        .await
+                    {
+                        warn!(
+                            height = %certificate.height,
+                            round = round,
+                            error = %e,
+                            "Failed to delete undecided BlobMetadata for failed round"
+                        );
+                    }
+
                     if let Err(e) = self.blob_engine.drop_round(certificate.height, round).await {
                         error!(
                             height = %certificate.height,
@@ -867,11 +972,8 @@ where
         // Phase 4: Build and store BlobMetadata (Layer 2) as undecided
         // This MUST be stored before commit can promote it to decided
         let proposer_index = self.validator_index(&self.address);
-        let parent_blob_root = if height.as_u64() == 0 {
-            B256::ZERO
-        } else {
-            self.last_blob_sidecar_root
-        };
+        let parent_blob_root =
+            if height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
 
         let blob_metadata = if commitments.is_empty() {
             // Blobless block - still need metadata for parent-root chaining
@@ -881,10 +983,8 @@ where
             BlobMetadata::new(height, parent_blob_root, commitments, header, proposer_index)
         };
 
-        self.store
-            .put_blob_metadata_undecided(height, round, &blob_metadata)
-            .await
-            .map_err(|e| {
+        self.store.put_blob_metadata_undecided(height, round, &blob_metadata).await.map_err(
+            |e| {
                 error!(
                     height = %height,
                     round = %round,
@@ -892,7 +992,8 @@ where
                     "Failed to store undecided BlobMetadata for proposal"
                 );
                 eyre::eyre!("Cannot propose without storing BlobMetadata: {}", e)
-            })?;
+            },
+        )?;
 
         debug!(
             height = %height,
@@ -987,7 +1088,7 @@ where
                 parts.push(ProposalPart::BlobSidecar(sidecar.clone()));
 
                 // Include blob data in signature hash
-                hasher.update(&sidecar.index.to_be_bytes());
+                hasher.update(sidecar.index.to_be_bytes());
                 hasher.update(sidecar.blob.data());
                 hasher.update(sidecar.kzg_commitment.as_bytes());
                 hasher.update(sidecar.kzg_proof.as_bytes());
@@ -1091,7 +1192,7 @@ where
                 parts.round
             );
 
-            let signed_header = self
+            let _signed_header = self
                 .verify_blob_sidecars(parts.height, &parts.proposer, metadata, &blob_sidecars)
                 .await?;
 
@@ -1102,17 +1203,10 @@ where
                 .await
                 .map_err(|e| format!("Blob engine error: {}", e))?;
 
-            self.persist_blob_sidecar_header(parts.height, &signed_header)
-                .await
-                .map_err(|e| format!("Failed to store blob sidecar header: {}", e))?;
-
             // Phase 4: Store BlobMetadata (Layer 2) as undecided after verification
             let proposer_index = self.validator_index(&parts.proposer);
-            let parent_blob_root = if parts.height.as_u64() == 0 {
-                B256::ZERO
-            } else {
-                self.last_blob_sidecar_root
-            };
+            let parent_blob_root =
+                if parts.height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
 
             let blob_metadata = BlobMetadata::new(
                 parts.height,
@@ -1135,54 +1229,28 @@ where
             );
         }
 
-        if !has_blobs {
-            if let Some(metadata) = metadata_opt.as_ref() {
-                let body = BeaconBlockBodyMinimal::from_ultramarine_data(
-                    metadata.blob_kzg_commitments.clone(),
-                    &metadata.execution_payload_header,
-                );
-                let body_root = body.compute_body_root();
-                let header_message = self
-                    .build_sidecar_header_message(
-                        parts.height,
-                        &parts.proposer,
-                        metadata,
-                        body_root,
-                    )
-                    .map_err(|e| format!("Failed to build blob sidecar header: {}", e))?;
+        if !has_blobs && let Some(metadata) = metadata_opt.as_ref() {
+            // Store blobless BlobMetadata (Layer 2) for parent-root chaining
+            let proposer_index = self.validator_index(&parts.proposer);
+            let parent_blob_root =
+                if parts.height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
 
-                let signed_header =
-                    SignedBeaconBlockHeader::new(header_message, Signature::from_bytes([0u8; 64]));
+            let blob_metadata = BlobMetadata::blobless(
+                parts.height,
+                parent_blob_root,
+                &metadata.execution_payload_header,
+                proposer_index,
+            );
 
-                self.persist_blob_sidecar_header(parts.height, &signed_header)
-                    .await
-                    .map_err(|e| format!("Failed to store blob sidecar header: {}", e))?;
+            self.store
+                .put_blob_metadata_undecided(parts.height, parts.round, &blob_metadata)
+                .await
+                .map_err(|e| format!("Failed to store blobless BlobMetadata: {}", e))?;
 
-                // Phase 4: Store blobless BlobMetadata (Layer 2) for parent-root chaining
-                let proposer_index = self.validator_index(&parts.proposer);
-                let parent_blob_root = if parts.height.as_u64() == 0 {
-                    B256::ZERO
-                } else {
-                    self.last_blob_sidecar_root
-                };
-
-                let blob_metadata = BlobMetadata::blobless(
-                    parts.height,
-                    parent_blob_root,
-                    &metadata.execution_payload_header,
-                    proposer_index,
-                );
-
-                self.store
-                    .put_blob_metadata_undecided(parts.height, parts.round, &blob_metadata)
-                    .await
-                    .map_err(|e| format!("Failed to store blobless BlobMetadata: {}", e))?;
-
-                debug!(
-                    "Stored blobless BlobMetadata for height {}, round {}",
-                    parts.height, parts.round
-                );
-            }
+            debug!(
+                "Stored blobless BlobMetadata for height {}, round {}",
+                parts.height, parts.round
+            );
         }
 
         let proposed_value = ProposedValue {
@@ -1265,17 +1333,17 @@ where
             B256::ZERO
         } else {
             let prev_height = Height::new(height.as_u64() - 1);
-            match self.store.get_blob_sidecar_header(prev_height).await {
-                Ok(Some(prev_header)) => prev_header.message.hash_tree_root(),
+            match self.store.get_blob_metadata(prev_height).await {
+                Ok(Some(prev_metadata)) => prev_metadata.to_beacon_header().hash_tree_root(),
                 Ok(None) => {
                     return Err(format!(
-                        "Missing blob sidecar header for parent height {}",
+                        "Missing decided BlobMetadata for parent height {}",
                         prev_height.as_u64()
                     ));
                 }
                 Err(e) => {
                     return Err(format!(
-                        "Failed to load blob sidecar header for parent height {}: {}",
+                        "Failed to load BlobMetadata for parent height {}: {}",
                         prev_height.as_u64(),
                         e
                     ));
@@ -1335,7 +1403,7 @@ where
                 }
                 // Phase 3: Include blob sidecars in signature hash
                 ProposalPart::BlobSidecar(sidecar) => {
-                    hasher.update(&sidecar.index.to_be_bytes());
+                    hasher.update(sidecar.index.to_be_bytes());
                     hasher.update(sidecar.blob.data());
                     hasher.update(sidecar.kzg_commitment.as_bytes());
                     hasher.update(sidecar.kzg_proof.as_bytes());
@@ -1361,6 +1429,1077 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use alloy_primitives::{Address as AlloyAddress, Bytes as AlloyBytes};
+    use alloy_rpc_types_engine::{ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3};
+    use alloy_rpc_types_eth::Withdrawal;
+    use async_trait::async_trait;
+    use bytes::Bytes as NetworkBytes;
+    use tempfile::{TempDir, tempdir};
+    use ultramarine_blob_engine::error::BlobEngineError;
+    use ultramarine_types::{
+        address::Address,
+        blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
+        blob_metadata::BlobMetadata,
+        engine_api::ExecutionPayloadHeader,
+        genesis::Genesis,
+        signing::{Ed25519Provider, PrivateKey},
+        validator_set::{Validator, ValidatorSet},
+        value::Value,
+        value_metadata::ValueMetadata,
+    };
+
+    use super::*;
+    use crate::metrics::DbMetrics;
+
+    #[derive(Default, Clone)]
+    struct MockBlobEngine {
+        inner: Arc<Mutex<MockBlobEngineState>>,
+    }
+
+    fn sample_blob_metadata(height: Height, parent_blob_root: B256) -> BlobMetadata {
+        BlobMetadata::new(
+            height,
+            parent_blob_root,
+            vec![KzgCommitment::new([42u8; 48])],
+            sample_execution_payload_header(),
+            Some(0),
+        )
+    }
+
+    #[derive(Default)]
+    struct MockBlobEngineState {
+        verify_calls: Vec<(Height, i64, usize)>,
+        mark_decided_calls: Vec<(Height, i64)>,
+        drop_calls: Vec<(Height, i64)>,
+    }
+
+    impl MockBlobEngine {
+        fn verify_calls(&self) -> Vec<(Height, i64, usize)> {
+            self.inner.lock().unwrap().verify_calls.clone()
+        }
+
+        fn mark_decided_calls(&self) -> Vec<(Height, i64)> {
+            self.inner.lock().unwrap().mark_decided_calls.clone()
+        }
+
+        fn drop_calls(&self) -> Vec<(Height, i64)> {
+            self.inner.lock().unwrap().drop_calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl BlobEngine for MockBlobEngine {
+        async fn verify_and_store(
+            &self,
+            height: Height,
+            round: i64,
+            sidecars: &[BlobSidecar],
+        ) -> Result<(), BlobEngineError> {
+            self.inner.lock().unwrap().verify_calls.push((height, round, sidecars.len()));
+            Ok(())
+        }
+
+        async fn mark_decided(&self, height: Height, round: i64) -> Result<(), BlobEngineError> {
+            self.inner.lock().unwrap().mark_decided_calls.push((height, round));
+            Ok(())
+        }
+
+        async fn get_for_import(
+            &self,
+            _height: Height,
+        ) -> Result<Vec<BlobSidecar>, BlobEngineError> {
+            Ok(Vec::new())
+        }
+
+        async fn drop_round(&self, height: Height, round: i64) -> Result<(), BlobEngineError> {
+            self.inner.lock().unwrap().drop_calls.push((height, round));
+            Ok(())
+        }
+
+        async fn mark_archived(
+            &self,
+            _height: Height,
+            _indices: &[u16],
+        ) -> Result<(), BlobEngineError> {
+            Ok(())
+        }
+
+        async fn prune_archived_before(&self, _height: Height) -> Result<usize, BlobEngineError> {
+            Ok(0)
+        }
+
+        async fn get_undecided_blobs(
+            &self,
+            _height: Height,
+            _round: i64,
+        ) -> Result<Vec<BlobSidecar>, BlobEngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn sample_blob_bundle(count: usize) -> BlobsBundle {
+        let mut commitments = Vec::with_capacity(count);
+        let mut proofs = Vec::with_capacity(count);
+        let mut blobs = Vec::with_capacity(count);
+
+        for i in 0..count {
+            commitments.push(KzgCommitment::new([i as u8; 48]));
+            proofs.push(KzgProof::new([i as u8; 48]));
+            let data = vec![i as u8; BYTES_PER_BLOB];
+            blobs.push(Blob::new(AlloyBytes::from(data)).expect("blob"));
+        }
+
+        BlobsBundle::new(commitments, proofs, blobs)
+    }
+
+    fn sample_execution_payload_header() -> ExecutionPayloadHeader {
+        ExecutionPayloadHeader {
+            block_hash: B256::from([1u8; 32]),
+            parent_hash: B256::from([2u8; 32]),
+            state_root: B256::from([3u8; 32]),
+            receipts_root: B256::from([4u8; 32]),
+            logs_bloom: alloy_primitives::Bloom::ZERO,
+            block_number: 1,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            timestamp: 1_700_000_000,
+            base_fee_per_gas: alloy_primitives::U256::from(1),
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+            prev_randao: B256::from([5u8; 32]),
+            fee_recipient: Address::new([6u8; 20]),
+            extra_data: AlloyBytes::new(),
+            transactions_root: B256::from([7u8; 32]),
+            withdrawals_root: B256::from([8u8; 32]),
+        }
+    }
+
+    fn sample_execution_payload_v3() -> ExecutionPayloadV3 {
+        ExecutionPayloadV3 {
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+            payload_inner: ExecutionPayloadV2 {
+                payload_inner: ExecutionPayloadV1 {
+                    parent_hash: B256::from([2u8; 32]),
+                    fee_recipient: AlloyAddress::from([6u8; 20]),
+                    state_root: B256::from([3u8; 32]),
+                    receipts_root: B256::from([4u8; 32]),
+                    logs_bloom: alloy_primitives::Bloom::ZERO,
+                    prev_randao: B256::from([5u8; 32]),
+                    block_number: 1,
+                    gas_limit: 30_000_000,
+                    gas_used: 15_000_000,
+                    timestamp: 1_700_000_000,
+                    extra_data: AlloyBytes::new(),
+                    base_fee_per_gas: alloy_primitives::U256::from(1),
+                    block_hash: B256::from([1u8; 32]),
+                    transactions: Vec::new(),
+                },
+                withdrawals: Vec::<Withdrawal>::new(),
+            },
+        }
+    }
+
+    fn sample_value_metadata(count: usize) -> ValueMetadata {
+        let header = sample_execution_payload_header();
+        let commitments = (0..count).map(|i| KzgCommitment::new([i as u8; 48])).collect();
+        ValueMetadata::new(header, commitments)
+    }
+
+    fn build_state(
+        mock_engine: MockBlobEngine,
+        start_height: Height,
+    ) -> (State<MockBlobEngine>, TempDir) {
+        let tmp = tempdir().expect("tempdir");
+        let store = Store::open(tmp.path().join("store.db"), DbMetrics::new()).expect("store");
+
+        let private_key = PrivateKey::from([42u8; 32]);
+        let public_key = private_key.public_key();
+        let validator = Validator::new(public_key, 1);
+        let validator_set = ValidatorSet::new(vec![validator.clone()]);
+        let genesis = Genesis { validator_set };
+        let provider = Ed25519Provider::new(private_key);
+        let address = validator.address.clone();
+
+        let state = State::new(
+            genesis,
+            LoadContext::new(),
+            provider,
+            address,
+            start_height,
+            store,
+            mock_engine.clone(),
+        );
+
+        (state, tmp)
+    }
+
+    #[tokio::test]
+    async fn hydrate_blob_parent_root_uses_decided_metadata() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+
+        let metadata = sample_blob_metadata(Height::new(1), B256::from([9u8; 32]));
+        state
+            .store
+            .put_blob_metadata_undecided(Height::new(1), Round::new(0), &metadata)
+            .await
+            .expect("insert metadata");
+        state
+            .store
+            .mark_blob_metadata_decided(Height::new(1), Round::new(0))
+            .await
+            .expect("promote metadata");
+
+        state.last_blob_sidecar_root = B256::ZERO;
+        state.hydrate_blob_parent_root().await.expect("hydrate");
+
+        let expected = metadata.to_beacon_header().hash_tree_root();
+        assert_eq!(state.last_blob_sidecar_root, expected);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_blob_metadata_removes_lower_entries() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(3));
+        state.current_height = Height::new(4);
+
+        let metadata_low = sample_blob_metadata(Height::new(2), B256::from([10u8; 32]));
+        state
+            .store
+            .put_blob_metadata_undecided(Height::new(2), Round::new(0), &metadata_low)
+            .await
+            .expect("insert");
+
+        let metadata_current = sample_blob_metadata(Height::new(4), B256::from([11u8; 32]));
+        state
+            .store
+            .put_blob_metadata_undecided(Height::new(4), Round::new(1), &metadata_current)
+            .await
+            .expect("insert");
+
+        state.cleanup_stale_blob_metadata().await.expect("cleanup");
+
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(Height::new(2), Round::new(0))
+                .await
+                .expect("get")
+                .is_none()
+        );
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(Height::new(4), Round::new(1))
+                .await
+                .expect("get")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_blob_metadata_for_round_falls_back_to_decided() {
+        let mock_engine = MockBlobEngine::default();
+        let (state, _tmp) = build_state(mock_engine, Height::new(1));
+        let height = Height::new(1);
+
+        let metadata = sample_blob_metadata(height, B256::ZERO);
+        state
+            .store
+            .put_blob_metadata_undecided(height, Round::new(0), &metadata)
+            .await
+            .expect("insert undecided metadata");
+        state
+            .store
+            .mark_blob_metadata_decided(height, Round::new(0))
+            .await
+            .expect("promote metadata");
+
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(height, Round::new(0))
+                .await
+                .expect("get undecided")
+                .is_none()
+        );
+
+        let loaded = state
+            .load_blob_metadata_for_round(height, Round::new(1))
+            .await
+            .expect("load metadata")
+            .expect("metadata fallback");
+
+        assert_eq!(loaded.height(), metadata.height());
+        assert_eq!(loaded.parent_blob_root(), metadata.parent_blob_root());
+        assert_eq!(loaded.kzg_commitments(), metadata.kzg_commitments());
+    }
+
+    #[tokio::test]
+    async fn propose_value_with_blobs_stores_blob_metadata() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+
+        let payload = sample_execution_payload_v3();
+        let expected_header = ExecutionPayloadHeader::from_payload(&payload);
+        let bundle = sample_blob_bundle(1);
+        let metadata_before = state
+            .store
+            .get_blob_metadata_undecided(Height::new(1), Round::new(0))
+            .await
+            .expect("get");
+        assert!(metadata_before.is_none());
+        assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+
+        state
+            .propose_value_with_blobs(
+                Height::new(1),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload,
+                Some(&bundle),
+            )
+            .await
+            .expect("propose");
+
+        let stored = state
+            .store
+            .get_blob_metadata_undecided(Height::new(1), Round::new(0))
+            .await
+            .expect("get")
+            .expect("metadata");
+
+        assert_eq!(stored.height(), Height::new(1));
+        assert_eq!(stored.blob_count(), 1);
+        assert_eq!(stored.parent_blob_root(), B256::ZERO);
+        assert_eq!(stored.kzg_commitments(), bundle.commitments.as_slice());
+        assert_eq!(stored.execution_payload_header(), &expected_header);
+        assert_eq!(stored.proposer_index_hint(), Some(0));
+        assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn propose_blobless_value_uses_parent_root_hint() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(2));
+        let parent_root = B256::from([7u8; 32]);
+        state.last_blob_sidecar_root = parent_root;
+
+        let payload = sample_execution_payload_v3();
+        let expected_header = ExecutionPayloadHeader::from_payload(&payload);
+
+        state
+            .propose_value_with_blobs(
+                Height::new(2),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload,
+                None,
+            )
+            .await
+            .expect("propose blobless");
+
+        let stored = state
+            .store
+            .get_blob_metadata_undecided(Height::new(2), Round::new(0))
+            .await
+            .expect("get")
+            .expect("metadata");
+
+        assert_eq!(stored.height(), Height::new(2));
+        assert_eq!(stored.blob_count(), 0);
+        assert_eq!(stored.parent_blob_root(), parent_root);
+        assert_eq!(stored.execution_payload_header(), &expected_header);
+        assert_eq!(stored.proposer_index_hint(), Some(0));
+        assert_eq!(state.last_blob_sidecar_root, parent_root);
+    }
+
+    #[tokio::test]
+    async fn commit_promotes_metadata_and_updates_parent_root() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+        let height = Height::new(1);
+        let round = Round::new(0);
+
+        let metadata = sample_blob_metadata(height, B256::ZERO);
+        state
+            .store
+            .put_blob_metadata_undecided(height, round, &metadata)
+            .await
+            .expect("insert metadata");
+
+        let value_metadata = sample_value_metadata(metadata.blob_count() as usize);
+        let value = Value::new(value_metadata.clone());
+        let proposal = ProposedValue {
+            height,
+            round,
+            valid_round: Round::Nil,
+            proposer: state.address.clone(),
+            value: value.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
+        state
+            .store
+            .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"))
+            .await
+            .expect("store block bytes");
+
+        let certificate = CommitCertificate {
+            height,
+            round,
+            value_id: proposal.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        state.commit(certificate.clone()).await.expect("commit");
+
+        assert_eq!(state.last_blob_sidecar_root, metadata.to_beacon_header().hash_tree_root());
+        assert!(
+            state.store.get_blob_metadata_undecided(height, round).await.expect("get").is_none()
+        );
+        assert!(state.store.get_blob_metadata(height).await.expect("get").is_some());
+
+        let proposer = state.address.clone();
+        let consensus = state
+            .store
+            .get_consensus_block_metadata(height)
+            .await
+            .expect("load consensus")
+            .expect("consensus metadata");
+        assert_eq!(consensus.height(), height);
+        assert_eq!(consensus.round(), round);
+        assert_eq!(consensus.proposer(), &proposer);
+        assert_eq!(
+            consensus.execution_block_hash(),
+            value_metadata.execution_payload_header.block_hash
+        );
+        assert_eq!(consensus.gas_limit(), value_metadata.execution_payload_header.gas_limit);
+        assert_eq!(consensus.gas_used(), value_metadata.execution_payload_header.gas_used);
+        let mut expected_validator_root = [0u8; 32];
+        let proposer_bytes = proposer.into_inner();
+        expected_validator_root[..proposer_bytes.len()].copy_from_slice(&proposer_bytes);
+        assert_eq!(consensus.validator_set_hash(), B256::from(expected_validator_root));
+
+        let calls = mock_engine.mark_decided_calls();
+        assert_eq!(calls, vec![(height, round.as_i64())]);
+        assert!(mock_engine.verify_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn commit_promotes_blobless_metadata_updates_parent_root() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(2));
+        let height = Height::new(2);
+        let round = Round::new(0);
+
+        let previous_root = B256::from([3u8; 32]);
+        state.last_blob_sidecar_root = previous_root;
+
+        let header = sample_execution_payload_header();
+        let metadata = BlobMetadata::blobless(height, previous_root, &header, Some(0));
+        state
+            .store
+            .put_blob_metadata_undecided(height, round, &metadata)
+            .await
+            .expect("insert blobless metadata");
+
+        let value_metadata = ValueMetadata::new(header.clone(), Vec::new());
+        let value = Value::new(value_metadata.clone());
+        let proposer = state.address.clone();
+        let proposal = ProposedValue {
+            height,
+            round,
+            valid_round: Round::Nil,
+            proposer: proposer.clone(),
+            value: value.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
+        state
+            .store
+            .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"))
+            .await
+            .expect("store block bytes");
+
+        let certificate = CommitCertificate {
+            height,
+            round,
+            value_id: proposal.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        state.commit(certificate).await.expect("commit blobless");
+
+        let expected_root = metadata.to_beacon_header().hash_tree_root();
+        assert_eq!(state.last_blob_sidecar_root, expected_root);
+        assert!(
+            state.store.get_blob_metadata_undecided(height, round).await.expect("get").is_none()
+        );
+
+        let decided =
+            state.store.get_blob_metadata(height).await.expect("load decided").expect("metadata");
+        assert_eq!(decided.blob_count(), 0);
+        assert_eq!(decided.parent_blob_root(), previous_root);
+
+        let consensus = state
+            .store
+            .get_consensus_block_metadata(height)
+            .await
+            .expect("load consensus")
+            .expect("consensus metadata");
+        assert_eq!(consensus.height(), height);
+        assert_eq!(consensus.round(), round);
+        assert_eq!(consensus.proposer(), &proposer);
+        assert_eq!(
+            consensus.execution_block_hash(),
+            value_metadata.execution_payload_header.block_hash
+        );
+        assert_eq!(consensus.gas_limit(), value_metadata.execution_payload_header.gas_limit);
+        assert_eq!(consensus.gas_used(), value_metadata.execution_payload_header.gas_used);
+        let mut expected_validator_root = [0u8; 32];
+        let proposer_bytes = proposer.into_inner();
+        expected_validator_root[..proposer_bytes.len()].copy_from_slice(&proposer_bytes);
+        assert_eq!(consensus.validator_set_hash(), B256::from(expected_validator_root));
+
+        let calls = mock_engine.mark_decided_calls();
+        assert_eq!(calls, vec![(height, round.as_i64())]);
+        assert!(mock_engine.verify_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
+        let mock_engine = MockBlobEngine::default();
+        let (state, _tmp) = build_state(mock_engine, Height::new(1));
+
+        let height = Height::new(1);
+        let round = Round::new(0);
+        let payload = sample_execution_payload_v3();
+        let header = ExecutionPayloadHeader::from_payload(&payload);
+        let bundle = sample_blob_bundle(1);
+
+        let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
+        let value = Value::new(value_metadata.clone());
+        let locally_proposed = LocallyProposedValue::new(height, round, value);
+
+        let (_signed_header, sidecars) =
+            state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle)).expect("prepare");
+
+        let blob_metadata = BlobMetadata::new(
+            height,
+            B256::ZERO,
+            bundle.commitments.clone(),
+            header.clone(),
+            Some(0),
+        );
+
+        let rebuilt = state
+            .rebuild_blob_sidecars_for_restream(
+                &blob_metadata,
+                state.validator_address(),
+                &sidecars,
+            )
+            .expect("rebuild");
+
+        assert_eq!(rebuilt.len(), sidecars.len());
+
+        for rebuilt_sidecar in &rebuilt {
+            assert_eq!(
+                rebuilt_sidecar.signed_block_header.message.parent_root,
+                blob_metadata.parent_blob_root()
+            );
+            assert_eq!(
+                rebuilt_sidecar.signed_block_header.message.slot,
+                blob_metadata.height().as_u64()
+            );
+            assert_eq!(
+                rebuilt_sidecar.signed_block_header.message.proposer_index,
+                blob_metadata.proposer_index_hint().expect("proposer index hint")
+            );
+            assert!(
+                !rebuilt_sidecar.kzg_commitment_inclusion_proof.is_empty(),
+                "inclusion proof should be populated"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_cleans_failed_round_blob_metadata() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+
+        let height = Height::new(1);
+        let decided_round = Round::new(0);
+        let losing_round = Round::new(1);
+
+        let metadata_decided = sample_blob_metadata(height, B256::ZERO);
+        let metadata_losing = sample_blob_metadata(height, B256::from([9u8; 32]));
+
+        state
+            .store
+            .put_blob_metadata_undecided(height, decided_round, &metadata_decided)
+            .await
+            .expect("insert decided metadata");
+        state
+            .store
+            .put_blob_metadata_undecided(height, losing_round, &metadata_losing)
+            .await
+            .expect("insert losing metadata");
+
+        state
+            .store
+            .store_undecided_block_data(height, decided_round, NetworkBytes::from_static(b"block"))
+            .await
+            .expect("store block bytes");
+
+        state
+            .blob_rounds
+            .entry(height)
+            .or_insert_with(HashSet::new)
+            .extend([decided_round.as_i64(), losing_round.as_i64()]);
+
+        let value_metadata = sample_value_metadata(metadata_decided.blob_count() as usize);
+        let value = Value::new(value_metadata.clone());
+        let proposer = state.address.clone();
+
+        let proposal = ProposedValue {
+            height,
+            round: decided_round,
+            valid_round: Round::Nil,
+            proposer: proposer.clone(),
+            value: value.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
+
+        let certificate = CommitCertificate {
+            height,
+            round: decided_round,
+            value_id: proposal.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        state.commit(certificate).await.expect("commit");
+
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(height, losing_round)
+                .await
+                .expect("load losing metadata")
+                .is_none()
+        );
+
+        assert_eq!(mock_engine.drop_calls(), vec![(height, losing_round.as_i64())]);
+    }
+
+    #[tokio::test]
+    async fn multi_round_proposal_isolation_and_commit() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+        let height = Height::new(1);
+
+        // Propose at round 0
+        state.current_height = height;
+        state.current_round = Round::new(0);
+        let payload_r0 = sample_execution_payload_v3();
+        let bundle_r0 = sample_blob_bundle(2);
+        state
+            .propose_value_with_blobs(
+                height,
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload_r0,
+                Some(&bundle_r0),
+            )
+            .await
+            .expect("propose round 0");
+
+        // Propose at round 1 (timeout on round 0)
+        state.current_round = Round::new(1);
+        let payload_r1 = sample_execution_payload_v3();
+        let bundle_r1 = sample_blob_bundle(3);
+        state
+            .propose_value_with_blobs(
+                height,
+                Round::new(1),
+                NetworkBytes::new(),
+                &payload_r1,
+                Some(&bundle_r1),
+            )
+            .await
+            .expect("propose round 1");
+
+        // Both rounds should have undecided metadata
+        let meta_r0 = state
+            .store
+            .get_blob_metadata_undecided(height, Round::new(0))
+            .await
+            .expect("get r0")
+            .expect("metadata r0");
+        let meta_r1 = state
+            .store
+            .get_blob_metadata_undecided(height, Round::new(1))
+            .await
+            .expect("get r1")
+            .expect("metadata r1");
+
+        assert_eq!(meta_r0.blob_count(), 2);
+        assert_eq!(meta_r1.blob_count(), 3);
+
+        // Commit round 1 (round 0 timed out)
+        let value_metadata_r1 = sample_value_metadata(3);
+        let value = Value::new(value_metadata_r1.clone());
+        let proposal = ProposedValue {
+            height,
+            round: Round::new(1),
+            valid_round: Round::Nil,
+            proposer: state.address.clone(),
+            value: value.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
+        state
+            .store
+            .store_undecided_block_data(height, Round::new(1), NetworkBytes::from_static(b"block"))
+            .await
+            .expect("store block bytes");
+
+        let certificate = CommitCertificate {
+            height,
+            round: Round::new(1),
+            value_id: proposal.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        state.commit(certificate).await.expect("commit r1");
+
+        // Round 1 should be promoted to decided
+        let decided = state
+            .store
+            .get_blob_metadata(height)
+            .await
+            .expect("get decided")
+            .expect("decided metadata");
+        assert_eq!(decided.blob_count(), 3);
+
+        // Round 1 undecided should be deleted
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(height, Round::new(1))
+                .await
+                .expect("get r1")
+                .is_none()
+        );
+
+        // Round 0 should still exist (not cleaned by commit)
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(height, Round::new(0))
+                .await
+                .expect("get r0")
+                .is_some(),
+            "Round 0 metadata should survive commit of round 1"
+        );
+
+        // Cache should be updated from round 1 metadata
+        assert_eq!(state.last_blob_sidecar_root, decided.to_beacon_header().hash_tree_root());
+    }
+
+    #[tokio::test]
+    async fn propose_at_height_zero_uses_zero_parent_blobbed() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+
+        // Sanity check initial state
+        assert_eq!(state.current_height, Height::new(0));
+        assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+
+        let payload = sample_execution_payload_v3();
+        let bundle = sample_blob_bundle(1);
+
+        state
+            .propose_value_with_blobs(
+                Height::new(0),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload,
+                Some(&bundle),
+            )
+            .await
+            .expect("propose height 0");
+
+        let stored = state
+            .store
+            .get_blob_metadata_undecided(Height::new(0), Round::new(0))
+            .await
+            .expect("get")
+            .expect("metadata");
+
+        assert_eq!(stored.height(), Height::new(0));
+        assert_eq!(stored.parent_blob_root(), B256::ZERO, "Height 0 must use ZERO parent");
+        assert_eq!(stored.blob_count(), 1);
+        // Cache unchanged (only updated at commit)
+        assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn propose_at_height_zero_uses_zero_parent_blobless() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+
+        let payload = sample_execution_payload_v3();
+
+        state
+            .propose_value_with_blobs(
+                Height::new(0),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload,
+                None, // blobless
+            )
+            .await
+            .expect("propose blobless height 0");
+
+        let stored = state
+            .store
+            .get_blob_metadata_undecided(Height::new(0), Round::new(0))
+            .await
+            .expect("get")
+            .expect("metadata");
+
+        assert_eq!(stored.height(), Height::new(0));
+        assert_eq!(stored.parent_blob_root(), B256::ZERO, "Height 0 must use ZERO parent");
+        assert_eq!(stored.blob_count(), 0);
+        assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn commit_fails_fast_if_blob_metadata_missing() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+        let height = Height::new(1);
+        let round = Round::new(0);
+
+        // Store proposal and block data but NOT BlobMetadata
+        let value_metadata = sample_value_metadata(2);
+        let value = Value::new(value_metadata.clone());
+        let proposal = ProposedValue {
+            height,
+            round,
+            valid_round: Round::Nil,
+            proposer: state.address.clone(),
+            value: value.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
+        state
+            .store
+            .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"))
+            .await
+            .expect("store block bytes");
+
+        let certificate = CommitCertificate {
+            height,
+            round,
+            value_id: proposal.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        // Commit should fail fast with MissingBlobMetadata error
+        let result = state.commit(certificate).await;
+        assert!(result.is_err(), "Commit should fail when BlobMetadata is missing");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("BlobMetadata") || err_msg.contains("not found"),
+            "Error should mention BlobMetadata: {}",
+            err_msg
+        );
+
+        // Cache should remain unchanged
+        assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+
+        // Blob engine should NOT have been called
+        assert!(mock_engine.mark_decided_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn parent_root_chain_continuity_across_mixed_blocks() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+
+        // Height 1: Blobbed block
+        let payload_h1 = sample_execution_payload_v3();
+        let bundle_h1 = sample_blob_bundle(2);
+        state
+            .propose_value_with_blobs(
+                Height::new(1),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload_h1,
+                Some(&bundle_h1),
+            )
+            .await
+            .expect("propose h1");
+
+        let meta_h1 = state
+            .store
+            .get_blob_metadata_undecided(Height::new(1), Round::new(0))
+            .await
+            .expect("get h1")
+            .expect("metadata h1");
+
+        // Commit height 1
+        let value_meta_h1 = sample_value_metadata(2);
+        let value_h1 = Value::new(value_meta_h1.clone());
+        let proposal_h1 = ProposedValue {
+            height: Height::new(1),
+            round: Round::new(0),
+            valid_round: Round::Nil,
+            proposer: state.address.clone(),
+            value: value_h1.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal_h1.clone()).await.expect("store p1");
+        state
+            .store
+            .store_undecided_block_data(
+                Height::new(1),
+                Round::new(0),
+                NetworkBytes::from_static(b"b1"),
+            )
+            .await
+            .expect("store b1");
+
+        let cert_h1 = CommitCertificate {
+            height: Height::new(1),
+            round: Round::new(0),
+            value_id: proposal_h1.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        state.commit(cert_h1).await.expect("commit h1");
+
+        let parent_after_h1 = state.last_blob_sidecar_root;
+        assert_ne!(parent_after_h1, B256::ZERO, "Cache should be updated after commit");
+        assert_eq!(parent_after_h1, meta_h1.to_beacon_header().hash_tree_root());
+
+        // Height 2: Blobless block (should maintain chain)
+        state.current_height = Height::new(2);
+        let payload_h2 = sample_execution_payload_v3();
+        state
+            .propose_value_with_blobs(
+                Height::new(2),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload_h2,
+                None, // blobless
+            )
+            .await
+            .expect("propose h2 blobless");
+
+        let meta_h2 = state
+            .store
+            .get_blob_metadata_undecided(Height::new(2), Round::new(0))
+            .await
+            .expect("get h2")
+            .expect("metadata h2");
+
+        assert_eq!(meta_h2.blob_count(), 0);
+        assert_eq!(meta_h2.parent_blob_root(), parent_after_h1, "Blobless block must chain to h1");
+
+        // Commit height 2
+        let value_meta_h2 =
+            ValueMetadata::new(ExecutionPayloadHeader::from_payload(&payload_h2), Vec::new());
+        let value_h2 = Value::new(value_meta_h2.clone());
+        let proposal_h2 = ProposedValue {
+            height: Height::new(2),
+            round: Round::new(0),
+            valid_round: Round::Nil,
+            proposer: state.address.clone(),
+            value: value_h2.clone(),
+            validity: Validity::Valid,
+        };
+
+        state.store.store_undecided_proposal(proposal_h2.clone()).await.expect("store p2");
+        state
+            .store
+            .store_undecided_block_data(
+                Height::new(2),
+                Round::new(0),
+                NetworkBytes::from_static(b"b2"),
+            )
+            .await
+            .expect("store b2");
+
+        let cert_h2 = CommitCertificate {
+            height: Height::new(2),
+            round: Round::new(0),
+            value_id: proposal_h2.value.id(),
+            commit_signatures: Vec::new(),
+        };
+
+        state.commit(cert_h2).await.expect("commit h2 blobless");
+
+        let parent_after_h2 = state.last_blob_sidecar_root;
+        assert_ne!(parent_after_h2, parent_after_h1, "Cache should update even for blobless");
+        assert_eq!(parent_after_h2, meta_h2.to_beacon_header().hash_tree_root());
+
+        // Height 3: Another blobbed block (should chain to h2)
+        state.current_height = Height::new(3);
+        let payload_h3 = sample_execution_payload_v3();
+        let bundle_h3 = sample_blob_bundle(1);
+        state
+            .propose_value_with_blobs(
+                Height::new(3),
+                Round::new(0),
+                NetworkBytes::new(),
+                &payload_h3,
+                Some(&bundle_h3),
+            )
+            .await
+            .expect("propose h3");
+
+        let meta_h3 = state
+            .store
+            .get_blob_metadata_undecided(Height::new(3), Round::new(0))
+            .await
+            .expect("get h3")
+            .expect("metadata h3");
+
+        assert_eq!(meta_h3.blob_count(), 1);
+        assert_eq!(
+            meta_h3.parent_blob_root(),
+            parent_after_h2,
+            "Height 3 must chain to blobless h2"
+        );
+
+        // Verify full chain: h1 → h2 (blobless) → h3
+        let decided_h1 =
+            state.store.get_blob_metadata(Height::new(1)).await.expect("d1").expect("m1");
+        let decided_h2 =
+            state.store.get_blob_metadata(Height::new(2)).await.expect("d2").expect("m2");
+
+        assert_eq!(decided_h1.parent_blob_root(), B256::ZERO);
+        assert_eq!(decided_h2.parent_blob_root(), decided_h1.to_beacon_header().hash_tree_root());
+        assert_eq!(meta_h3.parent_blob_root(), decided_h2.to_beacon_header().hash_tree_root());
     }
 }
 

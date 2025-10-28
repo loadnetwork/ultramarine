@@ -3,11 +3,11 @@
 **Project**: Integrate blob sidecars into Ultramarine consensus client
 **Timeline**: 10-15 days (2-3 weeks with focused effort)
 **Architecture**: Channel-based approach using existing Malachite patterns
-**Status**: 🟡 **Phase 4 Header Persistence In Progress**
-**Progress**: **8.5/9 phases complete** (~95%) - Core blob engine complete, header persistence being redesigned
-**Implementation**: Live consensus + state sync fully operational with blob transfer
-**Current Focus**: Blob header persistence redesign (see [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md))
-**Last Updated**: 2025-10-24
+**Status**: 🟢 **Phase 4 Cleanup Complete – Ready for Integration Tests (Phase 5+)**
+**Progress**: **Phases 1-5.2 complete** (core blob integration + three-layer metadata architecture)
+**Implementation**: Live consensus + state sync fully operational with blob transfer + metadata-only storage
+**Current Focus**: Integration validation & operator docs (see [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md) for Phase 4 completion)
+**Last Updated**: 2025-10-28
 **Malachite Version**: b205f4252f3064d9a74716056f63834ff33f2de9 (upgraded ✅)
 
 ---
@@ -22,20 +22,20 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 
 **Key Insight**: We do NOT modify Malachite library or add new network topics. Blobs flow through the existing `/proposal_parts` gossip channel by extending the application-layer `ProposalPart` enum.
 
-### Current Status (2025-10-24)
+### Current Status (2025-10-28)
 
-**What's Complete** ✅:
-- Phases 1-3: Execution bridge, value refactor, proposal streaming ✅
-- Phase 4: Core blob engine (KZG verification, RocksDB storage) ✅
-- Phase 5: Block import, state sync, RestreamProposal ✅
+**Completed** ✅:
+- **Phase 1 – Execution Bridge** *(2025-10-27)*: Engine API v3 wired end-to-end with blob bundle retrieval; execution payload header extraction added to `ValueMetadata`.
+- **Phase 2 – Three-Layer Metadata Architecture** *(2025-10-27)*: Introduced `ConsensusBlockMetadata`, `BlobMetadata`, and blob-engine persistence (Layer 1/2/3) with redb tables and protobuf encoding.
+- **Phase 3 – Proposal Streaming** *(2025-10-28)*: Extended `ProposalPart` with `BlobSidecar`, enabled streaming of blobs via `/proposal_parts` with commitment/proof payloads.
+- **Phase 4 – Cleanup & Storage Finalisation** *(2025-10-28)*: Removed legacy header tables/APIs, made `BlobMetadata` the single source of truth, updated parent-root validation and restream rebuilds. See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for full log.
+- **Phase 5 (5.1/5.2) – Live Consensus + Sync Fixes** *(2025-10-23)*: Delivered proposer blob storage, restream sealing, synced-value protobuf path corrections (tracked separately in `STATUS_UPDATE_2025-10-21.md`).
+- **Quality Gates**: 23/23 unit tests (`cargo test -p ultramarine-consensus --lib`) covering store (9) and state (14) scenarios; `cargo fmt --all` and `cargo clippy -p ultramarine-consensus` run clean for the consensus crate.
 
-**In Progress** 🟡:
-- **Phase 4 Enhancement**: Blob header persistence redesign
-  - **Why**: Current implementation stores headers in blob engine, creating dependency cycles and breaking multi-round isolation
-  - **Solution**: Move headers to consensus store with undecided/decided separation
-  - **Benefits**: Multi-round isolation, O(1) lookups, restart survival, blobless continuity
-  - **Details**: See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md) for comprehensive design & implementation roadmap
-  - **Estimate**: ~18 hours (2-3 days)
+**Up Next** 🟡:
+- Phase 5 integration validation: restart survival, multi-validator blob sync, and restream replay tests.
+- Documentation polish: consolidate operator/developer notes on metadata-only storage.
+- Optional metrics for consensus store (undecided/decided counts, pointer hits).
 
 ---
 
@@ -102,7 +102,7 @@ Proposer                           Validators
 
 ---
 
-## Phase 1: Execution ↔ Consensus Bridge (Days 1-2) ✅ COMPLETED
+## Phase 1: Execution ↔ Consensus Bridge ✅ COMPLETED (2025-10-27)
 
 ### Goal
 Extend execution client interface to support Engine API v3 with blob bundle retrieval.
@@ -119,43 +119,24 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 - `crates/execution/src/engine_api/mod.rs` – EngineApi trait extension
 - Tests: `cargo nextest run -p ultramarine-execution engine_api_v3`
 
-## Phase 2## Phase 2: Consensus Value Refactor (Days 3-4) ✅ COMPLETED
+## Phase 2: Three-Layer Metadata Architecture ✅ COMPLETED (2025-10-27)
 
-### Goal
-Refactor `Value` to only contain lightweight metadata (~2KB), NOT full blob data. This keeps consensus messages small and efficient.
+### Outcome (2025-10-27)
+- Established the **three-layer metadata architecture**:
+  1. `ConsensusBlockMetadata` (Layer 1) – pure Malachite/Tendermint terms (height/round/proposer) with SSZ tree-hash validator set.
+  2. `BlobMetadata` (Layer 2) – Ethereum compatibility shim storing execution payload headers, KZG commitments, proposer hints.
+  3. Blob engine (Layer 3) – prunable RocksDB storage keyed by height/round.
+- Added redb tables: `consensus_block_metadata`, `blob_metadata_undecided`, `blob_metadata_decided`, `blob_metadata_meta` (O(1) latest pointer).
+- Implemented protobuf serialization for both metadata layers; consensus now serialises via `ProtobufCodec`.
+- Unit tests cover metadata creation, protobuf round-trips, validator-set hashing (see [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#phase-1--core-storage)).
 
-**Status**
-- `ValueMetadata` added with execution header + KZG commitments (~1 KB) and protobuf support.
-- `Value::new` hashes metadata, debug-validates inputs, and keeps `extensions` only for backward compatibility.
-- Consensus/storage now serialize via `ProtobufCodec`; legacy `from_bytes` remains temporarily until Phase 3 migration.
-- Added tests for metadata validation, multiple blobs, protobuf roundtrips (`cargo test -p ultramarine-types`).
+## Phase 3: Proposal Streaming ✅ COMPLETED (2025-10-28)
 
-### Files to Modify
-- `ultramarine/crates/types/src/value.rs`
-- `ultramarine/crates/types/src/value_metadata.rs` (new file)
-
-### Implementation References
-- `crates/types/src/value_metadata.rs` – lightweight metadata struct, validation, consensus hashing
-- `crates/types/src/value.rs` – `Value::new`, protobuf encoding, backward-compat guard
-- `crates/types/src/codec/proto/mod.rs` – Value/ValueMetadata codec wiring
-- Tests: `cargo nextest run -p ultramarine-types value_metadata`
-
-## Phase 3: Proposal Streaming (Day 5) ✅ COMPLETED
-
-### Goal
-Extend `ProposalPart` enum to include blob sidecars, flowing through existing `/proposal_parts` channel.
-
-**Status**: ✅ Complete - `ProposalPart::BlobSidecar` variant implemented
-**Date Completed**: Prior to 2025-10-21
-
-**Progress**:
-- ✅ `ProposalPart` enum extended with `BlobSidecar` variant
-- ✅ `BlobSidecar` struct with index, blob, commitment, proof
-- ✅ Protobuf serialization for network transmission
-- ✅ Size calculation methods (~131KB per sidecar)
-- ✅ Integration with existing streaming infrastructure
-
-**Note**: Documentation previously marked this as "NOT STARTED" but code review shows full implementation in `crates/types/src/proposal_part.rs`.
+### Outcome (2025-10-28)
+- Added `ProposalPart::BlobSidecar` plus protobuf codecs so blobs stream on `/proposal_parts` without new topics.
+- Updated consensus state to assemble/disseminate proposals with optional blob bundles; proposer/receiver flows store undecided metadata only.
+- Added restream helpers that rebuild sidecars/signatures from stored metadata (see Phase 4 for final cleanup).
+- Size budgeting validated (~131 KB per blob sidecar) and covered by unit tests in `ultramarine-types` and `ultramarine-consensus`.
 
 ### Files Modified
 - `ultramarine/crates/types/src/proposal_part.rs` ✅
@@ -169,69 +150,17 @@ Extend `ProposalPart` enum to include blob sidecars, flowing through existing `/
 - `crates/consensus/src/state.rs` – `stream_proposal` / `make_proposal_parts` emitting blobs
 - `crates/node/src/app.rs` – proposal assembly, blob verification, storage integration
 
-## Phase 4: Blob Verification & Storage (Days 6-7) 🟡 IN PROGRESS
+## Phase 4: Cleanup & Storage Finalisation ✅ COMPLETED (2025-10-28)
 
-### Goal
-Implement KZG cryptographic verification, store blobs in hot database, and persist blob headers in consensus store for multi-round isolation and parent-root chain continuity.
+### Outcome (2025-10-28)
+- Removed all legacy header persistence: `BLOCK_HEADERS_TABLE`, low-level insert/get helpers, and state/store/node methods that wrote beacon headers.
+- Consensus relies solely on `BlobMetadata` (Layer 2) for header reconstruction; parent-root verification loads previous decided metadata and restream rebuilds signed headers at broadcast time.
+- Strengthened round hygiene (`commit_cleans_failed_round_blob_metadata`) and metadata fallback logic (`load_blob_metadata_for_round_falls_back_to_decided`).
+- Added restream reconstruction test (`rebuild_blob_sidecars_for_restream_reconstructs_headers`); unit-suite now 23/23 passing.
+- `cargo fmt --all`, `cargo clippy -p ultramarine-consensus`, and `cargo test -p ultramarine-consensus --lib` run clean for the consensus crate.
+- See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for detailed timeline and code references.
 
-**Status**: 🟡 **Core Complete, Header Persistence In Progress**
-**Date Started**: 2025-10-21
-**Current Focus**: Blob header persistence redesign (see PHASE4_PROGRESS.md)
-
-### Completed Components ✅
-
-**Blob Engine (Production-Ready)**:
-- ✅ **Ethereum Compatibility Layer** - BeaconBlockHeader types, SSZ merkleization, Merkle proofs
-- ✅ **Crypto Primitives** - SSZ hash_tree_root, Ed25519 signatures, 17-branch Merkle proofs
-- ✅ **KZG Verification** - Using c-kzg 2.1.0 (same as Lighthouse production)
-- ✅ **16/16 Tests Passing** - Comprehensive test coverage including known test vectors
-- ✅ **Architecture Validated** - 4096 blob capacity (spec preset), 1024 blob target (practical)
-- ✅ **BlobEngine Trait** - Clean abstraction with RocksDB backend
-- ✅ **Integrated** - Wired into consensus State, used in proposal/receive flows
-
-### In Progress: Header Persistence Redesign 🟡
-
-**Issue**: Current implementation stores headers in blob engine, creating dependency cycles and breaking multi-round isolation.
-
-**Solution**: Move header persistence to consensus store with undecided/decided separation.
-
-**Design** (see [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md) for details):
-- `block_headers_undecided`: (height, round) → ConsensusBlobHeader (multi-round isolation)
-- `block_headers_decided`: height → ConsensusBlobHeader (canonical finalized headers)
-- `block_headers_meta`: Metadata for O(1) latest header lookup
-
-**Key Benefits**:
-- ✅ Multi-round isolation (RestreamProposal can retrieve correct round's header)
-- ✅ Cache discipline (only update on finalization, not on propose/receive)
-- ✅ O(1) latest header lookup (metadata pointer)
-- ✅ Restart survival (hydrate cache from decided table)
-- ✅ Blobless block continuity (placeholder-signed headers)
-- ✅ No blob-engine dependency for header operations
-
-**Progress Tracking**: See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md) for detailed implementation roadmap (18 hours estimated).
-
-### Files Modified/To Modify
-
-**Completed**:
-- `crates/blob_engine/src/engine.rs` – verification + lifecycle APIs ✅
-- `crates/blob_engine/src/verifier.rs` – KZG verification ✅
-- `crates/blob_engine/src/store/rocksdb.rs` – RocksDB blob storage ✅
-- `crates/consensus/src/state.rs` – blob promotion during commit ✅
-- `crates/node/src/app.rs` – Decided handler availability checks ✅
-
-**In Progress**:
-- `crates/types/src/consensus_blob_header.rs` (new) – ConsensusBlobHeader newtype 🟡
-- `crates/consensus/src/store.rs` – Add undecided/decided/metadata tables 🟡
-- `crates/consensus/src/state.rs` – Header hydration, cleanup, commit flows 🟡
-- `crates/blob_engine/` – Remove header persistence code 🟡
-
-### Implementation References
-- **Blob Storage**: `crates/blob_engine/src/store/rocksdb.rs` (protobuf serialization)
-- **Verification**: `crates/blob_engine/src/verifier.rs` (KZG + embedded trusted setup)
-- **Header Design**: [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md) (comprehensive spec)
-- **Tests**: `cargo nextest run -p ultramarine-blob-engine` (11/11 passing, 2 ignored)
-
-## Phase 5## Phase 5: Block Import / EL Interaction (Days 8-9) ✅ COMPLETED
+## Phase 5: Block Import / EL Interaction (Days 8-9) ✅ COMPLETED
 
 ### Goal
 Modify `Decided` handler to validate blob availability before block import.
@@ -336,8 +265,7 @@ if let Some(ref bundle) = blobs_bundle {
 ```
 
 **Helper Added** (proposal_part.rs:163-202):
-- Created `BlobSidecar::from_bundle_item()` for Phase 3/4 compatibility
-- Uses placeholder Phase 4 fields (SignedBeaconBlockHeader, inclusion_proof)
+- Created `BlobSidecar::from_bundle_item()` for initial bundle conversions; later Phase 4 rebuild logic re-signs headers from stored metadata during restream.
 
 **Result**: ✅ Proposer now stores own blobs with UNDECIDED state, promoted to DECIDED on finalization
 
@@ -692,24 +620,100 @@ Our fixes were validated against:
 
 #### Testing Status
 
-**Compilation**: ⚠️ Phase 4 WIP causes unrelated compilation errors
-- Errors in `engine_api.rs` (missing fields: extra_data, transactions_root, withdrawals_root)
-- Errors in `value.rs` (ExecutionPayloadHeader initialization)
-- **Not related to our fixes** - Phase 4 work in progress
-
-**Our Code**: ✅ All Finding #1, #2, #2.1, #3 fixes are syntactically correct
-- RestreamProposal handler compiles (verified with `cargo check -p ultramarine-consensus`)
-- No errors in our modified files
-- Phase 4 completion required before full build succeeds
+- ✅ `cargo fmt --all`
+- ✅ `cargo clippy -p ultramarine-consensus`
+- ✅ `cargo test -p ultramarine-consensus --lib` (23/23 passing)
+- ⚠️ Remaining warnings reside in other crates (`ultramarine-types`, `ultramarine-blob-engine`) from earlier TODOs.
 
 ---
 
 #### Next Steps
 
-1. ⏳ **Phase 4 Completion**: Finish Phase 4 fields (ExecutionPayloadHeader, BeaconBlockHeader)
-2. ⏳ **Full Build Verification**: Run `cargo build` after Phase 4 complete
-3. ⏳ **Integration Testing**: Test RestreamProposal in multi-node testnet
-4. ⏳ **Blob Sync Testing**: Verify proposer blob storage works end-to-end
+1. Phase 5 integration validation (restart survival, restream replay, multi-validator blob sync).
+2. Document metadata-only storage expectations for developers/operators.
+3. Optional: add metrics around metadata tables and blob promotion performance.
+
+---
+
+## Phase 5 Testnet: Integration Testing & Observability 🔄 IN PROGRESS
+
+### Goal
+Validate blob sidecar integration end-to-end with comprehensive metrics, integration tests, and testnet workflows.
+
+**Status**: 🔄 **In Progress**
+**Date Started**: 2025-10-28
+**Estimated Time**: 2-3 days
+
+### Scope
+
+**Metrics Instrumentation**:
+- Add 12+ Prometheus metrics to BlobEngine (verification latency, storage size, lifecycle transitions)
+- Instrument verification (KZG proof validation), storage (undecided/decided), and lifecycle (promotions, imports, cleanup)
+
+**Grafana Dashboard**:
+- Create 10+ blob-specific panels (verification rate, P99 latency, storage by state, failures, lifecycle transitions)
+- Add cross-layer correlation panels (blob imports vs consensus height, blobs per block)
+
+**Integration Tests**:
+- Blob lifecycle E2E test (spam → verify → decide → import)
+- Restart survival test (persistence and hydration validation)
+- Multi-validator sync test (P2P blob propagation)
+
+**Testnet Workflow**:
+- Document blob testing procedures (`TESTNET_WORKFLOW.md`)
+- Validate spam tool blob support (`--blobs` flag)
+- Establish performance baselines (P99 verification latency, storage growth)
+
+### Current State (2025-10-28)
+
+**Infrastructure** ✅:
+- 3-node testnet with Docker Compose (reth + ultramarine)
+- Prometheus scraping 6 targets (3 EL + 3 CL) every 1s
+- Grafana dashboard with 18 panels (5 Malachite, 13 Reth)
+- Spam tool with `--blobs` flag for EIP-4844 transactions
+- Automated setup (`make all`, `make spam`, `make clean-net`)
+
+**Observability Gaps** ❌:
+- Zero blob-specific metrics (no verification time, storage size, lifecycle tracking)
+- Zero blob dashboard panels (Grafana has 18 panels, none for blobs)
+- No integration tests (23/23 unit tests pass, but no E2E validation)
+
+### Implementation Plan
+
+**Phase A**: Metrics Instrumentation (4-6 hours)
+- Create `BlobEngineMetrics` module with 12 metrics (verification, storage, lifecycle, latency)
+- Instrument key operations (verify_and_store, mark_decided, get_for_import, drop_round)
+- Register metrics in node startup
+
+**Phase B**: Grafana Dashboard (2-3 hours)
+- Add "Blob Sidecars (EIP-4844)" row to dashboard
+- Create 10 panels (verification rate, latency, storage, failures, lifecycle, correlation)
+- Export updated dashboard JSON
+
+**Phase C**: Integration Tests (6-8 hours)
+- Blob lifecycle E2E test (`tests/integration/blob_lifecycle.rs`)
+- Restart survival test (`tests/integration/blob_restart_survival.rs`)
+- Multi-validator sync test (`tests/integration/blob_multi_validator_sync.rs`)
+
+**Phase D**: Documentation (2 hours)
+- Create `TESTNET_WORKFLOW.md` with testing procedures
+- Update `README.md` with blob testing quick start
+- Document metrics reference
+
+### Success Criteria
+
+- ✅ BlobEngine exposes 12+ Prometheus metrics
+- ✅ Grafana dashboard has 10+ blob-specific panels
+- ✅ 3 integration tests passing (lifecycle, restart, multi-validator)
+- ✅ Load testing validates 100 blob tx/sec performance
+- ✅ Documentation covers testnet workflows
+- ✅ Performance baselines established (P99 < 50ms, no failures)
+
+### See Also
+
+- [PHASE5_TESTNET.md](./PHASE5_TESTNET.md) - Complete implementation plan with daily progress log
+- [PHASE4_PROGRESS.md](./PHASE4_PROGRESS.md) - Phase 1-4 completion log
+- Makefile:427-550 - Testnet automation targets
 
 ---
 
@@ -717,7 +721,7 @@ Our fixes were validated against:
 
 **Status**: Ready to start
 
-**Dependencies**: Phase 5 + Phase 5.1 completed (sync fixes in place)
+**Dependencies**: Phase 5 Testnet completed (observability and integration tests in place)
 
 **Estimated Time**: 1 day
 

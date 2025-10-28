@@ -6789,6 +6789,7 @@ name = "ultramarine-consensus"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-primitives",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "async-trait",
