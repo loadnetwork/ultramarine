@@ -145,11 +145,6 @@ pub async fn run(
                     .prepare_blob_sidecar_parts(&proposal, blobs_bundle.as_ref())
                     .map_err(|e| eyre!("Failed to prepare blob sidecars: {}", e))?;
 
-                state
-                    .persist_blob_sidecar_header(height, &signed_header)
-                    .await
-                    .map_err(|e| eyre!("Failed to persist blob sidecar header: {}", e))?;
-
                 // CRITICAL FIX (Finding #1): Store blobs locally for our own proposal
                 // Without this, the proposer never stores its own blobs, causing get_for_import()
                 // to return empty when the block is decided, leading to blob count mismatch errors.
@@ -382,17 +377,70 @@ pub async fn run(
                             }
                         };
 
-                        // Get blobs from blob_engine if they exist
-                        let blob_sidecars = match state
-                            .blob_engine()
-                            .get_undecided_blobs(height, proposal_round.as_i64())
+                        // Fetch blob metadata so we can rebuild headers deterministically
+                        let blob_metadata = match state
+                            .load_blob_metadata_for_round(height, proposal_round)
                             .await
                         {
-                            Ok(sidecars) if !sidecars.is_empty() => Some(sidecars),
-                            Ok(_) => None,
+                            Ok(Some(metadata)) => metadata,
+                            Ok(None) => {
+                                warn!(
+                                    %height,
+                                    %proposal_round,
+                                    "Blob metadata missing for restream; skipping proposal"
+                                );
+                                continue;
+                            }
                             Err(e) => {
-                                error!(%height, %proposal_round, "Failed to get blobs: {}", e);
-                                None
+                                error!(
+                                    %height,
+                                    %proposal_round,
+                                    "Failed to load blob metadata for restream: {}",
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Get blobs from blob_engine if they exist, then rebuild with fresh header
+                        let restream_blob_sidecars = if blob_metadata.blob_count() == 0 {
+                            None
+                        } else {
+                            match state
+                                .blob_engine()
+                                .get_undecided_blobs(height, proposal_round.as_i64())
+                                .await
+                            {
+                                Ok(sidecars) if !sidecars.is_empty() => {
+                                    match state.rebuild_blob_sidecars_for_restream(
+                                        &blob_metadata,
+                                        &address,
+                                        &sidecars,
+                                    ) {
+                                        Ok(rebuilt) => Some(rebuilt),
+                                        Err(e) => {
+                                            error!(
+                                                %height,
+                                                %proposal_round,
+                                                "Failed to rebuild blob sidecars for restream: {}",
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    warn!(
+                                        %height,
+                                        %proposal_round,
+                                        "Blob metadata expects blobs, but none found in store"
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    error!(%height, %proposal_round, "Failed to get blobs: {}", e);
+                                    continue;
+                                }
                             }
                         };
 
@@ -408,7 +456,7 @@ pub async fn run(
                         for stream_message in state.stream_proposal(
                             locally_proposed_value,
                             proposal_bytes,
-                            blob_sidecars.as_deref(),
+                            restream_blob_sidecars.as_deref(),
                             Some(address), // Explicit proposer for restreaming
                         ) {
                             info!(%height, %round, "Restreaming proposal part: {stream_message:?}");

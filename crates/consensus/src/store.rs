@@ -18,7 +18,6 @@ use ultramarine_types::{
     codec::{proto as codec, proto::ProtobufCodec},
     consensus_block_metadata::ConsensusBlockMetadata,
     context::LoadContext,
-    ethereum_compat::SignedBeaconBlockHeader,
     height::Height,
     proto,
     value::Value,
@@ -86,9 +85,6 @@ const DECIDED_BLOCK_DATA_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
 
 const UNDECIDED_BLOCK_DATA_TABLE: redb::TableDefinition<UndecidedValueKey, Vec<u8>> =
     redb::TableDefinition::new("undecided_block_data");
-
-const BLOCK_HEADERS_TABLE: redb::TableDefinition<HeightKey, Vec<u8>> =
-    redb::TableDefinition::new("block_headers");
 
 // Phase 4: Three-layer architecture - metadata storage
 // Layer 1: Pure BFT consensus metadata (keep forever)
@@ -343,7 +339,6 @@ impl Db {
         let _ = tx.open_table(UNDECIDED_PROPOSALS_TABLE)?;
         let _ = tx.open_table(DECIDED_BLOCK_DATA_TABLE)?;
         let _ = tx.open_table(UNDECIDED_BLOCK_DATA_TABLE)?;
-        let _ = tx.open_table(BLOCK_HEADERS_TABLE)?;
 
         // Phase 4: Three-layer architecture tables
         let _ = tx.open_table(CONSENSUS_BLOCK_METADATA_TABLE)?;
@@ -431,88 +426,6 @@ impl Db {
         self.metrics.add_write_bytes(write_bytes);
 
         Ok(())
-    }
-
-    fn insert_block_header(
-        &self,
-        height: Height,
-        header: &SignedBeaconBlockHeader,
-    ) -> Result<(), StoreError> {
-        let start = Instant::now();
-
-        let proto = header.to_proto()?;
-        let bytes = proto.encode_to_vec();
-        let write_bytes = bytes.len() as u64;
-
-        let tx = self.db.begin_write()?;
-        {
-            let mut table = tx.open_table(BLOCK_HEADERS_TABLE)?;
-            table.insert(height, bytes)?;
-        }
-        tx.commit()?;
-
-        self.metrics.observe_write_time(start.elapsed());
-        self.metrics.add_write_bytes(write_bytes);
-
-        Ok(())
-    }
-
-    fn get_block_header(
-        &self,
-        height: Height,
-    ) -> Result<Option<SignedBeaconBlockHeader>, StoreError> {
-        let start = Instant::now();
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(BLOCK_HEADERS_TABLE)?;
-
-        let header = if let Some(value) = table.get(&height)? {
-            let bytes = value.value();
-            let mut buf = Bytes::copy_from_slice(&bytes);
-            let proto = proto::SignedBeaconBlockHeader::decode(&mut buf)
-                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
-            let header = SignedBeaconBlockHeader::from_proto(proto)?;
-
-            self.metrics.add_read_bytes(bytes.len() as u64);
-            self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
-
-            Some(header)
-        } else {
-            None
-        };
-
-        self.metrics.observe_read_time(start.elapsed());
-
-        Ok(header)
-    }
-
-    fn get_latest_block_header(
-        &self,
-    ) -> Result<Option<(Height, SignedBeaconBlockHeader)>, StoreError> {
-        let start = Instant::now();
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(BLOCK_HEADERS_TABLE)?;
-
-        let mut iter = table.iter()?;
-        let mut result = None;
-
-        if let Some(entry) = iter.next_back() {
-            let (height_guard, value_guard) = entry?;
-            let height = height_guard.value();
-            let bytes = value_guard.value();
-            let mut buf = Bytes::copy_from_slice(&bytes);
-            let proto = proto::SignedBeaconBlockHeader::decode(&mut buf)
-                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
-            let header = SignedBeaconBlockHeader::from_proto(proto)?;
-
-            self.metrics.add_read_bytes(bytes.len() as u64);
-            self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
-
-            result = Some((height, header));
-        }
-
-        self.metrics.observe_read_time(start.elapsed());
-
-        Ok(result)
     }
 
     // ========================================================================
@@ -913,31 +826,6 @@ impl Store {
         tokio::task::spawn_blocking(move || db.prune(retain_height)).await?
     }
 
-    pub async fn put_blob_sidecar_header(
-        &self,
-        height: Height,
-        header: &SignedBeaconBlockHeader,
-    ) -> Result<(), StoreError> {
-        let db = Arc::clone(&self.db);
-        let header = header.clone();
-        tokio::task::spawn_blocking(move || db.insert_block_header(height, &header)).await?
-    }
-
-    pub async fn get_blob_sidecar_header(
-        &self,
-        height: Height,
-    ) -> Result<Option<SignedBeaconBlockHeader>, StoreError> {
-        let db = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || db.get_block_header(height)).await?
-    }
-
-    pub async fn get_latest_blob_sidecar_header(
-        &self,
-    ) -> Result<Option<(Height, SignedBeaconBlockHeader)>, StoreError> {
-        let db = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || db.get_latest_block_header()).await?
-    }
-
     pub async fn get_block_data(
         &self,
         height: Height,
@@ -1082,18 +970,80 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::{Bloom, Bytes as AlloyBytes, U256};
     use malachitebft_app_channel::app::types::core::Round;
     use tempfile::tempdir;
+    use ultramarine_types::{
+        address::Address,
+        aliases::B256,
+        blob::{KzgCommitment, MAX_BLOBS_PER_BLOCK_ELECTRA},
+        consensus_block_metadata::ConsensusBlockMetadata,
+        engine_api::ExecutionPayloadHeader,
+    };
 
     use super::*;
 
-    #[test]
-    fn mark_blob_metadata_decided_without_entry_returns_missing_error() {
-        let tmp = tempdir().expect("tempdir");
+    fn temp_db() -> Db {
+        let tmp = tempdir().expect("create tempdir");
         let db_path = tmp.path().join("store.redb");
         let db = Db::new(&db_path, DbMetrics::new()).expect("db");
         db.create_tables().expect("tables");
+        db
+    }
 
+    fn sample_execution_payload_header() -> ExecutionPayloadHeader {
+        ExecutionPayloadHeader {
+            block_hash: B256::from([1u8; 32]),
+            parent_hash: B256::from([2u8; 32]),
+            state_root: B256::from([3u8; 32]),
+            receipts_root: B256::from([4u8; 32]),
+            logs_bloom: Bloom::ZERO,
+            block_number: 4242,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            timestamp: 1_700_000_000,
+            base_fee_per_gas: U256::from(1),
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+            prev_randao: B256::from([5u8; 32]),
+            fee_recipient: Address::new([6u8; 20]),
+            extra_data: AlloyBytes::new(),
+            transactions_root: B256::from([7u8; 32]),
+            withdrawals_root: B256::from([8u8; 32]),
+        }
+    }
+
+    fn sample_blob_metadata(height: Height, parent_blob_root: B256) -> BlobMetadata {
+        let mut commitments = Vec::new();
+        for i in 0..MAX_BLOBS_PER_BLOCK_ELECTRA {
+            commitments.push(KzgCommitment::new([i as u8; 48]));
+        }
+
+        BlobMetadata::new(
+            height,
+            parent_blob_root,
+            commitments,
+            sample_execution_payload_header(),
+            Some(42),
+        )
+    }
+
+    fn sample_consensus_metadata(height: Height) -> ConsensusBlockMetadata {
+        ConsensusBlockMetadata::new(
+            height,
+            Round::new(0),
+            Address::new([9u8; 20]),
+            1_700_000_100,
+            B256::from([10u8; 32]),
+            B256::from([11u8; 32]),
+            30_000_000,
+            10_000_000,
+        )
+    }
+
+    #[test]
+    fn mark_blob_metadata_decided_without_entry_returns_missing_error() {
+        let db = temp_db();
         let height = Height::new(1);
         let round = Round::new(0);
 
@@ -1105,5 +1055,169 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn consensus_metadata_roundtrip_is_idempotent() {
+        let db = temp_db();
+        let height = Height::new(5);
+        let metadata = sample_consensus_metadata(height);
+
+        db.insert_consensus_block_metadata(height, &metadata).expect("insert");
+
+        let fetched = db.get_consensus_block_metadata(height).expect("get").expect("metadata");
+        assert_eq!(fetched, metadata);
+
+        // Idempotent: inserting the same bytes should not error or duplicate
+        db.insert_consensus_block_metadata(height, &metadata).expect("idempotent insert");
+
+        let fetched_again =
+            db.get_consensus_block_metadata(height).expect("get").expect("metadata");
+        assert_eq!(fetched_again, metadata);
+    }
+
+    #[test]
+    fn blob_metadata_promotion_updates_latest_pointer() {
+        let db = temp_db();
+        let height = Height::new(3);
+        let round = Round::new(1);
+        let parent_root = B256::from([12u8; 32]);
+        let metadata = sample_blob_metadata(height, parent_root);
+
+        db.insert_blob_metadata_undecided(height, round, &metadata).expect("insert undecided");
+
+        let undecided = db
+            .get_blob_metadata_undecided(height, round)
+            .expect("get undecided")
+            .expect("metadata present");
+        assert_eq!(undecided, metadata);
+
+        db.mark_blob_metadata_decided(height, round).expect("promote");
+
+        assert!(
+            db.get_blob_metadata_undecided(height, round).expect("get undecided").is_none(),
+            "undecided entry should be removed after promotion"
+        );
+
+        let decided = db.get_blob_metadata(height).expect("get decided").expect("metadata present");
+        assert_eq!(decided, metadata);
+
+        let latest = db.get_latest_blob_metadata().expect("get latest").expect("latest metadata");
+        assert_eq!(latest.0, height);
+        assert_eq!(latest.1, metadata);
+    }
+
+    #[test]
+    fn cleanup_gathers_only_entries_below_height() {
+        let db = temp_db();
+        let header = sample_execution_payload_header();
+
+        for (h, r) in &[(1u64, 0u32), (2, 1), (3, 2)] {
+            let height = Height::new(*h);
+            let round = Round::new(*r);
+            let parent_root =
+                if *h == 1 { B256::ZERO } else { B256::from([h.to_le_bytes()[0]; 32]) };
+            let metadata = if *h % 2 == 0 {
+                BlobMetadata::blobless(height, parent_root, &header, Some(1))
+            } else {
+                BlobMetadata::new(
+                    height,
+                    parent_root,
+                    vec![KzgCommitment::new([*h as u8; 48])],
+                    header.clone(),
+                    Some(1),
+                )
+            };
+            db.insert_blob_metadata_undecided(height, round, &metadata).expect("insert undecided");
+        }
+
+        let entries =
+            db.get_all_undecided_blob_metadata_before(Height::new(3)).expect("get entries");
+
+        assert_eq!(entries, vec![(Height::new(1), Round::new(0)), (Height::new(2), Round::new(1))]);
+    }
+
+    #[test]
+    fn blob_metadata_undecided_roundtrip() {
+        let db = temp_db();
+        let height = Height::new(7);
+        let round = Round::new(3);
+        let metadata = sample_blob_metadata(height, B256::from([13u8; 32]));
+
+        db.insert_blob_metadata_undecided(height, round, &metadata).expect("insert");
+
+        let fetched =
+            db.get_blob_metadata_undecided(height, round).expect("get").expect("metadata");
+        assert_eq!(fetched, metadata);
+    }
+
+    #[test]
+    fn blob_metadata_multi_round_isolation() {
+        let db = temp_db();
+        let height = Height::new(9);
+
+        for (idx, round) in [0u32, 1, 5].into_iter().enumerate() {
+            let metadata = sample_blob_metadata(height, B256::from([(20 + idx as u8); 32]));
+            db.insert_blob_metadata_undecided(height, Round::new(round), &metadata)
+                .expect("insert");
+        }
+
+        for (idx, round) in [0u32, 1, 5].into_iter().enumerate() {
+            let fetched = db
+                .get_blob_metadata_undecided(height, Round::new(round))
+                .expect("get")
+                .expect("metadata");
+            assert_eq!(fetched.parent_blob_root(), B256::from([(20 + idx as u8); 32]));
+        }
+    }
+
+    #[test]
+    fn delete_blob_metadata_undecided_removes_entry() {
+        let db = temp_db();
+        let height = Height::new(4);
+        let round = Round::new(2);
+        let metadata = sample_blob_metadata(height, B256::from([21u8; 32]));
+
+        db.insert_blob_metadata_undecided(height, round, &metadata).expect("insert");
+
+        db.delete_blob_metadata_undecided(height, round).expect("delete");
+
+        assert!(
+            db.get_blob_metadata_undecided(height, round).expect("get").is_none(),
+            "metadata should be removed after delete"
+        );
+    }
+
+    #[test]
+    fn latest_blob_metadata_pointer_tracks_highest_height() {
+        let db = temp_db();
+        let rounds = [Round::new(0), Round::new(1)];
+
+        for height_idx in 1..=128u64 {
+            let height = Height::new(height_idx);
+            let metadata = sample_blob_metadata(height, B256::from([height_idx as u8; 32]));
+            let round = rounds[(height_idx as usize) % rounds.len()];
+            db.insert_blob_metadata_undecided(height, round, &metadata).expect("insert");
+            db.mark_blob_metadata_decided(height, round).expect("promote");
+        }
+
+        let latest = db.get_latest_blob_metadata().expect("get latest").expect("metadata");
+        assert_eq!(latest.0, Height::new(128));
+        assert_eq!(latest.1.parent_blob_root(), B256::from([128u8; 32]));
+    }
+
+    #[test]
+    fn blob_metadata_writes_are_idempotent() {
+        let db = temp_db();
+        let height = Height::new(11);
+        let round = Round::new(4);
+
+        let metadata = sample_blob_metadata(height, B256::from([33u8; 32]));
+        db.insert_blob_metadata_undecided(height, round, &metadata).expect("insert");
+        db.insert_blob_metadata_undecided(height, round, &metadata).expect("idempotent insert");
+
+        let fetched =
+            db.get_blob_metadata_undecided(height, round).expect("get").expect("metadata");
+        assert_eq!(fetched, metadata);
     }
 }
