@@ -547,3 +547,7 @@ clean-net-ipc: stop-ipc ## Clean local testnet data for IPC.
 .PHONY: spam
 spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 	cargo run --bin ultramarine-utils -- spam --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545
+
+.PHONY: spam-blobs
+spam-blobs: ## Spam the EL with EIP-4844 blob transactions (60s @ 50 tps, 128 blobs per tx).
+	cargo run --bin ultramarine-utils -- spam --time=60 --rate=50 --rpc-url=http://127.0.0.1:8545 --blobs --blobs-per-tx=3

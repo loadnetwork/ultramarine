@@ -30,7 +30,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['host.docker.internal:29000']
+      - targets: ['host.docker.internal:29000', 'ultramarine0:29000']
         labels:
           client_name: "malachite"
           client_type: "consensus"
@@ -38,7 +38,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['host.docker.internal:29001']
+      - targets: ['host.docker.internal:29001', 'ultramarine1:29001']
         labels:
           client_name: "malachite"
           client_type: "consensus"
@@ -46,7 +46,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['host.docker.internal:29002']
+      - targets: ['host.docker.internal:29002', 'ultramarine2:29002']
         labels:
           client_name: "malachite"
           client_type: "consensus"

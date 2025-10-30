@@ -1,6 +1,10 @@
 //! Distributed testnet command
 
-use std::{path::Path, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+    time::Duration,
+};
 
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
@@ -207,9 +211,11 @@ fn generate_distributed_config(
     transport: TransportProtocol,
     logging: LoggingConfig,
 ) -> Config {
-    let consensus_port = CONSENSUS_BASE_PORT + (index / machines.len());
-    let mempool_port = MEMPOOL_BASE_PORT + (index / machines.len());
-    let metrics_port = METRICS_BASE_PORT + (index / machines.len());
+    let consensus_port = CONSENSUS_BASE_PORT + index;
+    let mempool_port = MEMPOOL_BASE_PORT + index;
+    let metrics_port = METRICS_BASE_PORT + index;
+    let metrics_port =
+        u16::try_from(metrics_port).expect("distributed-testnet metrics port fits in u16");
 
     Config {
         moniker: format!("test-{index}"),
@@ -227,10 +233,8 @@ fn generate_distributed_config(
                         .iter()
                         .unique()
                         .map(|j| {
-                            transport.multiaddr(
-                                &machines[j % machines.len()].clone(),
-                                CONSENSUS_BASE_PORT + (j / machines.len()),
-                            )
+                            transport
+                                .multiaddr(&machines[j % machines.len()], CONSENSUS_BASE_PORT + j)
                         })
                         .collect()
                 } else {
@@ -239,10 +243,8 @@ fn generate_distributed_config(
                     peers
                         .iter()
                         .map(|j| {
-                            transport.multiaddr(
-                                &machines[*j % machines.len()],
-                                CONSENSUS_BASE_PORT + (*j / machines.len()),
-                            )
+                            transport
+                                .multiaddr(&machines[*j % machines.len()], CONSENSUS_BASE_PORT + *j)
                         })
                         .collect()
                 },
@@ -290,7 +292,7 @@ fn generate_distributed_config(
         },
         metrics: MetricsConfig {
             enabled: true,
-            listen_addr: format!("0.0.0.0:{metrics_port}").parse().unwrap(),
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), metrics_port),
         },
         logging,
         runtime,
