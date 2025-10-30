@@ -15,7 +15,7 @@ use tokio::{
     time::{self, Instant, sleep},
 };
 
-use crate::tx::make_signed_eip1559_tx;
+use crate::tx::{make_signed_eip1559_tx, make_signed_eip4844_tx};
 
 #[derive(Parser, Debug, Clone, PartialEq)]
 pub struct SpamCmd {
@@ -37,6 +37,9 @@ pub struct SpamCmd {
     /// Spam EIP-4844 (blob) transactions instead of EIP-1559
     #[clap(long, default_value = "false")]
     blobs: bool,
+    /// Number of blobs per EIP-4844 transaction (1-1024)
+    #[clap(long, default_value = "128")]
+    blobs_per_tx: usize,
     /// Index of the signer to use
     #[clap(long, default_value = "0")]
     signer_index: usize,
@@ -44,11 +47,6 @@ pub struct SpamCmd {
 
 impl SpamCmd {
     pub async fn run(&self) -> Result<()> {
-        if self.blobs {
-            eprintln!(
-                "[warning] EIP-4844 blob transactions enabled. On Cancun (engine V3), non-proposer imports may fail without sidecar support; expect inconsistent behavior until Engine API V4 sidecar wiring is implemented."
-            );
-        }
         // Determine chain id: use CLI override or fetch via eth_chainId
         let chain_id = if let Some(id) = self.chain_id {
             id
@@ -66,6 +64,7 @@ impl SpamCmd {
             self.time,
             self.rate,
             self.blobs,
+            self.blobs_per_tx,
             self.signer_index,
         )?;
         spammer.run().await
@@ -89,6 +88,8 @@ pub struct Spammer {
     max_rate: u64,
     /// Whether to send EIP-4844 blob transactions.
     blobs: bool,
+    /// Number of blobs per EIP-4844 transaction (1-1024).
+    blobs_per_tx: usize,
 }
 
 impl Spammer {
@@ -99,8 +100,12 @@ impl Spammer {
         max_time: u64,
         max_rate: u64,
         blobs: bool,
+        blobs_per_tx: usize,
         signer_index: usize,
     ) -> Result<Self> {
+        if blobs && (blobs_per_tx < 1 || blobs_per_tx > 1024) {
+            return Err(eyre::eyre!("blobs_per_tx must be between 1 and 1024"));
+        }
         let signers = crate::commands::genesis::make_signers();
         let signer =
             signers.get(signer_index).ok_or_else(|| eyre::eyre!("Invalid signer index"))?.clone();
@@ -112,6 +117,7 @@ impl Spammer {
             max_time,
             max_rate,
             blobs,
+            blobs_per_tx,
         })
     }
 
@@ -142,7 +148,7 @@ impl Spammer {
     // Fetch from an Ethereum node the latest used nonce for the given address.
     async fn get_latest_nonce(&self, address: Address) -> Result<u64> {
         let response: String =
-            self.client.rpc_request("eth_getTransactionCount", json!([address, "latest"])).await?;
+            self.client.rpc_request("eth_getTransactionCount", json!([address, "pending"])).await?;
         // Convert hex string to integer.
         let hex_str = response.as_str().strip_prefix("0x").unwrap_or(&response);
         Ok(u64::from_str_radix(hex_str, 16)?)
@@ -182,19 +188,28 @@ impl Spammer {
 
                 // Create one transaction and sign it.
                 let to_address = Address::with_last_byte((txs_sent_total % 256) as u8);
-                let signed_tx = if self.blobs {
-                    crate::tx::make_signed_eip4844_tx(
+                let (tx_bytes, tx_bytes_len) = if self.blobs {
+                    // EIP-4844 blob transaction (with real versioned hashes)
+                    let signed_tx = make_signed_eip4844_tx(
                         &self.signer,
                         nonce,
                         to_address,
                         self.chain_id,
+                        self.blobs_per_tx,
                     )
-                    .await?
+                    .await?;
+                    let bytes = signed_tx.encoded_2718();
+                    let len = bytes.len() as u64;
+                    (bytes, len)
                 } else {
-                    make_signed_eip1559_tx(&self.signer, nonce, to_address, self.chain_id).await?
+                    // EIP-1559 transaction
+                    let signed_tx =
+                        make_signed_eip1559_tx(&self.signer, nonce, to_address, self.chain_id)
+                            .await?;
+                    let bytes = signed_tx.encoded_2718();
+                    let len = bytes.len() as u64;
+                    (bytes, len)
                 };
-                let tx_bytes = signed_tx.encoded_2718();
-                let tx_bytes_len = tx_bytes.len() as u64;
 
                 // Send transaction to Ethereum RPC endpoint.
                 let payload = hex::encode(tx_bytes);
@@ -256,8 +271,19 @@ impl Spammer {
                         sleep(Duration::from_secs(1) - elapsed).await;
                     }
 
-                    let pool_status: Result<TxpoolStatus> = self.client.rpc_request("txpool_status", json!([])).await;
-                    println!("{stats_last_second}; {:?}", pool_status.unwrap_or_default());
+            let pool_status: Result<TxpoolStatus> =
+                self.client.rpc_request("txpool_status", json!([])).await;
+            match pool_status {
+                Ok(status) => {
+                    println!(
+                        "{stats_last_second}; pending_txpool={}; queued_txpool={}",
+                        status.pending, status.queued
+                    );
+                }
+                Err(err) => {
+                    println!("{stats_last_second}; txpool_status_error={err}");
+                }
+            }
 
                     // Update total, then reset last second stats
                     stats_total.add(&stats_last_second);

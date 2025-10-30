@@ -1,5 +1,8 @@
 #![allow(missing_docs)]
-use std::time::Duration;
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 use itertools::Itertools;
 use malachitebft_app::node::{CanGeneratePrivateKey, CanMakeGenesis, Node};
@@ -71,6 +74,8 @@ pub fn generate_config(
     let mempool_port = MEMPOOL_BASE_PORT + index;
     let metrics_port = METRICS_BASE_PORT + index;
 
+    let metrics_port = u16::try_from(metrics_port).expect("metrics port fits in u16");
+
     Config {
         moniker: format!("test-{index}"),
         consensus: ConsensusConfig {
@@ -139,7 +144,7 @@ pub fn generate_config(
         sync: ValueSyncConfig::default(),
         metrics: MetricsConfig {
             enabled: true,
-            listen_addr: format!("127.0.0.1:{metrics_port}").parse().unwrap(),
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), metrics_port),
         },
         logging,
         runtime,

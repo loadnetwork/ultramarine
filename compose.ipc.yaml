@@ -138,6 +138,8 @@ services:
     volumes:
       - ./nodes/0:/nodes/0
       - ipc0:/ipc
+    ports:
+      - "29000:29000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -158,6 +160,8 @@ services:
     volumes:
       - ./nodes/1:/nodes/1
       - ipc1:/ipc
+    ports:
+      - "29001:29001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -178,6 +182,8 @@ services:
     volumes:
       - ./nodes/2:/nodes/2
       - ipc2:/ipc
+    ports:
+      - "29002:29002"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
