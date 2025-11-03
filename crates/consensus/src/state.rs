@@ -9,6 +9,8 @@ use std::{
 
 use bytes::Bytes;
 use color_eyre::eyre;
+use ethereum_hashing::hash32_concat;
+use fixed_bytes::Hash256 as FixedHash;
 use malachitebft_app_channel::app::{
     streaming::{StreamContent, StreamId, StreamMessage},
     types::{
@@ -21,12 +23,13 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha3::Digest;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
+use tree_hash::TreeHash;
 use ultramarine_blob_engine::{BlobEngine, BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
 use ultramarine_types::{
     address::Address,
     // Phase 3: Import blob types for streaming
     aliases::B256,
-    blob::BlobsBundle,
+    blob::{BlobsBundle, KzgCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK},
     // Phase 4: Import three-layer metadata types
     blob_metadata::BlobMetadata,
     codec::proto::ProtobufCodec,
@@ -57,6 +60,9 @@ const BLOCK_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Size of chunks in which the data is split for streaming
 const CHUNK_SIZE: usize = 128 * 1024; // 128 KiB
+
+const BLOB_KZG_COMMITMENTS_INDEX: usize = 11;
+const KZG_COMMITMENT_INCLUSION_PROOF_DEPTH: usize = 17;
 
 /// Represents the internal state of the application node
 /// Contains information about current height, round, proposals and blocks
@@ -181,6 +187,16 @@ where
     /// This MUST be called on startup to restore the parent_root cache from Layer 2 metadata.
     /// The cache is updated ONLY when metadata becomes canonical (at commit).
     ///
+    /// # Genesis Seeding
+    ///
+    /// If the blob metadata store is empty (e.g., after `make clean-net-ipc`), this method
+    /// automatically seeds a genesis entry at height 0. This satisfies the invariant that
+    /// every blob proposal must have a parent metadata entry.
+    ///
+    /// **Important**: The genesis metadata values (gas limit, timestamps) are arbitrary
+    /// placeholders chosen for determinism, NOT derived from Reth's actual genesis block.
+    /// See [`BlobMetadata::genesis()`] for details on why this is safe.
+    ///
     /// # Cache Discipline
     ///
     /// - **Startup**: Load from `get_latest_blob_metadata()` (decided table)
@@ -198,8 +214,18 @@ where
                 "Hydrated blob parent root from BlobMetadata"
             );
         } else {
-            info!("No BlobMetadata found, starting with zero parent root");
-            self.last_blob_sidecar_root = B256::ZERO;
+            // Store is empty - seed genesis blob metadata for height 0
+            // This is required for the first blob proposal at height 1 to pass
+            // the parent metadata lookup check
+            info!("No BlobMetadata found, seeding genesis (height 0)");
+            let genesis_metadata = BlobMetadata::genesis();
+            self.store.seed_genesis_blob_metadata().await.map_err(|e| eyre::Report::new(e))?;
+            let genesis_root = genesis_metadata.to_beacon_header().hash_tree_root();
+            self.last_blob_sidecar_root = genesis_root;
+            info!(
+                parent_root = ?self.last_blob_sidecar_root,
+                "Seeded genesis BlobMetadata at height 0"
+            );
         }
 
         Ok(())
@@ -358,10 +384,14 @@ where
                     return Err(eyre::eyre!("Blob commitment mismatch at index {}", index));
                 }
 
-                let inclusion_proof = generate_kzg_commitment_inclusion_proof(&commitments, index)
-                    .map_err(|e| {
-                        eyre::eyre!("Failed to create inclusion proof for blob {}: {}", index, e)
-                    })?;
+                let inclusion_proof = generate_kzg_commitment_inclusion_proof(
+                    &commitments,
+                    index,
+                    &body,
+                )
+                .map_err(|e| {
+                    eyre::eyre!("Failed to create inclusion proof for blob {}: {}", index, e)
+                })?;
 
                 let index_u16 = u16::try_from(index)
                     .map_err(|_| eyre::eyre!("Blob index {} exceeds u16::MAX", index))?;
@@ -392,7 +422,7 @@ where
             .ok_or_else(|| format!("Proposer {} not found in validator set", proposer))?;
 
         let body_root = BeaconBlockBodyMinimal::from_ultramarine_data(
-            metadata.kzg_commitments.clone(),
+            metadata.blob_kzg_commitments.clone(),
             &metadata.execution_payload_header,
         )
         .compute_body_root();
@@ -429,7 +459,11 @@ where
         let signature = self.signing_provider.sign(signing_root.as_slice());
         let signed_header = SignedBeaconBlockHeader::new(header_message, signature);
 
-        let commitments = metadata.kzg_commitments.clone();
+        let commitments = metadata.blob_kzg_commitments.clone();
+        let body = BeaconBlockBodyMinimal::from_ultramarine_data(
+            commitments.clone(),
+            &metadata.execution_payload_header,
+        );
         let mut rebuilt = Vec::with_capacity(blobs.len());
 
         for (index, original_sidecar) in blobs.iter().enumerate() {
@@ -441,10 +475,10 @@ where
                 return Err(eyre::eyre!("Commitment mismatch at index {} during restream", index));
             }
 
-            let inclusion_proof = generate_kzg_commitment_inclusion_proof(&commitments, index)
-                .map_err(|e| {
-                    eyre::eyre!("Failed to create inclusion proof for blob {}: {}", index, e)
-                })?;
+            let inclusion_proof =
+                generate_kzg_commitment_inclusion_proof(&commitments, index, &body).map_err(
+                    |e| eyre::eyre!("Failed to create inclusion proof for blob {}: {}", index, e),
+                )?;
 
             let index_u16 = u16::try_from(index)
                 .map_err(|_| eyre::eyre!("Blob index {} exceeds u16::MAX", index))?;
@@ -1369,12 +1403,64 @@ where
                 return Err(format!("Commitment mismatch for blob index {}", sidecar.index));
             }
 
+            let proof = &sidecar.kzg_commitment_inclusion_proof;
+
+            let (commitments_root, reconstructed_body_root) =
+                match reconstruct_roots_from_proof(&sidecar.kzg_commitment, proof, index) {
+                    Ok(values) => {
+                        let (commitments_root, reconstructed_body_root) = values;
+                        debug!(
+                            blob_index = sidecar.index,
+                            commitments_root = ?commitments_root,
+                            reconstructed_body_root = ?reconstructed_body_root,
+                            header_body_root = ?signed_header.message.body_root,
+                            "Evaluated blob inclusion proof"
+                        );
+                        (commitments_root, reconstructed_body_root)
+                    }
+                    Err(e) => {
+                        error!(
+                            blob_index = sidecar.index,
+                            error = %e,
+                            "Malformed blob inclusion proof"
+                        );
+                        return Err(format!(
+                            "Invalid KZG inclusion proof for blob index {}",
+                            sidecar.index
+                        ));
+                    }
+                };
+
+            if proof !=
+                &generate_kzg_commitment_inclusion_proof(commitments, index, &body).map_err(
+                    |e| {
+                        format!(
+                            "Failed to recompute inclusion proof for blob {}: {}",
+                            sidecar.index, e
+                        )
+                    },
+                )?
+            {
+                warn!(
+                    blob_index = sidecar.index,
+                    "Non-canonical inclusion proof received; recomputing locally"
+                );
+            }
+
             if !verify_kzg_commitment_inclusion_proof(
                 &sidecar.kzg_commitment,
-                &sidecar.kzg_commitment_inclusion_proof,
+                proof,
                 index,
                 signed_header.message.body_root,
             ) {
+                error!(
+                    blob_index = sidecar.index,
+                    commitments_root = ?commitments_root,
+                    reconstructed_body_root = ?reconstructed_body_root,
+                    header_body_root = ?signed_header.message.body_root,
+                    commitments_len = commitments.len(),
+                    "KZG inclusion proof failed verification"
+                );
                 return Err(format!("Invalid KZG inclusion proof for blob index {}", sidecar.index));
             }
         }
@@ -1432,11 +1518,84 @@ where
     }
 }
 
+fn tree_hash_to_fixed(hash: tree_hash::Hash256) -> FixedHash {
+    FixedHash::from_slice(hash.as_ref())
+}
+
+fn b256_to_fixed(value: &B256) -> FixedHash {
+    FixedHash::from_slice(value.as_slice())
+}
+
+fn fixed_to_b256(hash: &FixedHash) -> B256 {
+    B256::from_slice(hash.as_slice())
+}
+
+fn merkle_root_from_branch(
+    mut value: FixedHash,
+    branch: &[FixedHash],
+    mut index: usize,
+) -> FixedHash {
+    for sibling in branch {
+        if index & 1 == 1 {
+            value = FixedHash::from_slice(&hash32_concat(sibling.as_slice(), value.as_slice()));
+        } else {
+            value = FixedHash::from_slice(&hash32_concat(value.as_slice(), sibling.as_slice()));
+        }
+        index >>= 1;
+    }
+    value
+}
+
+fn reconstruct_roots_from_proof(
+    commitment: &KzgCommitment,
+    proof: &[B256],
+    index: usize,
+) -> Result<(B256, B256), String> {
+    let commitments_depth = MAX_BLOB_COMMITMENTS_PER_BLOCK.next_power_of_two().ilog2() as usize;
+    let commitments_branch_length = commitments_depth + 1;
+
+    if proof.len() != KZG_COMMITMENT_INCLUSION_PROOF_DEPTH ||
+        commitments_branch_length > KZG_COMMITMENT_INCLUSION_PROOF_DEPTH ||
+        index >= MAX_BLOB_COMMITMENTS_PER_BLOCK
+    {
+        return Err(format!(
+            "Proof metadata invalid: len={}, branch_len={}, index={}",
+            proof.len(),
+            commitments_branch_length,
+            index
+        ));
+    }
+
+    let (commitment_branch, body_branch) = proof.split_at(commitments_branch_length);
+    let commitment_branch_fixed: Vec<FixedHash> =
+        commitment_branch.iter().map(b256_to_fixed).collect();
+    let body_branch_fixed: Vec<FixedHash> = body_branch.iter().map(b256_to_fixed).collect();
+
+    if commitment_branch_fixed.len() != commitments_branch_length ||
+        commitment_branch_fixed.len() + body_branch_fixed.len() !=
+            KZG_COMMITMENT_INCLUSION_PROOF_DEPTH
+    {
+        return Err(format!(
+            "Proof branch sizing invalid: commitment_branch={}, body_branch={}, total={}",
+            commitment_branch_fixed.len(),
+            body_branch_fixed.len(),
+            proof.len()
+        ));
+    }
+
+    let leaf = tree_hash_to_fixed(TreeHash::tree_hash_root(commitment));
+    let commitments_root = merkle_root_from_branch(leaf, &commitment_branch_fixed, index);
+    let reconstructed_body_root =
+        merkle_root_from_branch(commitments_root, &body_branch_fixed, BLOB_KZG_COMMITMENTS_INDEX);
+
+    Ok((fixed_to_b256(&commitments_root), fixed_to_b256(&reconstructed_body_root)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use alloy_primitives::{Address as AlloyAddress, Bytes as AlloyBytes};
+    use alloy_primitives::{Address as AlloyAddress, B256, Bytes as AlloyBytes};
     use alloy_rpc_types_engine::{ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3};
     use alloy_rpc_types_eth::Withdrawal;
     use async_trait::async_trait;
@@ -1445,6 +1604,7 @@ mod tests {
     use ultramarine_blob_engine::error::BlobEngineError;
     use ultramarine_types::{
         address::Address,
+        aliases::Bytes as BlobBytes,
         blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
         blob_metadata::BlobMetadata,
         engine_api::ExecutionPayloadHeader,
@@ -1666,6 +1826,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hydrate_blob_parent_root_seeds_genesis_with_correct_root() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+
+        let expected = BlobMetadata::genesis().to_beacon_header().hash_tree_root();
+        state.hydrate_blob_parent_root().await.expect("hydrate");
+
+        assert_eq!(state.last_blob_sidecar_root, expected);
+    }
+
+    #[tokio::test]
+    async fn verify_blob_sidecars_roundtrip_canonical_proof() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+        state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+        state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+        let height = Height::new(1);
+        let round = Round::new(0);
+
+        let commitments = vec![KzgCommitment::new([1u8; 48]), KzgCommitment::new([2u8; 48])];
+        let blobs = vec![
+            Blob::new(BlobBytes::from(NetworkBytes::from(vec![0u8; BYTES_PER_BLOB])))
+                .expect("blob0"),
+            Blob::new(BlobBytes::from(NetworkBytes::from(vec![1u8; BYTES_PER_BLOB])))
+                .expect("blob1"),
+        ];
+        let proofs = vec![KzgProof::new([3u8; 48]), KzgProof::new([4u8; 48])];
+
+        let bundle = BlobsBundle::new(commitments.clone(), proofs, blobs);
+        bundle.validate().expect("bundle valid");
+
+        let metadata = ValueMetadata::new(sample_execution_payload_header(), commitments.clone());
+        let value = Value::new(metadata.clone());
+        let locally_proposed = LocallyProposedValue::new(height, round, value);
+
+        let (_signed_header, sidecars) = state
+            .prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))
+            .expect("prepare sidecars");
+        assert_eq!(sidecars.len(), commitments.len());
+
+        state
+            .verify_blob_sidecars(height, &state.address, &metadata, &sidecars)
+            .await
+            .expect("canonical proofs pass");
+
+        let mut tampered = sidecars.clone();
+        tampered[0].kzg_commitment_inclusion_proof[0] = B256::from([0xFFu8; 32]);
+
+        let err = state
+            .verify_blob_sidecars(height, &state.address, &metadata, &tampered)
+            .await
+            .expect_err("tampered proof rejected");
+        assert!(
+            err.contains("Invalid KZG inclusion proof"),
+            "expected inclusion proof failure, got {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn cleanup_stale_blob_metadata_removes_lower_entries() {
         let mock_engine = MockBlobEngine::default();
         let (mut state, _tmp) = build_state(mock_engine, Height::new(3));
@@ -1740,7 +1960,7 @@ mod tests {
 
         assert_eq!(loaded.height(), metadata.height());
         assert_eq!(loaded.parent_blob_root(), metadata.parent_blob_root());
-        assert_eq!(loaded.kzg_commitments(), metadata.kzg_commitments());
+        assert_eq!(loaded.blob_kzg_commitments(), metadata.blob_kzg_commitments());
     }
 
     #[tokio::test]
@@ -1780,7 +2000,7 @@ mod tests {
         assert_eq!(stored.height(), Height::new(1));
         assert_eq!(stored.blob_count(), 1);
         assert_eq!(stored.parent_blob_root(), B256::ZERO);
-        assert_eq!(stored.kzg_commitments(), bundle.commitments.as_slice());
+        assert_eq!(stored.blob_kzg_commitments(), bundle.commitments.as_slice());
         assert_eq!(stored.execution_payload_header(), &expected_header);
         assert_eq!(stored.proposer_index_hint(), Some(0));
         assert_eq!(state.last_blob_sidecar_root, B256::ZERO);

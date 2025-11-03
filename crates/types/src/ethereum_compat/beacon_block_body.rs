@@ -35,7 +35,11 @@ use ethereum_hashing::hash32_concat;
 use serde::{Deserialize, Serialize};
 use tree_hash::{BYTES_PER_CHUNK, Hash256, MerkleHasher, TreeHash};
 
-use crate::{aliases::Bytes, blob::KzgCommitment, engine_api::ExecutionPayloadHeader};
+use crate::{
+    aliases::Bytes,
+    blob::{KzgCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK},
+    engine_api::ExecutionPayloadHeader,
+};
 
 /// Minimal Eth1Data for SSZ tree hashing
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,8 +416,6 @@ fn compute_execution_payload_header_root(header: &ExecutionPayloadHeader) -> B25
     let root = hasher.finish().expect("finalize ExecutionPayloadHeader hash");
     B256::from_slice(root.as_ref())
 }
-
-const MAX_BLOB_COMMITMENTS_PER_BLOCK: usize = 1024;
 
 fn tree_hash_kzg_commitments(commitments: &[KzgCommitment]) -> Hash256 {
     if commitments.is_empty() {

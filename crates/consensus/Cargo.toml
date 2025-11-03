@@ -26,6 +26,8 @@ bytes.workspace = true
 color-eyre.workspace = true
 derive-where.workspace = true
 ethereum_ssz.workspace = true
+ethereum_hashing.workspace = true
+fixed_bytes.workspace = true
 
 hex.workspace = true
 prost.workspace = true

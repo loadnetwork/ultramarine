@@ -20,6 +20,17 @@ CARGO_INSTALL_EXTRA_FLAGS ?=
 CARGO_TARGET_DIR          ?= target
 BINARY_NAME               ?= ultramarine
 BIN_DIR                   ?= dist/bin
+PROMETHEUS_CONFIG_DIR     := monitoring
+PROMETHEUS_ACTIVE_CONFIG  := $(PROMETHEUS_CONFIG_DIR)/prometheus.yml
+PROMETHEUS_HOST_CONFIG    := $(PROMETHEUS_CONFIG_DIR)/prometheus.host.yml
+PROMETHEUS_IPC_CONFIG     := $(PROMETHEUS_CONFIG_DIR)/prometheus.ipc.yml
+
+define sync_prometheus_config
+	@if [ ! -f $(PROMETHEUS_ACTIVE_CONFIG) ] || ! cmp -s $1 $(PROMETHEUS_ACTIVE_CONFIG); then \
+		echo "$(YELLOW)Syncing Prometheus config -> $(PROMETHEUS_ACTIVE_CONFIG) (source: $1)$(NC)"; \
+		cp $1 $(PROMETHEUS_ACTIVE_CONFIG); \
+	fi
+endef
 
 # When targeting Windows we never enable jemalloc by default because the
 # allocator does not provide stable binaries on that platform. 
@@ -425,6 +436,7 @@ l: lint ## Shortcut for lint.
 
 .PHONY: all
 all: ## Build, generate genesis, start EL stack, wire peers, generate testnet, spawn nodes.
+	$(call sync_prometheus_config,$(PROMETHEUS_HOST_CONFIG))
 	$(MAKE) build-debug
 	cargo run --bin ultramarine-utils -- genesis
 	@# Ensure JWT secret exists for Engine API auth; create a secure 32‑byte hex if missing
@@ -451,6 +463,7 @@ all-http: all ## Alias of `all` for HTTP-based Engine/Eth endpoints.
 
 .PHONY: all-ipc
 all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nodes with Engine IPC.
+	$(call sync_prometheus_config,$(PROMETHEUS_IPC_CONFIG))
 	$(MAKE) build-debug
 	cargo run --bin ultramarine-utils -- genesis
 	@if [ ! -f ./assets/jwtsecret ]; then \
@@ -550,4 +563,4 @@ spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 
 .PHONY: spam-blobs
 spam-blobs: ## Spam the EL with EIP-4844 blob transactions (60s @ 50 tps, 128 blobs per tx).
-	cargo run --bin ultramarine-utils -- spam --time=60 --rate=50 --rpc-url=http://127.0.0.1:8545 --blobs --blobs-per-tx=3
+	cargo run --bin ultramarine-utils -- spam --time=60 --rate=50 --rpc-url=http://127.0.0.1:8545 --blobs --blobs-per-tx=6

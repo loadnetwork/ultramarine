@@ -287,9 +287,10 @@ pub struct BlobMetadata {
 
 ## 🐛 Known Issues / Blockers
 
-- Verify DB backend supports atomic multi-table writes (use RocksDB if necessary).  
-- Ensure composite-key ordering uses big-endian encoding.  
+- Verify DB backend supports atomic multi-table writes (use RocksDB if necessary).
+- Ensure composite-key ordering uses big-endian encoding.
 - Define behaviour for missing parent headers during optional migration window.
+- ~~Missing genesis BlobMetadata causing height 1 rejections after clean init~~ **✅ FIXED 2025-10-30**: Automatic seeding in `hydrate_blob_parent_root()`
 
 ---
 
@@ -302,6 +303,7 @@ pub struct BlobMetadata {
 | 2025-10-27 | Restream pulls headers from consensus store                    | Removes blob-engine dependency                  |
 | 2025-10-27 | Startup cleanup of stale undecided entries                     | Avoids unbounded growth after crashes           |
 | 2025-10-27 | Optional migration reconstructs signatures from sidecars       | Blobbed heights recoverable; blobless handled live |
+| 2025-10-30 | Automatic genesis BlobMetadata seeding                         | Satisfies parent lookup invariant on clean init; values are deterministic placeholders, not validated against Reth genesis |
 
 ---
 
