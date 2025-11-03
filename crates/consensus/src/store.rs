@@ -661,6 +661,55 @@ impl Db {
         Ok(())
     }
 
+    /// Insert genesis blob metadata directly into decided table
+    ///
+    /// Seeds the blob metadata store with height 0 entry. This is called during
+    /// bootstrap when the store is empty to satisfy the parent lookup requirement
+    /// for the first blobbed proposal at height 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `metadata` - Genesis BlobMetadata (height 0, empty commitments)
+    fn insert_genesis_blob_metadata(&self, metadata: &BlobMetadata) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let height = Height::new(0);
+        let tx = self.db.begin_write()?;
+
+        // Check if already exists (idempotent)
+        {
+            let table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+            if table.get(&height)?.is_some() {
+                return Ok(()); // Already seeded, nothing to do
+            }
+        }
+
+        // Serialize metadata
+        let proto = metadata.to_proto()?;
+        let metadata_bytes = proto.encode_to_vec();
+        let write_bytes = metadata_bytes.len() as u64;
+
+        // Insert into decided table
+        {
+            let mut table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+            table.insert(height, metadata_bytes)?;
+        }
+
+        // Update latest metadata pointer
+        {
+            let mut meta_table = tx.open_table(BLOB_METADATA_META_TABLE)?;
+            let height_bytes = height.as_u64().to_be_bytes().to_vec();
+            meta_table.insert("latest_height", height_bytes)?;
+        }
+
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+        self.metrics.add_write_bytes(write_bytes);
+
+        Ok(())
+    }
+
     /// Get latest blob metadata (O(1) via metadata pointer)
     fn get_latest_blob_metadata(&self) -> Result<Option<(Height, BlobMetadata)>, StoreError> {
         let start = Instant::now();
@@ -930,6 +979,18 @@ impl Store {
     ) -> Result<(), StoreError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || db.mark_blob_metadata_decided(height, round)).await?
+    }
+
+    /// Seed genesis blob metadata (height 0) into the store
+    ///
+    /// Called during bootstrap when the store is empty to satisfy the parent lookup
+    /// requirement for the first blobbed proposal at height 1. Idempotent - safe to
+    /// call multiple times.
+    pub async fn seed_genesis_blob_metadata(&self) -> Result<(), StoreError> {
+        let genesis_metadata = BlobMetadata::genesis();
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.insert_genesis_blob_metadata(&genesis_metadata))
+            .await?
     }
 
     /// Get latest blob metadata (O(1) via metadata pointer)

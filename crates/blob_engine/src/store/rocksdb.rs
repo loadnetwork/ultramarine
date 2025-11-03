@@ -82,6 +82,30 @@ impl RocksDbBlobStore {
         Ok(buf)
     }
 
+    fn collect_undecided_entries(
+        db: &DB,
+        cf: &rocksdb::ColumnFamily,
+        height: Height,
+        round: Option<i64>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BlobStoreError> {
+        let mut prefix = height.as_u64().to_be_bytes().to_vec();
+        if let Some(round) = round {
+            prefix.extend_from_slice(&round.to_be_bytes());
+        }
+
+        let iterator = db.prefix_iterator_cf(cf, &prefix);
+        let mut entries = Vec::new();
+        for item in iterator {
+            let (key_bytes, value_bytes) = item?;
+            if !key_bytes.starts_with(&prefix) {
+                break;
+            }
+            entries.push((key_bytes.to_vec(), value_bytes.to_vec()));
+        }
+
+        Ok(entries)
+    }
+
     /// Deserialize a blob sidecar using protobuf
     ///
     /// Protobuf provides automatic schema evolution:
@@ -205,18 +229,15 @@ impl BlobStore for RocksDbBlobStore {
             // IMPORTANT: Collect all items before deleting to avoid iterator invalidation.
             // RocksDB iterators become invalid when you mutate the CF during iteration.
             // See: https://github.com/facebook/rocksdb/wiki/Iterator
-            let prefix = Self::undecided_prefix(height, round);
-            let iter = db.prefix_iterator_cf(cf_undecided, &prefix);
+            let mut items_to_move = Self::collect_undecided_entries(&db, cf_undecided, height, Some(round))?;
 
-            let mut items_to_move = Vec::new();
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-
-                if !key_bytes.starts_with(&prefix) {
-                    break;
-                }
-
-                items_to_move.push((key_bytes.to_vec(), value_bytes.to_vec()));
+            if items_to_move.is_empty() {
+                debug!(
+                    height = height.as_u64(),
+                    round = round,
+                    "No undecided blobs found for requested round; scanning all rounds at height"
+                );
+                items_to_move = Self::collect_undecided_entries(&db, cf_undecided, height, None)?;
             }
 
             // Now process items after iteration completes

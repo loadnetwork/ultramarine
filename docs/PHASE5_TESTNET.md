@@ -132,50 +132,39 @@ This approach resolves the gap between purely manual testing and the need for au
 
 **Notable**: Zero blob-specific metrics in either layer.
 
-### Spam Tool (⚠️ Incomplete Blob Support)
+### Spam Tool (✅ Blob-Capable After Phase E)
 
-**Location**: `crates/utils/src/commands/spam.rs`, `crates/utils/src/tx.rs`
+**Location**: `crates/utils/src/commands/spam.rs`, supporting helpers in `crates/utils/src/tx.rs`
 
-**Status**: ❌ **NOT FUNCTIONAL** - Creates incomplete blob transactions
+**High-Level Flow**:
 
-**Current Implementation** (tx.rs:33-49):
-```rust
-pub(crate) fn make_eip4844_tx(nonce: u64, to: Address, chain_id: u64) -> TxEip4844 {
-    TxEip4844 {
-        // ... standard fields ...
-        blob_versioned_hashes: vec![b256!(
-            "0000000000000000000000000000000000000000000000000000000000000001"
-        )],  // ← HARDCODED FAKE HASH!
-        max_fee_per_blob_gas: 20_000_000_000,
-    }
-}
+```
+spammer()
+├─ obtain signer + pending nonce (`eth_getTransactionCount`)
+├─ per tick (rate-limited):
+│  ├─ when --blobs=true → make_signed_eip4844_tx(...)
+│  │     ├─ generate_blobs_with_kzg(count)
+│  │     │    • build deterministic 131_072-byte blobs
+│  │     │    • compute KZG commitments + proofs via trusted setup
+│  │     │    • derive versioned hashes (kzg_to_versioned_hash → 0x01 prefix)
+│  │     ├─ wrap into `TxEip4844WithSidecar`
+│  │     └─ sign envelope with requested chain ID / gas params
+│  ├─ fall back to EIP-1559 path when `--blobs=false`
+│  ├─ submit via `eth_sendRawTransaction`
+│  └─ record success/error + tx size on async channel
+└─ tracker task reports per-second stats and txpool status
 ```
 
-**What It Does**:
-- ✅ Creates EIP-4844 transaction (type 3)
-- ✅ Sets `blob_versioned_hashes` field
-- ✅ Sets `max_fee_per_blob_gas`
-- ❌ **Uses hardcoded fake versioned hash** (`0x00...01`)
-- ❌ **Does NOT include actual blob data** (131KB)
-- ❌ **Does NOT generate KZG commitments or proofs**
-- ❌ **Does NOT submit blobs via proper RPC method**
+**Capabilities**:
+- ✅ Real blob data, commitments, proofs, and sidecar wiring per transaction.
+- ✅ `--blobs-per-tx` validated for 1–1024 blobs; default stays 128.
+- ✅ Nonce management accounts for “already known/replacement” responses.
+- ✅ Compatible with Cancun Engine API v3 (sidecars arrive over raw tx submission).
+- ⚠️ Still prints a warning when blob mode is enabled (Engine V3 peers without sidecar support can reject blobs); keep until Engine V4 rollout.
 
-**What Happens**:
-1. Transaction gets submitted to txpool ✅
-2. Txpool accepts it (type check passes) ✅
-3. **BUT**: When block builder tries to include it, execution layer has no blob data ❌
-4. **Result**: Transaction sits in txpool but **cannot be included in blocks** ❌
-
-**Warning is Accurate** (spam.rs:48-50):
-```rust
-eprintln!(
-    "[warning] EIP-4844 blob transactions enabled. On Cancun (engine V3),
-    non-proposer imports may fail without sidecar support; expect inconsistent
-    behavior until Engine API V4 sidecar wiring is implemented."
-);
-```
-
-**Critical Finding**: The spam tool needs significant work before it can test blob sidecars. See Phase E below.
+**Outstanding Enhancements**:
+- No Prometheus metrics or structured logs yet—future Phase 5 work can expose spammer stats.
+- Error handling remains best-effort (no backoff/retry policy beyond nonce bumps).
 
 ---
 
@@ -185,7 +174,7 @@ eprintln!(
 - Implement `BlobEngineMetrics` with counters/gauges/histograms for verification, promotion, storage bytes, restream rebuilds, and failures.
 - Feed metrics from `BlobEngineImpl::{verify_and_store, mark_decided, get_for_import, drop_round}` and consensus handlers.
 - Register metrics in the node bootstrap (`crates/node/src/node.rs`) so Prometheus scrapes them by default.
-- Produce a metric reference (name, help, units) for docs and dashboards (**TODO**: add table once metrics land).
+- **Implementation Details**: See [METRICS_PROGRESS.md](./METRICS_PROGRESS.md) for complete metric specifications, code patterns, and progress tracking.
 
 ### Phase B – In-Process Tests (6–8 hours)
 - Implement inline helper structs inside `tests/` (and optionally `tests/common`) to:

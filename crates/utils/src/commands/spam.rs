@@ -220,10 +220,32 @@ impl Spammer {
                     .map(|_: String| tx_bytes_len);
 
                 // Report result and update counters.
+                // Only increment nonce if transaction was accepted (even if it returns an error)
+                // Don't increment on connection/timeout errors
+                match &result {
+                    Ok(_) => {
+                        // Transaction accepted by node
+                        nonce += 1;
+                        txs_sent_total += 1;
+                        txs_sent_in_interval += 1;
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        // Only increment nonce for errors that indicate the tx was received
+                        // (e.g., "nonce too low", "insufficient funds", etc.)
+                        // Don't increment for connection errors
+                        if err_msg.contains("nonce too low") ||
+                            err_msg.contains("insufficient funds") ||
+                            err_msg.contains("already known") ||
+                            err_msg.contains("replacement")
+                        {
+                            nonce += 1;
+                        }
+                        // Count the attempt for rate limiting regardless
+                        txs_sent_in_interval += 1;
+                    }
+                }
                 result_sender.send(result).await?;
-                txs_sent_in_interval += 1;
-                nonce += 1;
-                txs_sent_total += 1;
             }
 
             // Give time to the in-flight results to be received.
@@ -384,7 +406,7 @@ impl RpcClient {
         let request = self
             .client
             .post(self.url.clone())
-            .timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(30))
             .header("Content-Type", "application/json")
             .json(&body);
         let body: JsonResponseBody = request.send().await?.error_for_status()?.json().await?;

@@ -365,4 +365,30 @@ mod tests {
         let imported_after = engine.get_for_import(height).await.unwrap();
         assert_eq!(imported_after.len(), 0);
     }
+
+    #[tokio::test]
+    async fn storing_and_deciding_with_different_rounds_loses_blobs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = RocksDbBlobStore::open(temp_dir.path()).unwrap();
+
+        let height = Height::new(123);
+        let proposed_round = 0;
+        let commit_round = 3;
+        let blobs = vec![create_test_blob(0)];
+
+        store.put_undecided_blobs(height, proposed_round, &blobs).await.unwrap();
+
+        let engine = BlobEngineImpl::new(store).unwrap();
+
+        engine.mark_decided(height, commit_round).await.unwrap();
+
+        let decided = engine.get_for_import(height).await.unwrap();
+        assert_eq!(
+            decided.len(),
+            blobs.len(),
+            "Blobs stored under round {} were not promoted when mark_decided was called with round {}",
+            proposed_round,
+            commit_round
+        );
+    }
 }

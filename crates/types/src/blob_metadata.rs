@@ -36,7 +36,8 @@ use std::convert::TryFrom;
 use malachitebft_proto::{Error as ProtoError, Protobuf};
 
 use crate::{
-    aliases::B256,
+    address::Address,
+    aliases::{B256, Bloom, Bytes, U256},
     blob::KzgCommitment,
     engine_api::ExecutionPayloadHeader,
     ethereum_compat::{BeaconBlockBodyMinimal, BeaconBlockHeader},
@@ -84,7 +85,7 @@ pub struct BlobMetadata {
     /// KZG commitments for all blobs at this height
     ///
     /// Empty vector for blobless blocks.
-    pub kzg_commitments: Vec<KzgCommitment>,
+    pub blob_kzg_commitments: Vec<KzgCommitment>,
 
     /// Number of blobs (0 for blobless blocks)
     pub blob_count: u16,
@@ -103,29 +104,30 @@ impl BlobMetadata {
     ///
     /// * `height` - Block height
     /// * `parent_blob_root` - Parent blob header root
-    /// * `kzg_commitments` - KZG commitments for blobs
+    /// * `blob_kzg_commitments` - KZG commitments for blobs
     /// * `execution_payload_header` - Lightweight execution payload header (copied from
     ///   ValueMetadata)
     /// * `proposer_index_hint` - Optional proposer index to embed in Beacon headers
     pub fn new(
         height: Height,
         parent_blob_root: B256,
-        kzg_commitments: Vec<KzgCommitment>,
+        blob_kzg_commitments: Vec<KzgCommitment>,
         execution_payload_header: ExecutionPayloadHeader,
         proposer_index_hint: Option<u64>,
     ) -> Self {
-        let blob_count = u16::try_from(kzg_commitments.len()).expect("blob count exceeds u16::MAX");
+        let blob_count =
+            u16::try_from(blob_kzg_commitments.len()).expect("blob count exceeds u16::MAX");
 
         let metadata = Self {
             height,
             parent_blob_root,
-            kzg_commitments,
+            blob_kzg_commitments,
             blob_count,
             execution_payload_header,
             proposer_index_hint,
         };
 
-        debug_assert_eq!(usize::from(metadata.blob_count), metadata.kzg_commitments.len());
+        debug_assert_eq!(usize::from(metadata.blob_count), metadata.blob_kzg_commitments.len());
 
         metadata
     }
@@ -147,6 +149,69 @@ impl BlobMetadata {
         proposer_index_hint: Option<u64>,
     ) -> Self {
         Self::new(height, parent_blob_root, Vec::new(), execution.clone(), proposer_index_hint)
+    }
+
+    /// Create genesis blob metadata for height 0
+    ///
+    /// Seeds the blob metadata store with a height 0 entry to satisfy the parent lookup
+    /// requirement for the first blobbed block at height 1. Without this, nodes reject
+    /// blob proposals at height 1 with "Missing decided BlobMetadata for parent height 0".
+    ///
+    /// Used during bootstrap when the store is empty after a clean init.
+    ///
+    /// # Important: Not Validated Against Actual Genesis Block
+    ///
+    /// This genesis `BlobMetadata` is a **consensus-layer bookkeeping entry**, NOT a
+    /// representation of Reth's actual genesis block (from `genesis.json`). The values in
+    /// the `ExecutionPayloadHeader` (gas limit, timestamps, etc.) are:
+    ///
+    /// - **Never validated** against Reth's real genesis block
+    /// - **Arbitrary** - chosen for determinism, not accuracy
+    /// - **Consistent** - all nodes use the same `genesis()` code
+    ///
+    /// The only requirement is that all nodes compute the **same hash** from this metadata.
+    /// When height 1 arrives, it will compute `parent_blob_root = hash(genesis metadata)`,
+    /// and as long as all nodes use identical values here, consensus is maintained.
+    ///
+    /// ## Layer Separation
+    ///
+    /// ```text
+    /// Reth genesis.json (Layer 3)     BlobMetadata::genesis() (Layer 2)
+    /// ├─ Actual chain state           ├─ Consensus bookkeeping only
+    /// ├─ Account balances             ├─ Parent lookup artifact
+    /// └─ Real gas limit               └─ Placeholder values (deterministic)
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// BlobMetadata with:
+    /// - height = 0
+    /// - parent_blob_root = B256::ZERO
+    /// - empty KZG commitments (no blobs at genesis)
+    /// - minimal execution payload header (zero values, gas_limit=30M arbitrary)
+    /// - proposer_index_hint = 0
+    pub fn genesis() -> Self {
+        let genesis_header = ExecutionPayloadHeader {
+            block_hash: B256::ZERO,
+            parent_hash: B256::ZERO,
+            state_root: B256::ZERO,
+            receipts_root: B256::ZERO,
+            logs_bloom: Bloom::ZERO,
+            block_number: 0,
+            gas_limit: 30_000_000, // Standard default
+            gas_used: 0,
+            timestamp: 0,
+            base_fee_per_gas: U256::ZERO,
+            extra_data: Bytes::new(),
+            transactions_root: B256::ZERO,
+            withdrawals_root: B256::ZERO,
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+            prev_randao: B256::ZERO,
+            fee_recipient: Address::repeat_byte(0),
+        };
+
+        Self::blobless(Height::new(0), B256::ZERO, &genesis_header, Some(0))
     }
 
     /// Build Ethereum-compatible BeaconBlockHeader
@@ -174,7 +239,7 @@ impl BlobMetadata {
     /// containing only the KZG commitments.
     fn compute_body_root(&self) -> B256 {
         let body = BeaconBlockBodyMinimal::from_ultramarine_data(
-            self.kzg_commitments.clone(),
+            self.blob_kzg_commitments.clone(),
             &self.execution_payload_header,
         );
         body.compute_body_root()
@@ -213,8 +278,8 @@ impl BlobMetadata {
     }
 
     /// Get KZG commitments
-    pub fn kzg_commitments(&self) -> &[KzgCommitment] {
-        &self.kzg_commitments
+    pub fn blob_kzg_commitments(&self) -> &[KzgCommitment] {
+        &self.blob_kzg_commitments
     }
 
     /// Get execution state root
@@ -245,7 +310,7 @@ impl Protobuf for BlobMetadata {
     type Proto = proto::BlobMetadata;
 
     fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
-        let kzg_commitments = proto
+        let blob_kzg_commitments = proto
             .kzg_commitments
             .into_iter()
             .map(|bytes| {
@@ -258,11 +323,11 @@ impl Protobuf for BlobMetadata {
             ProtoError::Other(format!("blob_count {} exceeds u16::MAX", proto.blob_count))
         })?;
 
-        if usize::from(blob_count) != kzg_commitments.len() {
+        if usize::from(blob_count) != blob_kzg_commitments.len() {
             return Err(ProtoError::Other(format!(
                 "blob_count {} does not match number of commitments {}",
                 blob_count,
-                kzg_commitments.len()
+                blob_kzg_commitments.len()
             )));
         }
 
@@ -274,7 +339,7 @@ impl Protobuf for BlobMetadata {
         Ok(Self {
             height: Height::new(proto.height),
             parent_blob_root: B256::from_slice(&proto.parent_blob_root),
-            kzg_commitments,
+            blob_kzg_commitments,
             blob_count,
             execution_payload_header,
             proposer_index_hint: proto.proposer_index_hint,
@@ -285,8 +350,12 @@ impl Protobuf for BlobMetadata {
         Ok(proto::BlobMetadata {
             height: self.height.as_u64(),
             parent_blob_root: self.parent_blob_root.to_vec().into(),
-            kzg_commitments: self.kzg_commitments.iter().map(|c| c.0.to_vec().into()).collect(),
-            blob_count: self.kzg_commitments.len() as u32,
+            kzg_commitments: self
+                .blob_kzg_commitments
+                .iter()
+                .map(|c| c.0.to_vec().into())
+                .collect(),
+            blob_count: self.blob_kzg_commitments.len() as u32,
             execution_payload_header: Some(self.execution_payload_header.to_proto()?),
             proposer_index_hint: self.proposer_index_hint,
         })
@@ -337,7 +406,7 @@ mod tests {
         assert_eq!(metadata.height(), Height::new(100));
         assert_eq!(metadata.blob_count(), 1);
         assert!(metadata.has_blobs());
-        assert_eq!(metadata.kzg_commitments().len(), 1);
+        assert_eq!(metadata.blob_kzg_commitments().len(), 1);
         assert_eq!(metadata.proposer_index_hint(), Some(42));
     }
 
@@ -355,7 +424,7 @@ mod tests {
         assert_eq!(metadata.height(), Height::new(50));
         assert_eq!(metadata.blob_count(), 0);
         assert!(!metadata.has_blobs());
-        assert!(metadata.kzg_commitments().is_empty());
+        assert!(metadata.blob_kzg_commitments().is_empty());
         assert_eq!(metadata.execution_state_root(), execution_header.state_root);
         assert_eq!(metadata.execution_block_hash(), execution_header.block_hash);
     }
@@ -506,7 +575,7 @@ mod tests {
         );
 
         assert_eq!(metadata.blob_count(), 10);
-        assert_eq!(metadata.kzg_commitments().len(), 10);
+        assert_eq!(metadata.blob_kzg_commitments().len(), 10);
         assert!(metadata.has_blobs());
     }
 }

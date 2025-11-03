@@ -594,6 +594,24 @@ pub async fn run(
                 let versioned_hashes: Vec<BlockHash> =
                     block.body.blob_versioned_hashes_iter().copied().collect();
 
+                // PHASE 4.5: Promote blobs from undecided to decided state
+                // Mark blobs as decided BEFORE checking availability, so get_for_import() can find them
+                if !versioned_hashes.is_empty() {
+                    let round_i64 = round.as_i64();
+                    debug!(
+                        "Marking {} blobs as decided for height {}, round {}",
+                        versioned_hashes.len(),
+                        height,
+                        round
+                    );
+
+                    if let Err(e) = state.blob_engine().mark_decided(height, round_i64).await {
+                        let err = eyre!("Failed to promote blobs to decided state at height {}, round {}: {}", height, round, e);
+                        error!(%err, "Cannot mark blobs as decided");
+                        return Err(err);
+                    }
+                }
+
                 // PHASE 5: Validate blob availability before import
                 // Ensure blobs exist in blob_engine before finalizing block
                 if !versioned_hashes.is_empty() {
