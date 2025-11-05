@@ -93,6 +93,133 @@ Notes:
     - `tmux attach -t <session>` → attach
   - App logs show rounds, proposals, decisions, tx counts, and bytes/sec.
 
+## Blob Testing & Observability
+
+Ultramarine includes comprehensive blob sidecar support (EIP-4844) with full observability.
+
+### Testing Blob Transactions
+
+1. **Start the testnet:**
+   ```bash
+   make all
+   ```
+
+2. **Run blob spam:**
+   ```bash
+   make spam-blobs
+   ```
+   This sends 60 seconds of blob transactions (50 TPS, 6 blobs per transaction) to test blob lifecycle.
+
+3. **Check blob metrics:**
+   ```bash
+   curl http://localhost:29000/metrics | grep blob_engine
+   ```
+
+### Blob Metrics
+
+All metrics are exposed at each node's metrics endpoint (`:29000`, `:29001`, `:29002`) with the `blob_engine_` prefix:
+
+**Verification Metrics:**
+- `blob_engine_verifications_success_total` - KZG proof verifications that succeeded
+- `blob_engine_verifications_failure_total` - KZG proof verifications that failed
+- `blob_engine_verification_time` - Histogram of KZG verification duration (seconds)
+
+**Storage Metrics:**
+- `blob_engine_storage_bytes_undecided` - Bytes used by undecided blobs
+- `blob_engine_storage_bytes_decided` - Bytes used by decided blobs
+- `blob_engine_undecided_blob_count` - Current count of undecided blobs
+
+**Lifecycle Metrics:**
+- `blob_engine_lifecycle_promoted_total` - Blobs promoted from undecided to decided
+- `blob_engine_lifecycle_dropped_total` - Blobs dropped from undecided pool
+- `blob_engine_lifecycle_pruned_total` - Decided blobs pruned/archived
+
+**Consensus Integration:**
+- `blob_engine_blobs_per_block` - Number of blobs in the last finalized block
+- `blob_engine_restream_rebuilds_total` - Blob metadata rebuilds during restream
+- `blob_engine_sync_failures_total` - Blob sync/fetch failures
+
+### Grafana Blob Dashboard
+
+The Grafana dashboard at http://localhost:3000 includes a **Blob Engine** section with 9 panels:
+
+1. **Blob Verifications (Total)** - Success and failure counters over time
+2. **Blob Verification Latency (P99/P50)** - KZG verification performance
+3. **Undecided Blob Count** - Blobs awaiting finalization
+4. **Blob Storage Size (Bytes)** - Undecided vs. decided storage
+5. **Blob Lifecycle** - Promoted, dropped, and pruned counts
+6. **Blobs per Block** - Blob density in finalized blocks
+7. **Blob Restream Rebuilds** - Restream operation tracking
+8. **Blob Sync Failures** - Sync error tracking
+
+### Verifying Blob Health
+
+After running `make spam-blobs`, verify blob operations are working:
+
+```bash
+# Check verification count (should match number of blobs sent)
+curl -s http://localhost:29000/metrics | grep "blob_engine_verifications_success_total"
+
+# Check blob lifecycle (promoted should increase as blocks finalize)
+curl -s http://localhost:29000/metrics | grep "blob_engine_lifecycle"
+
+# Check storage usage
+curl -s http://localhost:29000/metrics | grep "blob_engine_storage_bytes"
+```
+
+Expected behavior:
+- Verification success count increases with each blob transaction
+- Undecided blobs appear briefly, then get promoted to decided
+- Storage gauges reflect blob activity
+- Zero verification failures under normal operation
+- Grafana panels update in real-time
+
+## Integration Test Harness (Phase 5B)
+
+The blob integration suite lives in the dedicated `crates/test` package so Cargo can discover and execute the scenarios without bringing up Docker or the full network.
+
+- **List available tests**
+  ```bash
+  make itest-list
+  ```
+
+- **Run the deterministic in-process suite**
+  ```bash
+  make itest        # verbose output (~15 s)
+  ```
+  Under the hood this invokes
+  ```bash
+  cargo test -p ultramarine-test -- --ignored --nocapture
+  ```
+  (the `--ignored` flag keeps the tests opt-in so they do not run during every `cargo test`).
+
+### What the harness does
+
+- Spins real consensus + blob engine components inside the current Tokio runtime (no Docker).
+- Loads the Ethereum mainnet trusted setup once and generates **real** KZG commitments/proofs with `c-kzg`.
+- Exercises the ten Phase 5B scenarios end-to-end:
+  - `blob_roundtrip`
+  - `blob_restream_multi_validator`
+  - `blob_restream_multiple_rounds`
+  - `blob_new_node_sync`
+  - `blob_blobless_sequence`
+  - `blob_sync_failure_rejects_invalid_proof`
+  - `blob_sync_commitment_mismatch_rejected`
+  - `blob_sync_across_restart_multiple_heights`
+  - `blob_restart_hydrates_multiple_heights`
+  - `blob_pruning_retains_recent_heights`
+  - `restart_hydrate`
+  - `sync_package_roundtrip`
+- Uses the shared helpers in `crates/test/tests/common` (deterministic payloads, payload IDs, mock Engine API).
+
+### When to run it
+
+- After touching consensus/blob-engine/state code.
+- Before PRs that touch proposal streaming, restream, sync, or blob storage.
+- As a fast regression check prior to launching the Docker testnet.
+
+> **Note:** The harness prints workspace warnings (e.g., missing docs) inherited from other crates; the important signal is that all ten tests pass.
+
 ## Utils: Genesis & Spammer
 
 ### Generate Genesis
@@ -125,19 +252,25 @@ cargo run --bin ultramarine-utils -- spam \
   --time 60 --rate 500
 ```
 
-EIP‑4844 (experimental):
+EIP‑4844 (blob transactions with real KZG commitments and proofs):
 
 ```
 cargo run --bin ultramarine-utils -- spam \
   --rpc-url http://127.0.0.1:8545 \
-  --blobs --time 30 --rate 50
+  --blobs --blobs-per-tx 6 --time 60 --rate 50
 ```
 
-Warning: On Cancun (Engine V3) non‑proposer blob imports may fail without sidecar support; behavior can be inconsistent until Engine API V4 sidecar wiring is implemented (see `docs/4844-sidecar-blueprint.md`).
+Blob spam generates deterministic 131,072-byte blobs with valid KZG commitments and proofs. Blob lifecycle:
+1. Transactions submitted to Reth txpool
+2. Consensus proposes blocks with blob transactions
+3. Blobs verified (KZG proof check) and stored as "undecided"
+4. Upon block finalization, blobs promoted to "decided"
+5. Blobs pruned/archived after serving their purpose
 
 ### Convenience Make Targets
 
-- `make spam` → 60s @ 500 TPS to `http://127.0.0.1:8545`
+- `make spam` → 60s @ 500 TPS (EIP-1559 transactions)
+- `make spam-blobs` → 60s @ 50 TPS with 6 blobs per transaction
 
 ## Quick EL Sanity Checks
 

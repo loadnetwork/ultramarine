@@ -36,6 +36,9 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# Metrics
+malachitebft-app-channel.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3.8"

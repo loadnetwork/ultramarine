@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-use alloy_rpc_types_engine::ExecutionPayloadV3;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
 use malachitebft_app_channel::{
@@ -19,12 +18,7 @@ use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::State;
 use ultramarine_execution::client::ExecutionClient;
-use ultramarine_types::{
-    aliases::{Block, BlockHash},
-    context::LoadContext,
-    engine_api::ExecutionBlock,
-    sync::SyncedValuePackage,
-};
+use ultramarine_types::{aliases::B256, context::LoadContext, sync::SyncedValuePackage};
 
 pub async fn run(
     state: &mut State,
@@ -557,145 +551,18 @@ pub async fn run(
 
                 debug!("🎁 block size: {:?}, height: {}", block_bytes.len(), height);
 
-                // Decode bytes into execution payload (a block)
+                let mut notifier = execution_layer.as_notifier();
+                let outcome = state
+                    .process_decided_certificate(&certificate, block_bytes.clone(), &mut notifier)
+                    .await?;
 
-                let execution_payload = ExecutionPayloadV3::from_ssz_bytes(&block_bytes).unwrap();
-
-                let parent_block_hash = execution_payload.payload_inner.payload_inner.parent_hash;
-                let new_block_hash = execution_payload.payload_inner.payload_inner.block_hash;
-
-                assert_eq!(state.latest_block.unwrap().block_hash, parent_block_hash);
-
-                let new_block_timestamp = execution_payload.timestamp();
-                let new_block_number = execution_payload.payload_inner.payload_inner.block_number;
-                let new_block_prev_randao =
-                    execution_payload.payload_inner.payload_inner.prev_randao;
-
-                // Log stats
-
-                let tx_count = execution_payload.payload_inner.payload_inner.transactions.len();
-                state.txs_count += tx_count as u64;
-                state.chain_bytes += block_bytes.len() as u64;
-                let elapsed_time = state.start_time.elapsed();
-
-                info!(
-                    "👉 stats at height {}: #txs={}, txs/s={:.2}, chain_bytes={}, bytes/s={:.2}",
-                    height,
-                    state.txs_count,
-                    state.txs_count as f64 / elapsed_time.as_secs_f64(),
-                    state.chain_bytes,
-                    state.chain_bytes as f64 / elapsed_time.as_secs_f64(),
-                );
-
-                debug!("🦄 Block at height {height} contains {tx_count} transactions");
-
-                let block: Block = execution_payload.clone().try_into_block().unwrap();
-
-                let versioned_hashes: Vec<BlockHash> =
-                    block.body.blob_versioned_hashes_iter().copied().collect();
-
-                // PHASE 4.5: Promote blobs from undecided to decided state
-                // Mark blobs as decided BEFORE checking availability, so get_for_import() can find them
-                if !versioned_hashes.is_empty() {
-                    let round_i64 = round.as_i64();
-                    debug!(
-                        "Marking {} blobs as decided for height {}, round {}",
-                        versioned_hashes.len(),
-                        height,
-                        round
-                    );
-
-                    if let Err(e) = state.blob_engine().mark_decided(height, round_i64).await {
-                        let err = eyre!("Failed to promote blobs to decided state at height {}, round {}: {}", height, round, e);
-                        error!(%err, "Cannot mark blobs as decided");
-                        return Err(err);
-                    }
-                }
-
-                // PHASE 5: Validate blob availability before import
-                // Ensure blobs exist in blob_engine before finalizing block
-                if !versioned_hashes.is_empty() {
-                    debug!(
-                        "Validating availability of {} blobs for height {}",
-                        versioned_hashes.len(),
-                        height
-                    );
-
-                    let blobs = state.blob_engine().get_for_import(height).await
-                        .map_err(|e| eyre!("Failed to retrieve blobs for import at height {}: {}", height, e))?;
-
-                    // Verify blob count matches versioned hashes
-                    if blobs.len() != versioned_hashes.len() {
-                        let e = eyre!(
-                            "Blob count mismatch at height {}: blob_engine has {} blobs, but block expects {}",
-                            height,
-                            blobs.len(),
-                            versioned_hashes.len()
-                        );
-                        error!(%e, "Cannot import block: blob availability check failed");
-                        return Err(e);
-                    }
-
-                    // LIGHTHOUSE PARITY: Recompute versioned hashes from stored commitments
-                    // and verify they match the payload hashes (defense-in-depth)
-                    // See: lighthouse/beacon_node/execution_layer/src/engine_api/versioned_hashes.rs
-                    use sha2::{Digest, Sha256};
-                    let computed_hashes: Vec<BlockHash> = blobs.iter()
-                        .map(|sidecar| {
-                            // Hash the KZG commitment: SHA256(commitment)[0] = 0x01
-                            let mut hash = Sha256::digest(sidecar.kzg_commitment.as_bytes());
-                            hash[0] = 0x01; // VERSIONED_HASH_VERSION_KZG
-                            BlockHash::from_slice(&hash)
-                        })
-                        .collect();
-
-                    // Verify computed hashes match payload hashes
-                    if computed_hashes != versioned_hashes {
-                        let e = eyre!(
-                            "Versioned hash mismatch at height {}: \
-                            computed from stored commitments != hashes in execution payload. \
-                            This indicates either blob data corruption or a malicious proposal.",
-                            height
-                        );
-                        error!(%e, "Cannot import block: versioned hash verification failed");
-                        return Err(e);
-                    }
-
-                    info!(
-                        "✅ Verified {} blobs available and versioned hashes match for height {}",
-                        blobs.len(),
-                        height
-                    );
-                }
-
-                let payload_status =
-                    execution_layer.notify_new_block(execution_payload, versioned_hashes).await?;
-                if payload_status.is_invalid() {
-                    return Err(eyre::eyre!("Invalid payload status: {}", payload_status.status))
-                }
-
-                debug!("💡 New block added at height {} with hash: {}", height, new_block_hash);
-
-                // Notify the execution client (EL) of the new block.
-                // Update the execution head state to this block.
-                let latest_valid_hash =
-                    execution_layer.set_latest_forkchoice_state(new_block_hash).await?;
                 debug!(
-                    "🚀 Forkchoice updated to height {} for block hash={} and latest_valid_hash={}",
-                    height, new_block_hash, latest_valid_hash
+                    height = %height,
+                    txs = outcome.tx_count,
+                    blobs = outcome.blob_count,
+                    block_hash = ?outcome.execution_block.block_hash,
+                    "✅ Decided certificate processed successfully"
                 );
-
-                // When that happens, we store the decided value in our store
-                state.commit(certificate).await?;
-
-                // Save the latest block
-                state.latest_block = Some(ExecutionBlock {
-                    block_hash: new_block_hash,
-                    block_number: new_block_number,
-                    parent_hash: latest_valid_hash,
-                    timestamp: new_block_timestamp,
-                    prev_randao: new_block_prev_randao,
-                });
 
                 // Pause briefly before starting next height, just to make following the logs easier
                 // tokio::time::sleep(Duration::from_millis(500)).await;
@@ -735,162 +602,25 @@ pub async fn run(
                     }
                 };
 
-                match package {
-                    SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
-                        info!(
-                            %height,
-                            %round,
-                            payload_size = execution_payload_ssz.len(),
-                            blob_count = blob_sidecars.len(),
-                            "Received Full sync package"
-                        );
-
-                        // 1. Store execution payload
-                        if let Err(e) = state
-                            .store_synced_block_data(height, round, execution_payload_ssz)
-                            .await
-                        {
-                            error!(%height, %round, "Failed to store synced payload: {}", e);
-                            // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
-                            let _ = reply.send(None);
-                            continue;
-                        }
-
-                        // 2. Store and verify blobs (if any)
-                        if !blob_sidecars.is_empty() {
-                            // Convert Round to i64 for blob engine
-                            let round_i64 = round.as_i64();
-
-                            if let Err(e) = state
-                                .blob_engine()
-                                .verify_and_store(height, round_i64, &blob_sidecars)
-                                .await
-                            {
-                                error!(%height, %round, "Failed to verify/store blobs: {}", e);
-                                // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
-                                let _ = reply.send(None);
-                                continue;
-                            }
-
-                            // 3. Mark blobs as decided immediately
-                            // (Synced values are already decided, skip UNDECIDED state)
-                            if let Err(e) = state.blob_engine().mark_decided(height, round_i64).await {
-                                error!(%height, %round, "Failed to mark blobs decided: {}", e);
-                                // Don't fail here, just log - blobs are stored and verified
-                            }
-                        }
-
-                        // 4. Build the ProposedValue
-                        let proposed_value = ProposedValue {
-                            height,
-                            round,
-                            valid_round: Round::Nil,
-                            proposer,
-                            value,
-                            validity: Validity::Valid,
-                        };
-
-                        // 5. CRITICAL: Store the proposal BEFORE replying to consensus
-                        // The commit() method later requires this proposal to be in the store,
-                        // otherwise it will abort with "Trying to commit a value that is not decided"
-                        if let Err(e) = state.store_synced_proposal(proposed_value.clone()).await {
-                            error!(%height, %round, "Failed to store synced proposal: {}", e);
-                            // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
-                            let _ = reply.send(None);
-                            continue;
-                        }
-
-                        // 6. Send to consensus
-                        // Now it's safe to reply - when consensus decides, commit() will find the proposal
-                        // Wrap in Some() per Malachite protocol (expects Option<ProposedValue>)
+                match state
+                    .process_synced_package(height, round, proposer.clone(), package)
+                    .await
+                {
+                    Ok(Some(proposed_value)) => {
                         if reply.send(Some(proposed_value)).is_err() {
                             error!("Failed to send ProcessSyncedValue success reply");
                         } else {
                             info!(%height, %round, "✅ Successfully processed Full sync package");
                         }
                     }
-
-                    SyncedValuePackage::MetadataOnly { value: _value } => {
-                        // CRITICAL ERROR: MetadataOnly should NEVER happen in pre-v0
-                        // We have no pruning, so data should always be available.
-                        // If we receive MetadataOnly, it means:
-                        // 1. The peer is buggy/malicious, OR
-                        // 2. Our GetDecidedValue is broken
-                        //
-                        // We MUST NOT proceed because:
-                        // - We have no execution payload bytes
-                        // - When consensus decides, Decided handler will call
-                        //   state.get_block_data() which returns None
-                        // - Node will crash with "Missing block bytes for decided value"
-                        //
-                        // Better to fail fast here than crash later.
-                        error!(
-                            %height,
-                            %round,
-                            "🔴 CRITICAL: Received MetadataOnly sync package in pre-v0! \
-                            This should NEVER happen (no pruning yet). \
-                            Peer may be buggy or storage is corrupted. \
-                            Skipping this synced value to prevent node crash."
-                        );
-
-                        // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
-                        // This synced value is invalid for pre-v0 and must be rejected
+                    Ok(None) => {
                         let _ = reply.send(None);
-                        continue;
+                    }
+                    Err(e) => {
+                        error!(%height, %round, "Failed to process synced package: {}", e);
+                        let _ = reply.send(None);
                     }
                 }
-                                /*
-                // TODO: This handler is critical for state sync to work correctly.
-                // The commented-out code below provides a robust implementation.
-                // When a synced value is received, it MUST be stored in the application's
-                // undecided store before being sent back to the consensus engine. This ensures
-                // that when the engine later sends an `AppMsg::Decided` message for this height,
-                // our application can find the proposal in its own database to commit.
-                // Failure to store the value here will cause the commit to fail.
-
-                info!(%height, %round, "🟢🟢 Processing synced value");
-
-                // First, decode the raw bytes into a proper Value.
-                let value = match decode_value(value_bytes) {
-                    Some(v) => v,
-                    None => {
-                        error!("Failed to decode synced value for height {}", height);
-                        // If we can't decode it, we can't process it.
-                        // Sending `None` tells the engine the value was invalid.
-                        if reply.send(None).is_err() {
-                            error!("Failed to send ProcessSyncedValue reply for invalid value");
-                        }
-                        return; // Stop processing
-                    }
-                };
-
-                // Create the full ProposedValue struct.
-                let proposed_value = ProposedValue {
-                    height,
-                    round,
-                    valid_round: Round::Nil, // Synced values are already committed, so POL round is not relevant here.
-                    proposer,
-                    value,
-                    validity: Validity::Valid, // We assume synced values from peers are valid.
-                };
-
-                // Before replying, store the proposal in our own database.
-                if let Err(e) = state.store.store_undecided_proposal(proposed_value.clone()).await {
-                    error!("Failed to store synced value for height {}: {}", height, e);
-                    // If we can't store it, we can't proceed with the commit later.
-                    // It's better to tell the engine this value is invalid.
-                    if reply.send(None).is_err() {
-                        error!("Failed to send ProcessSyncedValue reply for storage failure");
-                    }
-                    return;
-                }
-
-                // Now, send the valid, stored ProposedValue to consensus.
-                if reply.send(Some(proposed_value)).is_err() {
-                    error!("Failed to send ProcessSyncedValue reply");
-                }
-                */
-
             }
 
             // If, on the other hand, we are not lagging behind but are instead asked by one of

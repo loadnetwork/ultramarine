@@ -77,6 +77,26 @@ make clean-net
 ```
 For more details on the testnet setup, see `docs/DEV_WORKFLOW.md`.
 
+### Blob Testing (EIP-4844)
+
+Test blob sidecars with full observability:
+
+```bash
+# Start testnet
+make all
+
+# Run blob spam (60s @ 50 TPS, 6 blobs/tx)
+make spam-blobs
+
+# Check blob metrics
+curl http://localhost:29000/metrics | grep blob_engine
+
+# View Grafana dashboard at http://localhost:3000
+# Look for the "Blob Engine" section with 9 panels
+```
+
+Blob metrics track verification, storage, lifecycle (promoted/dropped/pruned), and consensus integration. See `docs/DEV_WORKFLOW.md` for complete blob testing guide.
+
 ### Before a PR
 
 ```bash

@@ -142,7 +142,7 @@ impl BlobStore for RocksDbBlobStore {
         height: Height,
         round: i64,
         blobs: &[BlobSidecar],
-    ) -> Result<(), BlobStoreError> {
+    ) -> Result<usize, BlobStoreError> {
         let db = self.db.clone();
         let blobs = blobs.to_vec();
 
@@ -151,6 +151,7 @@ impl BlobStore for RocksDbBlobStore {
                 .cf_handle(CF_UNDECIDED)
                 .ok_or_else(|| BlobStoreError::ColumnFamilyNotFound(CF_UNDECIDED.to_string()))?;
 
+            let count = blobs.len();
             for blob in &blobs {
                 let key = BlobKey::new(height, round, blob.index).to_undecided_key();
                 let value = Self::serialize_blob(blob)?;
@@ -160,11 +161,11 @@ impl BlobStore for RocksDbBlobStore {
             debug!(
                 height = height.as_u64(),
                 round = round,
-                count = blobs.len(),
+                count = count,
                 "Stored undecided blobs"
             );
 
-            Ok(())
+            Ok(count)
         })
         .await
         .map_err(BlobStoreError::TaskJoin)?
@@ -214,7 +215,11 @@ impl BlobStore for RocksDbBlobStore {
         .map_err(BlobStoreError::TaskJoin)?
     }
 
-    async fn mark_decided(&self, height: Height, round: i64) -> Result<(), BlobStoreError> {
+    async fn mark_decided(
+        &self,
+        height: Height,
+        round: i64,
+    ) -> Result<(usize, usize), BlobStoreError> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -229,7 +234,8 @@ impl BlobStore for RocksDbBlobStore {
             // IMPORTANT: Collect all items before deleting to avoid iterator invalidation.
             // RocksDB iterators become invalid when you mutate the CF during iteration.
             // See: https://github.com/facebook/rocksdb/wiki/Iterator
-            let mut items_to_move = Self::collect_undecided_entries(&db, cf_undecided, height, Some(round))?;
+            let mut items_to_move =
+                Self::collect_undecided_entries(&db, cf_undecided, height, Some(round))?;
 
             if items_to_move.is_empty() {
                 debug!(
@@ -242,9 +248,15 @@ impl BlobStore for RocksDbBlobStore {
 
             // Now process items after iteration completes
             let mut moved_count = 0;
+            let mut total_bytes = 0;
             for (key_bytes, value_bytes) in items_to_move {
                 // Parse key to get blob index
                 if let Some(blob_key) = BlobKey::from_undecided_key(&key_bytes) {
+                    // Deserialize to get blob size
+                    if let Ok(blob) = Self::deserialize_blob(&value_bytes) {
+                        total_bytes += blob.blob.size();
+                    }
+
                     // Write to decided CF with height-only key
                     let decided_key = blob_key.to_decided_key();
                     db.put_cf(cf_decided, decided_key, value_bytes)?;
@@ -262,10 +274,11 @@ impl BlobStore for RocksDbBlobStore {
                 height = height.as_u64(),
                 round = round,
                 count = moved_count,
+                bytes = total_bytes,
                 "Marked blobs as decided"
             );
 
-            Ok(())
+            Ok((moved_count, total_bytes))
         })
         .await
         .map_err(BlobStoreError::TaskJoin)?
@@ -305,7 +318,11 @@ impl BlobStore for RocksDbBlobStore {
         .map_err(BlobStoreError::TaskJoin)?
     }
 
-    async fn drop_round(&self, height: Height, round: i64) -> Result<(), BlobStoreError> {
+    async fn drop_round(
+        &self,
+        height: Height,
+        round: i64,
+    ) -> Result<(usize, usize), BlobStoreError> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -318,20 +335,25 @@ impl BlobStore for RocksDbBlobStore {
             let prefix = Self::undecided_prefix(height, round);
             let iter = db.prefix_iterator_cf(cf, &prefix);
 
-            let mut keys_to_delete = Vec::new();
+            let mut items_to_delete = Vec::new();
             for item in iter {
-                let (key_bytes, _) = item?;
+                let (key_bytes, value_bytes) = item?;
 
                 if !key_bytes.starts_with(&prefix) {
                     break;
                 }
 
-                keys_to_delete.push(key_bytes.to_vec());
+                items_to_delete.push((key_bytes.to_vec(), value_bytes.to_vec()));
             }
 
             // Delete after iteration completes (safe now)
-            let deleted_count = keys_to_delete.len();
-            for key in keys_to_delete {
+            let deleted_count = items_to_delete.len();
+            let mut total_bytes = 0;
+            for (key, value_bytes) in items_to_delete {
+                // Deserialize to get blob size
+                if let Ok(blob) = Self::deserialize_blob(&value_bytes) {
+                    total_bytes += blob.blob.size();
+                }
                 db.delete_cf(cf, &key)?;
             }
 
@@ -339,10 +361,11 @@ impl BlobStore for RocksDbBlobStore {
                 height = height.as_u64(),
                 round = round,
                 count = deleted_count,
+                bytes = total_bytes,
                 "Dropped blobs for round"
             );
 
-            Ok(())
+            Ok((deleted_count, total_bytes))
         })
         .await
         .map_err(BlobStoreError::TaskJoin)?
@@ -370,6 +393,14 @@ impl BlobStore for RocksDbBlobStore {
         .map_err(BlobStoreError::TaskJoin)?
     }
 
+    /// Permanently deletes decided blobs older than the given height from RocksDB.
+    ///
+    /// NOTE: This is a basic implementation for Phase 5 testing. Phase 6 will add:
+    /// - Configurable retention policies
+    /// - Multiple pruning strategies (time-based, size-based)
+    /// - Optional archival before deletion
+    ///
+    /// Current behavior: Blobs are permanently deleted with no backup/archive.
     async fn prune_before(&self, height: Height) -> Result<usize, BlobStoreError> {
         let db = self.db.clone();
 

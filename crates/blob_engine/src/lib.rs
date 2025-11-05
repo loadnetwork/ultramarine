@@ -35,7 +35,13 @@
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Initialize storage and engine
 //! let store = RocksDbBlobStore::open("./blob_data")?;
-//! let engine = BlobEngineImpl::new(store)?;
+//! let metrics = ultramarine_blob_engine::BlobEngineMetrics::new();
+//! let engine = BlobEngineImpl::new(store, metrics)?;
+//! #
+//! # let height = Height::new(100);
+//! # let round = 1;
+//! # let sidecars = vec![];
+//! # let old_height = Height::new(50);
 //!
 //! // During proposal handling:
 //! // 1. Verify and store blobs
@@ -61,10 +67,12 @@
 
 pub mod engine;
 pub mod error;
+pub mod metrics;
 pub mod store;
 mod verifier;
 
 // Re-export main types
 pub use engine::{BlobEngine, BlobEngineImpl};
 pub use error::{BlobEngineError, BlobStoreError, BlobVerificationError};
+pub use metrics::BlobEngineMetrics;
 pub use store::{BlobKey, BlobStore};

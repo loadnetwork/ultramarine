@@ -79,12 +79,14 @@ pub trait BlobStore: Send + Sync + Clone {
     /// These blobs are associated with a specific (height, round) and will be:
     /// - Promoted to decided when the block is finalized
     /// - Deleted when the round fails or times out
+    ///
+    /// Returns the number of blobs stored.
     async fn put_undecided_blobs(
         &self,
         height: Height,
         round: i64,
         blobs: &[BlobSidecar],
-    ) -> Result<(), BlobStoreError>;
+    ) -> Result<usize, BlobStoreError>;
 
     /// Get all undecided blobs for a specific (height, round)
     async fn get_undecided_blobs(
@@ -98,7 +100,13 @@ pub trait BlobStore: Send + Sync + Clone {
     /// This is called when a block is finalized. Blobs are moved from
     /// the undecided storage (keyed by height+round) to decided storage
     /// (keyed by height only).
-    async fn mark_decided(&self, height: Height, round: i64) -> Result<(), BlobStoreError>;
+    ///
+    /// Returns (blob_count, total_bytes) of promoted blobs.
+    async fn mark_decided(
+        &self,
+        height: Height,
+        round: i64,
+    ) -> Result<(usize, usize), BlobStoreError>;
 
     /// Get all decided blobs for a height
     ///
@@ -108,7 +116,13 @@ pub trait BlobStore: Send + Sync + Clone {
     /// Delete all blobs for a specific round
     ///
     /// Called when a round fails, times out, or is superseded.
-    async fn drop_round(&self, height: Height, round: i64) -> Result<(), BlobStoreError>;
+    ///
+    /// Returns (blob_count, total_bytes) of dropped blobs.
+    async fn drop_round(
+        &self,
+        height: Height,
+        round: i64,
+    ) -> Result<(usize, usize), BlobStoreError>;
 
     /// Delete specific blobs after successful archival
     ///

@@ -564,3 +564,16 @@ spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 .PHONY: spam-blobs
 spam-blobs: ## Spam the EL with EIP-4844 blob transactions (60s @ 50 tps, 128 blobs per tx).
 	cargo run --bin ultramarine-utils -- spam --time=60 --rate=50 --rpc-url=http://127.0.0.1:8545 --blobs --blobs-per-tx=6
+
+.PHONY: itest
+itest: ## Run integration tests (verbose).
+	@echo "🧪 Running integration tests..."
+	cargo test -p ultramarine-test -- --ignored --nocapture
+
+.PHONY: itest-quick
+itest-quick: ## Run integration tests (quiet output).
+	cargo test -p ultramarine-test -- --ignored
+
+.PHONY: itest-list
+itest-list: ## List available integration tests.
+	cargo test -p ultramarine-test -- --ignored --list

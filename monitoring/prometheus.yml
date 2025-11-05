@@ -5,7 +5,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['reth0:9001']
+      - targets: ['host.docker.internal:9100']
         labels:
           client_name: "reth"
           client_type: "execution"
@@ -13,7 +13,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['reth1:9001']
+      - targets: ['host.docker.internal:9101']
         labels:
           client_name: "reth"
           client_type: "execution"
@@ -21,7 +21,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['reth2:9001']
+      - targets: ['host.docker.internal:9102']
         labels:
           client_name: "reth"
           client_type: "execution"
@@ -30,7 +30,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['ultramarine0:29000']
+      - targets: ['host.docker.internal:29000']
         labels:
           client_name: "malachite"
           client_type: "consensus"
@@ -38,7 +38,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['ultramarine1:29001']
+      - targets: ['host.docker.internal:29001']
         labels:
           client_name: "malachite"
           client_type: "consensus"
@@ -46,7 +46,7 @@ scrape_configs:
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['ultramarine2:29002']
+      - targets: ['host.docker.internal:29002']
         labels:
           client_name: "malachite"
           client_type: "consensus"

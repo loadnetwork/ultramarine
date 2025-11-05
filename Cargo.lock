@@ -330,7 +330,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "auto_impl",
- "dashmap",
+ "dashmap 6.1.0",
  "either",
  "futures",
  "futures-utils-wasm",
@@ -1963,6 +1963,19 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -3548,7 +3561,7 @@ source = "git+https://github.com/circlefin/malachite.git?rev=b205f4252f3064d9a74
 dependencies = [
  "async-trait",
  "bytes",
- "dashmap",
+ "dashmap 6.1.0",
  "derive-where",
  "displaydoc",
  "eyre",
@@ -5281,7 +5294,7 @@ checksum = "1d65972a0286ef14c43c6daafbac6cf15e96496446147683b2905292c35cc178"
 dependencies = [
  "async-trait",
  "bon",
- "dashmap",
+ "dashmap 6.1.0",
  "futures",
  "once_cell",
  "strum 0.26.3",
@@ -6019,6 +6032,31 @@ checksum = "a84f14a19e9a014bb9f4512488d9829a68e04ecabffb0f9904cd1ace94598177"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "serial_test"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e56dd856803e253c8f298af3f4d7eb0ae5e23a737252cd90bb4f3b435033b2d"
+dependencies = [
+ "dashmap 5.5.3",
+ "futures",
+ "lazy_static",
+ "log",
+ "parking_lot",
+ "serial_test_derive",
+]
+
+[[package]]
+name = "serial_test_derive"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91d129178576168c589c9ec973feedf7d3126c01ac2bf08795109aa35b69fb8f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
 ]
 
 [[package]]
@@ -6869,6 +6907,7 @@ dependencies = [
  "async-trait",
  "c-kzg",
  "hex",
+ "informalsystems-malachitebft-app-channel",
  "informalsystems-malachitebft-proto",
  "prost",
  "rocksdb",
@@ -6931,6 +6970,7 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sha3",
  "tempfile",
  "thiserror 2.0.17",
@@ -7015,6 +7055,32 @@ dependencies = [
  "ultramarine-execution",
  "ultramarine-types",
  "url",
+]
+
+[[package]]
+name = "ultramarine-test"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "async-trait",
+ "bytes",
+ "c-kzg",
+ "color-eyre",
+ "ethereum_ssz",
+ "hex",
+ "informalsystems-malachitebft-app",
+ "informalsystems-malachitebft-app-channel",
+ "informalsystems-malachitebft-proto",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tokio",
+ "ultramarine-blob-engine",
+ "ultramarine-consensus",
+ "ultramarine-execution",
+ "ultramarine-types",
 ]
 
 [[package]]
