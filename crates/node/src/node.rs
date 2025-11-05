@@ -156,6 +156,7 @@ impl Node for App {
 
         let registry = SharedRegistry::global().with_moniker(&self.config.moniker);
         let metrics = DbMetrics::register(&registry);
+        let blob_metrics = ultramarine_blob_engine::BlobEngineMetrics::register(&registry);
 
         if self.config.metrics.enabled {
             tokio::spawn(metrics::serve(self.config.metrics.listen_addr));
@@ -165,11 +166,19 @@ impl Node for App {
 
         // Initialize blob engine for EIP-4844 blob storage and KZG verification
         let blob_store = RocksDbBlobStore::open(self.get_home_dir().join("blob_store.db"))?;
-        let blob_engine = BlobEngineImpl::new(blob_store)?;
+        let blob_engine = BlobEngineImpl::new(blob_store, blob_metrics.clone())?;
 
         let start_height = self.start_height.unwrap_or_default();
-        let mut state =
-            State::new(genesis, ctx, signing_provider, address, start_height, store, blob_engine);
+        let mut state = State::new(
+            genesis,
+            ctx,
+            signing_provider,
+            address,
+            start_height,
+            store,
+            blob_engine,
+            blob_metrics, // Clone already done above
+        );
 
         // Phase 4: Hydrate blob parent root from BlobMetadata (Layer 2)
         state.hydrate_blob_parent_root().await?;

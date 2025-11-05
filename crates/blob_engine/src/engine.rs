@@ -1,7 +1,7 @@
 /// ! High-level blob engine orchestration
 use async_trait::async_trait;
 use tracing::{debug, info};
-use ultramarine_types::{height::Height, proposal_part::BlobSidecar};
+use ultramarine_types::{blob::BYTES_PER_BLOB, height::Height, proposal_part::BlobSidecar};
 
 use crate::{error::BlobEngineError, store::BlobStore, verifier::BlobVerifier};
 
@@ -15,12 +15,20 @@ use crate::{error::BlobEngineError, store::BlobStore, verifier::BlobVerifier};
 /// ## Usage
 ///
 /// ```no_run
-/// use ultramarine_blob_engine::{BlobEngine, BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
+/// use ultramarine_blob_engine::{
+///     BlobEngine, BlobEngineImpl, BlobEngineMetrics, store::rocksdb::RocksDbBlobStore,
+/// };
+/// use ultramarine_types::height::Height;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Create store and engine
 /// let store = RocksDbBlobStore::open("./blob_data")?;
-/// let engine = BlobEngineImpl::new(store)?;
+/// let metrics = BlobEngineMetrics::new();
+/// let engine = BlobEngineImpl::new(store, metrics)?;
+/// #
+/// # let height = Height::new(100);
+/// # let round = 1;
+/// # let sidecars = vec![];
 ///
 /// // Verify and store blobs from a proposal
 /// engine.verify_and_store(height, round, &sidecars).await?;
@@ -149,29 +157,34 @@ where
 {
     verifier: BlobVerifier,
     store: S,
+    metrics: crate::metrics::BlobEngineMetrics,
 }
 
 impl<S> BlobEngineImpl<S>
 where
     S: BlobStore,
 {
-    /// Create a new blob engine with the given storage backend
+    /// Create a new blob engine with the given storage backend and metrics
     ///
     /// Initializes the KZG verifier with the Ethereum mainnet trusted setup.
     ///
     /// # Arguments
     ///
     /// * `store` - Storage backend (e.g., RocksDbBlobStore)
+    /// * `metrics` - Prometheus metrics for observability
     ///
     /// # Errors
     ///
     /// Returns an error if the trusted setup cannot be loaded.
-    pub fn new(store: S) -> Result<Self, BlobEngineError> {
+    pub fn new(
+        store: S,
+        metrics: crate::metrics::BlobEngineMetrics,
+    ) -> Result<Self, BlobEngineError> {
         let verifier = BlobVerifier::new().map_err(|e| {
             BlobEngineError::InvalidConfig(format!("Failed to initialize KZG verifier: {}", e))
         })?;
 
-        Ok(Self { verifier, store })
+        Ok(Self { verifier, store, metrics })
     }
 }
 
@@ -191,7 +204,7 @@ where
             return Ok(());
         }
 
-        // Step 1: Verify KZG proofs (security gate)
+        // Step 1: Verify KZG proofs (security gate) - with timing
         debug!(
             height = height.as_u64(),
             round = round,
@@ -199,8 +212,18 @@ where
             "Verifying KZG proofs"
         );
 
+        let start = std::time::Instant::now();
         let sidecar_refs: Vec<&BlobSidecar> = sidecars.iter().collect();
-        self.verifier.verify_blob_sidecars_batch(&sidecar_refs).map_err(|verification_error| {
+        let verification_result = self.verifier.verify_blob_sidecars_batch(&sidecar_refs);
+        let duration = start.elapsed();
+
+        // Record verification metrics
+        self.metrics.observe_verification_time(duration);
+
+        verification_result.map_err(|verification_error| {
+            // Record failure
+            self.metrics.record_verifications_failure(sidecars.len());
+
             // Extract the actual failing blob index from the verification error
             // This is critical for debugging - we need to report which blob failed,
             // not just assume it's the first one
@@ -214,20 +237,31 @@ where
             BlobEngineError::VerificationFailed { height, index, source: verification_error }
         })?;
 
+        // Record successful verification
+        self.metrics.record_verifications_success(sidecars.len());
+
         info!(
             height = height.as_u64(),
             round = round,
             count = sidecars.len(),
+            duration_ms = duration.as_millis(),
             "✅ KZG verification passed"
         );
 
         // Step 2: Store verified blobs
-        self.store.put_undecided_blobs(height, round, sidecars).await?;
+        let stored_count = self.store.put_undecided_blobs(height, round, sidecars).await?;
+
+        // Calculate total bytes
+        let total_bytes: usize = sidecars.iter().map(|s| s.blob.size()).sum();
+
+        // Update storage metrics
+        self.metrics.add_undecided_storage(total_bytes, stored_count);
 
         info!(
             height = height.as_u64(),
             round = round,
-            count = sidecars.len(),
+            count = stored_count,
+            bytes = total_bytes,
             "Stored verified blobs"
         );
 
@@ -235,9 +269,40 @@ where
     }
 
     async fn mark_decided(&self, height: Height, round: i64) -> Result<(), BlobEngineError> {
-        self.store.mark_decided(height, round).await?;
+        let (blob_count, total_bytes) = self.store.mark_decided(height, round).await?;
 
-        info!(height = height.as_u64(), round = round, "Marked blobs as decided");
+        if blob_count == 0 {
+            // No blobs were moved in this call. This can happen if:
+            // 1. The block legitimately had zero blobs.
+            // 2. mark_decided() was invoked twice (e.g. proposer + commit path).
+            //
+            // In both cases we want the gauge to reflect the number of blobs currently
+            // available for import at this height, but we must not mutate the storage
+            // or counters again.
+            let decided = self.store.get_decided_blobs(height).await?;
+            let decided_count = decided.len();
+            self.metrics.set_blobs_per_block(decided_count);
+            debug!(
+                height = height.as_u64(),
+                round = round,
+                "mark_decided called with no pending blobs; gauge updated to decided count {decided_count}"
+            );
+            return Ok(());
+        }
+
+        // Update metrics: promote blobs from undecided to decided
+        self.metrics.promote_blobs(total_bytes, blob_count);
+
+        // Set gauge for blobs in this finalized block
+        self.metrics.set_blobs_per_block(blob_count);
+
+        info!(
+            height = height.as_u64(),
+            round = round,
+            count = blob_count,
+            bytes = total_bytes,
+            "Marked blobs as decided"
+        );
 
         Ok(())
     }
@@ -251,17 +316,37 @@ where
     }
 
     async fn drop_round(&self, height: Height, round: i64) -> Result<(), BlobEngineError> {
-        self.store.drop_round(height, round).await?;
+        let (blob_count, total_bytes) = self.store.drop_round(height, round).await?;
 
-        debug!(height = height.as_u64(), round = round, "Dropped blobs for round");
+        // Update metrics: drop undecided blobs
+        self.metrics.drop_blobs(total_bytes, blob_count);
+
+        debug!(
+            height = height.as_u64(),
+            round = round,
+            count = blob_count,
+            bytes = total_bytes,
+            "Dropped blobs for round"
+        );
 
         Ok(())
     }
 
     async fn mark_archived(&self, height: Height, indices: &[u16]) -> Result<(), BlobEngineError> {
+        let blob_count = indices.len();
+        let total_bytes = blob_count * BYTES_PER_BLOB;
+
         self.store.delete_archived(height, indices).await?;
 
-        debug!(height = height.as_u64(), count = indices.len(), "Marked blobs as archived");
+        // Update metrics: prune decided blobs
+        self.metrics.prune_blobs(total_bytes, blob_count);
+
+        debug!(
+            height = height.as_u64(),
+            count = blob_count,
+            bytes = total_bytes,
+            "Marked blobs as archived"
+        );
 
         Ok(())
     }
@@ -269,7 +354,19 @@ where
     async fn prune_archived_before(&self, height: Height) -> Result<usize, BlobEngineError> {
         let count = self.store.prune_before(height).await?;
 
-        info!(before_height = height.as_u64(), count = count, "Pruned archived blobs");
+        // Estimate bytes (each blob is BYTES_PER_BLOB)
+        // TODO: Update store API to return actual bytes if needed
+        let total_bytes = count * BYTES_PER_BLOB;
+
+        // Update metrics: prune decided blobs
+        self.metrics.prune_blobs(total_bytes, count);
+
+        info!(
+            before_height = height.as_u64(),
+            count = count,
+            bytes = total_bytes,
+            "Pruned archived blobs"
+        );
 
         Ok(count)
     }
@@ -315,7 +412,8 @@ mod tests {
     async fn test_engine_initialization() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = RocksDbBlobStore::open(temp_dir.path()).unwrap();
-        let engine = BlobEngineImpl::new(store);
+        let metrics = crate::metrics::BlobEngineMetrics::new();
+        let engine = BlobEngineImpl::new(store, metrics);
 
         assert!(engine.is_ok(), "Failed to initialize blob engine");
     }
@@ -325,7 +423,8 @@ mod tests {
     async fn test_verify_and_store_flow() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = RocksDbBlobStore::open(temp_dir.path()).unwrap();
-        let engine = BlobEngineImpl::new(store).unwrap();
+        let metrics = crate::metrics::BlobEngineMetrics::new();
+        let engine = BlobEngineImpl::new(store, metrics).unwrap();
 
         let height = Height::new(100);
         let round = 1;
@@ -351,7 +450,8 @@ mod tests {
         store.put_undecided_blobs(height, round, &blobs).await.unwrap();
 
         // Initialize engine
-        let engine = BlobEngineImpl::new(store).unwrap();
+        let metrics = crate::metrics::BlobEngineMetrics::new();
+        let engine = BlobEngineImpl::new(store, metrics).unwrap();
 
         // Mark as decided
         engine.mark_decided(height, round).await.unwrap();
@@ -378,7 +478,8 @@ mod tests {
 
         store.put_undecided_blobs(height, proposed_round, &blobs).await.unwrap();
 
-        let engine = BlobEngineImpl::new(store).unwrap();
+        let metrics = crate::metrics::BlobEngineMetrics::new();
+        let engine = BlobEngineImpl::new(store, metrics).unwrap();
 
         engine.mark_decided(height, commit_round).await.unwrap();
 
@@ -389,6 +490,39 @@ mod tests {
             "Blobs stored under round {} were not promoted when mark_decided was called with round {}",
             proposed_round,
             commit_round
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_decided_is_idempotent_for_metrics() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = RocksDbBlobStore::open(temp_dir.path()).unwrap();
+
+        let height = Height::new(777);
+        let round = 4;
+        let blobs = vec![create_test_blob(0)];
+
+        store.put_undecided_blobs(height, round, &blobs).await.unwrap();
+
+        let metrics = crate::metrics::BlobEngineMetrics::new();
+        let engine = BlobEngineImpl::new(store, metrics.clone()).unwrap();
+
+        // First promotion updates metrics and gauge.
+        engine.mark_decided(height, round).await.unwrap();
+        let first_snapshot = metrics.snapshot();
+        assert_eq!(first_snapshot.blobs_per_block, 1);
+        assert_eq!(first_snapshot.lifecycle_promoted, 1);
+
+        // Second promotion should be a no-op for counters/gauges.
+        engine.mark_decided(height, round).await.unwrap();
+        let second_snapshot = metrics.snapshot();
+        assert_eq!(
+            second_snapshot.blobs_per_block, 1,
+            "Gauge should remain stable after idempotent promotion"
+        );
+        assert_eq!(
+            second_snapshot.lifecycle_promoted, 1,
+            "Promotion counter should not increment on duplicate call"
         );
     }
 }

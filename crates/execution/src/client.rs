@@ -9,6 +9,7 @@ use alloy_rpc_types_engine::{
     ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus,
     PayloadStatusEnum,
 };
+use async_trait::async_trait;
 use color_eyre::eyre;
 use tracing::{debug, info};
 use ultramarine_types::{
@@ -50,6 +51,9 @@ impl fmt::Debug for ExecutionClient {
 }
 
 impl ExecutionClient {
+    pub fn as_notifier(&self) -> ExecutionClientNotifier<'_> {
+        ExecutionClientNotifier { client: self }
+    }
     /// Creates a new `ExecutionClient` from the given configuration.
     ///
     /// This function is async because it needs to establish a connection
@@ -479,5 +483,28 @@ impl ExecutionClient {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs()
+    }
+}
+
+/// Adapter that exposes `ExecutionClient` functionality via the `ExecutionNotifier` trait.
+pub struct ExecutionClientNotifier<'a> {
+    client: &'a ExecutionClient,
+}
+
+#[async_trait]
+impl<'a> crate::notifier::ExecutionNotifier for ExecutionClientNotifier<'a> {
+    async fn notify_new_block(
+        &mut self,
+        payload: ExecutionPayloadV3,
+        versioned_hashes: Vec<BlockHash>,
+    ) -> color_eyre::Result<PayloadStatus> {
+        self.client.notify_new_block(payload, versioned_hashes).await
+    }
+
+    async fn set_latest_forkchoice_state(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> color_eyre::Result<BlockHash> {
+        self.client.set_latest_forkchoice_state(block_hash).await
     }
 }

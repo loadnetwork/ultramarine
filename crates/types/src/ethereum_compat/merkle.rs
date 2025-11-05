@@ -551,20 +551,14 @@ mod tests {
 
         // Body A: Uses default execution header (gas_limit=0, timestamp=0, etc.)
         let header_a = test_execution_header();
-        let body_a = BeaconBlockBodyMinimal::from_ultramarine_data(
-            commitments.clone(),
-            &header_a,
-        );
+        let body_a = BeaconBlockBodyMinimal::from_ultramarine_data(commitments.clone(), &header_a);
 
         // Body B: Uses DIFFERENT execution header (different gas_limit, timestamp, etc.)
         let mut header_b = test_execution_header();
-        header_b.gas_limit = 30_000_000;  // Different from body_a
-        header_b.timestamp = 1234567890;   // Different from body_a
-        header_b.block_number = 100;       // Different from body_a
-        let body_b = BeaconBlockBodyMinimal::from_ultramarine_data(
-            commitments.clone(),
-            &header_b,
-        );
+        header_b.gas_limit = 30_000_000; // Different from body_a
+        header_b.timestamp = 1234567890; // Different from body_a
+        header_b.block_number = 100; // Different from body_a
+        let body_b = BeaconBlockBodyMinimal::from_ultramarine_data(commitments.clone(), &header_b);
 
         // Verify bodies have different roots (execution_payload_root differs)
         let body_root_a = body_a.compute_body_root();

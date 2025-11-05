@@ -11,18 +11,8 @@
 //!
 //! ## Usage
 //!
-//! ```no_run
-//! use ultramarine_consensus::blob_verifier::BlobVerifier;
-//!
-//! // Initialize with trusted setup (once at startup)
-//! let verifier = BlobVerifier::new()?;
-//!
-//! // Verify a single blob sidecar
-//! verifier.verify_blob_sidecar(&sidecar)?;
-//!
-//! // Or verify multiple blobs at once (faster)
-//! verifier.verify_blob_sidecars_batch(&sidecars)?;
-//! ```
+//! The verifier is used internally by the BlobEngine and is not directly exposed.
+//! Use `BlobEngine::verify_and_store()` instead, which handles verification automatically.
 
 use std::sync::Arc;
 

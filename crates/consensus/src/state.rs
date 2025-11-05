@@ -7,6 +7,7 @@ use std::{
     convert::TryFrom,
 };
 
+use alloy_rpc_types_engine::{ExecutionPayloadV3, PayloadStatus};
 use bytes::Bytes;
 use color_eyre::eyre;
 use ethereum_hashing::hash32_concat;
@@ -21,14 +22,16 @@ use malachitebft_app_channel::app::{
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha3::Digest;
+use ssz::Decode;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 use tree_hash::TreeHash;
 use ultramarine_blob_engine::{BlobEngine, BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
+use ultramarine_execution::notifier::ExecutionNotifier;
 use ultramarine_types::{
     address::Address,
     // Phase 3: Import blob types for streaming
-    aliases::B256,
+    aliases::{B256, Block, BlockHash},
     blob::{BlobsBundle, KzgCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK},
     // Phase 4: Import three-layer metadata types
     blob_metadata::BlobMetadata,
@@ -44,6 +47,7 @@ use ultramarine_types::{
     height::Height,
     proposal_part::{BlobSidecar, ProposalData, ProposalFin, ProposalInit, ProposalPart},
     signing::Ed25519Provider,
+    sync::SyncedValuePackage,
     validator_set::ValidatorSet,
     value::Value,
     value_metadata::ValueMetadata,
@@ -84,6 +88,7 @@ where
     #[allow(dead_code)]
     rng: StdRng,
     blob_engine: E,
+    pub(crate) blob_metrics: ultramarine_blob_engine::BlobEngineMetrics,
 
     pub current_height: Height,
     pub current_round: Round,
@@ -103,6 +108,21 @@ where
     pub txs_count: u64,
     pub chain_bytes: u64,
     pub start_time: Instant,
+}
+
+/// Summary of the effects triggered while finalizing a decided certificate.
+#[derive(Debug)]
+pub struct DecidedOutcome {
+    /// Execution-layer view of the finalized block.
+    pub execution_block: ExecutionBlock,
+    /// Payload status returned by the execution layer.
+    pub payload_status: PayloadStatus,
+    /// Number of transactions in the execution payload.
+    pub tx_count: usize,
+    /// Size in bytes of the SSZ-encoded execution payload.
+    pub block_bytes: usize,
+    /// Number of blob sidecars imported for the block.
+    pub blob_count: usize,
 }
 
 /// Represents errors that can occur during the verification of a proposal's signature.
@@ -138,6 +158,7 @@ where
     /// # Arguments
     ///
     /// * `blob_engine` - The blob engine for verification and storage
+    /// * `blob_metrics` - Metrics for blob operations (cloneable, shared via Arc)
     /// * Other parameters remain the same
     pub fn new(
         genesis: Genesis,
@@ -147,6 +168,7 @@ where
         height: Height,
         store: Store,
         blob_engine: E,
+        blob_metrics: ultramarine_blob_engine::BlobEngineMetrics,
     ) -> Self {
         Self {
             genesis,
@@ -161,6 +183,7 @@ where
             streams_map: PartStreamsMap::new(),
             rng: StdRng::seed_from_u64(seed_from_address(&address)),
             blob_engine,
+            blob_metrics,
             peers: HashSet::new(),
 
             latest_block: None,
@@ -180,6 +203,19 @@ where
     /// Returns a reference to the blob engine for blob operations
     pub fn blob_engine(&self) -> &E {
         &self.blob_engine
+    }
+
+    /// Returns the cached parent root used for subsequent blob proposals.
+    pub fn blob_parent_root(&self) -> B256 {
+        self.last_blob_sidecar_root
+    }
+
+    /// Record a blob sync failure (e.g., verification or storage error during sync)
+    ///
+    /// This is a convenience method that wraps the internal metrics handle,
+    /// maintaining encapsulation and allowing State to control its instrumentation surface.
+    pub fn record_sync_failure(&self) {
+        self.blob_metrics.record_sync_failure();
     }
 
     /// Phase 4: Hydrate blob parent root from latest decided BlobMetadata (Layer 2)
@@ -297,6 +333,42 @@ where
         );
 
         Ok(())
+    }
+
+    /// Helper for tests and tooling: seed the blob metadata store with genesis entry.
+    pub async fn seed_genesis_blob_metadata(&self) -> eyre::Result<()> {
+        self.store.seed_genesis_blob_metadata().await.map_err(|e| eyre::Report::new(e))
+    }
+
+    /// Helper for tests and tooling: persist undecided block data for the given round.
+    pub async fn store_undecided_block_data(
+        &self,
+        height: Height,
+        round: Round,
+        data: Bytes,
+    ) -> eyre::Result<()> {
+        self.store
+            .store_undecided_block_data(height, round, data)
+            .await
+            .map_err(|e| eyre::Report::new(e))
+    }
+
+    /// Helper for tests and tooling: persist undecided blob metadata entry.
+    pub async fn put_blob_metadata_undecided(
+        &self,
+        height: Height,
+        round: Round,
+        metadata: &BlobMetadata,
+    ) -> eyre::Result<()> {
+        self.store
+            .put_blob_metadata_undecided(height, round, metadata)
+            .await
+            .map_err(|e| eyre::Report::new(e))
+    }
+
+    /// Helper for tests and tooling: fetch decided blob metadata for a height.
+    pub async fn get_blob_metadata(&self, height: Height) -> eyre::Result<Option<BlobMetadata>> {
+        self.store.get_blob_metadata(height).await.map_err(|e| eyre::Report::new(e))
     }
 
     fn validator_index(&self, address: &Address) -> Option<u64> {
@@ -495,6 +567,9 @@ where
             rebuilt.push(rebuilt_sidecar);
         }
 
+        // Record metrics: successful restream rebuild from storage
+        self.blob_metrics.record_restream_rebuild();
+
         Ok(rebuilt)
     }
 
@@ -596,6 +671,372 @@ where
             .store_undecided_block_data(height, round, data)
             .await
             .map_err(|e| eyre::Report::new(e))
+    }
+
+    /// Process a [`SyncedValuePackage`] received during state sync.
+    ///
+    /// Returns the `ProposedValue` that should be forwarded to consensus if
+    /// processing succeeds, or `Ok(None)` if validation fails and the package
+    /// must be rejected.
+    pub async fn process_synced_package(
+        &mut self,
+        height: Height,
+        round: Round,
+        proposer: Address,
+        package: SyncedValuePackage,
+    ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
+        match package {
+            SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
+                info!(
+                    height = %height,
+                    round = %round,
+                    payload_size = execution_payload_ssz.len(),
+                    blob_count = blob_sidecars.len(),
+                    "Processing synced value package"
+                );
+
+                let value_metadata = value.metadata.clone();
+
+                self.store_synced_block_data(height, round, execution_payload_ssz).await?;
+
+                if !blob_sidecars.is_empty() {
+                    let round_i64 = round.as_i64();
+
+                    if let Err(e) =
+                        self.blob_engine.verify_and_store(height, round_i64, &blob_sidecars).await
+                    {
+                        error!(
+                            height = %height,
+                            round = %round,
+                            error = %e,
+                            "Failed to verify/store blobs during sync"
+                        );
+                        self.record_sync_failure();
+                        return Ok(None);
+                    }
+
+                    if value_metadata.blob_kzg_commitments.len() != blob_sidecars.len() {
+                        error!(
+                            height = %height,
+                            round = %round,
+                            metadata_count = value_metadata.blob_kzg_commitments.len(),
+                            sidecar_count = blob_sidecars.len(),
+                            "Commitment count mismatch between metadata and sidecars"
+                        );
+                        self.blob_engine.drop_round(height, round_i64).await.ok();
+                        self.record_sync_failure();
+                        return Ok(None);
+                    }
+
+                    let mut mismatch = false;
+                    for sidecar in &blob_sidecars {
+                        let index = usize::from(sidecar.index);
+                        if index >= value_metadata.blob_kzg_commitments.len() ||
+                            value_metadata.blob_kzg_commitments[index] != sidecar.kzg_commitment
+                        {
+                            error!(
+                                height = %height,
+                                round = %round,
+                                blob_index = %index,
+                                "Commitment mismatch: metadata does not match verified sidecar"
+                            );
+                            mismatch = true;
+                            break;
+                        }
+                    }
+
+                    if mismatch {
+                        self.blob_engine.drop_round(height, round_i64).await.ok();
+                        self.store.delete_blob_metadata_undecided(height, round).await.ok();
+                        self.record_sync_failure();
+                        return Ok(None);
+                    }
+
+                    if let Err(e) = self.blob_engine.mark_decided(height, round_i64).await {
+                        error!(
+                            height = %height,
+                            round = %round,
+                            error = %e,
+                            "Failed to mark synced blobs as decided"
+                        );
+                        // Continue despite the error – blobs are verified and stored.
+                    }
+                }
+
+                let parent_blob_root =
+                    if height.as_u64() == 0 { B256::ZERO } else { self.blob_parent_root() };
+
+                let proposer_index = self
+                    .get_validator_set()
+                    .validators
+                    .iter()
+                    .position(|v| v.address == proposer)
+                    .map(|idx| idx as u64);
+
+                let blob_metadata = if value_metadata.blob_kzg_commitments.is_empty() {
+                    BlobMetadata::blobless(
+                        height,
+                        parent_blob_root,
+                        &value_metadata.execution_payload_header,
+                        proposer_index,
+                    )
+                } else {
+                    BlobMetadata::new(
+                        height,
+                        parent_blob_root,
+                        value_metadata.blob_kzg_commitments.clone(),
+                        value_metadata.execution_payload_header.clone(),
+                        proposer_index,
+                    )
+                };
+
+                self.put_blob_metadata_undecided(height, round, &blob_metadata).await?;
+
+                let proposed_value = ProposedValue {
+                    height,
+                    round,
+                    valid_round: Round::Nil,
+                    proposer,
+                    value,
+                    validity: Validity::Valid,
+                };
+
+                self.store_synced_proposal(proposed_value.clone()).await?;
+
+                Ok(Some(proposed_value))
+            }
+            SyncedValuePackage::MetadataOnly { value: _ } => {
+                error!(
+                    height = %height,
+                    round = %round,
+                    "Received metadata-only sync package during pre-v0"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    pub async fn process_decided_certificate<Notify>(
+        &mut self,
+        certificate: &CommitCertificate<LoadContext>,
+        execution_payload_ssz: Bytes,
+        notifier: &mut Notify,
+    ) -> eyre::Result<DecidedOutcome>
+    where
+        Notify: ExecutionNotifier,
+    {
+        if execution_payload_ssz.is_empty() {
+            return Err(eyre::eyre!(
+                "Empty execution payload bytes for decided certificate at height {} round {}",
+                certificate.height,
+                certificate.round
+            ));
+        }
+
+        let execution_payload = ExecutionPayloadV3::from_ssz_bytes(&execution_payload_ssz)
+            .map_err(|e| eyre::eyre!("Failed to decode execution payload: {:?}", e))?;
+
+        let block: Block = execution_payload
+            .clone()
+            .try_into_block()
+            .map_err(|e| eyre::eyre!("Failed to convert execution payload into Block: {}", e))?;
+
+        let height = certificate.height;
+        let round = certificate.round;
+        let round_i64 = round.as_i64();
+
+        let mut versioned_hashes: Vec<BlockHash> =
+            block.body.blob_versioned_hashes_iter().copied().collect();
+
+        if versioned_hashes.is_empty() {
+            if let Some(proposal) = self.load_undecided_proposal(height, round).await? {
+                let commitments = proposal.value.metadata.blob_kzg_commitments.clone();
+                if !commitments.is_empty() {
+                    use sha2::{Digest as Sha2Digest, Sha256 as Sha2Sha256};
+                    versioned_hashes = commitments
+                        .iter()
+                        .map(|commitment| {
+                            let mut hash = Sha2Sha256::digest(commitment.as_bytes());
+                            hash[0] = 0x01;
+                            BlockHash::from_slice(&hash)
+                        })
+                        .collect();
+                }
+            }
+        }
+
+        // CRITICAL: Validate BEFORE promoting to ensure atomicity.
+        // If validation fails, blobs remain in undecided state and can be retried.
+        let mut blob_count = 0usize;
+        let mut blobs_already_decided = false;
+        if !versioned_hashes.is_empty() {
+            debug!(
+                height = %height,
+                round = %round,
+                blob_hashes = versioned_hashes.len(),
+                "Validating blobs before promotion to decided state"
+            );
+
+            // Step 1: Get blobs - try undecided first (normal path), then decided (sync path)
+            let blobs = match self.blob_engine.get_undecided_blobs(height, round_i64).await {
+                Ok(undecided_blobs) if !undecided_blobs.is_empty() => {
+                    undecided_blobs
+                }
+                _ => {
+                    // Blobs not in undecided state - check if they're already decided (sync path)
+                    let decided_blobs = self.blob_engine.get_for_import(height).await.map_err(|e| {
+                        eyre::eyre!("Failed to retrieve blobs at height {}: {}", height, e)
+                    })?;
+                    if !decided_blobs.is_empty() {
+                        blobs_already_decided = true;
+                    }
+                    decided_blobs
+                }
+            };
+
+            // Step 2: Validate blob count
+            if blobs.len() != versioned_hashes.len() {
+                return Err(eyre::eyre!(
+                    "Blob count mismatch at height {} round {}: blob_engine has {} blobs, but block expects {}",
+                    height,
+                    round,
+                    blobs.len(),
+                    versioned_hashes.len()
+                ));
+            }
+
+            // Step 3: Validate versioned hashes
+            use sha2::{Digest, Sha256};
+            let computed_hashes: Vec<BlockHash> = blobs
+                .iter()
+                .map(|sidecar| {
+                    let mut hash = Sha256::digest(sidecar.kzg_commitment.as_bytes());
+                    hash[0] = 0x01;
+                    BlockHash::from_slice(&hash)
+                })
+                .collect();
+
+            if computed_hashes != versioned_hashes {
+                return Err(eyre::eyre!(
+                    "Versioned hash mismatch at height {} round {}: computed from stored commitments != hashes in execution payload",
+                    height,
+                    round
+                ));
+            }
+
+            blob_count = computed_hashes.len();
+
+            debug!(
+                height = %height,
+                round = %round,
+                blob_count = blob_count,
+                already_decided = blobs_already_decided,
+                "Validation passed"
+            );
+        }
+
+        // Step 4: Promote blobs to decided state (or update gauge to 0 for blobless blocks)
+        // Skip promotion if blobs are already decided (sync path)
+        if !blobs_already_decided {
+            debug!(
+                height = %height,
+                round = %round,
+                blob_count = blob_count,
+                "Promoting blobs to decided state"
+            );
+
+            if let Err(e) = self.blob_engine.mark_decided(height, round_i64).await {
+                return Err(eyre::eyre!(
+                    "Failed to promote blobs to decided state at height {} round {}: {}",
+                    height,
+                    round,
+                    e
+                ));
+            }
+        } else {
+            debug!(
+                height = %height,
+                round = %round,
+                blob_count = blob_count,
+                "Blobs already in decided state (sync path)"
+            );
+        }
+
+        let payload_status = notifier
+            .notify_new_block(execution_payload.clone(), versioned_hashes.clone())
+            .await
+            .map_err(|e| eyre::eyre!("Execution layer new_payload failed: {}", e))?;
+        if payload_status.is_invalid() {
+            return Err(eyre::eyre!("Invalid payload status: {}", payload_status.status));
+        }
+
+        let payload_inner = &execution_payload.payload_inner.payload_inner;
+        let block_hash = payload_inner.block_hash;
+        let block_number = payload_inner.block_number;
+        let parent_block_hash = payload_inner.parent_hash;
+        let prev_randao = payload_inner.prev_randao;
+        let tx_count = payload_inner.transactions.len();
+
+        let expected_parent = self.latest_block.as_ref().map(|block| block.block_hash);
+        if let Some(expected_parent_hash) = expected_parent {
+            if expected_parent_hash != parent_block_hash {
+                return Err(eyre::eyre!(
+                    "Parent hash mismatch at height {}: expected {:?} but payload declares {:?}",
+                    height,
+                    expected_parent_hash,
+                    parent_block_hash
+                ));
+            }
+        }
+
+        let _latest_valid_hash = notifier
+            .set_latest_forkchoice_state(block_hash)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to update forkchoice: {}", e))?;
+
+        debug!(
+            height = %height,
+            ?block_hash,
+            ?parent_block_hash,
+            block_number,
+            txs = tx_count,
+            blobs = blob_count,
+            "Finalizing decided certificate"
+        );
+
+        self.txs_count += tx_count as u64;
+        self.chain_bytes += execution_payload_ssz.len() as u64;
+
+        let elapsed_time = self.start_time.elapsed();
+        info!(
+            "👉 stats at height {}: #txs={}, txs/s={:.2}, chain_bytes={}, bytes/s={:.2}",
+            height,
+            self.txs_count,
+            self.txs_count as f64 / elapsed_time.as_secs_f64(),
+            self.chain_bytes,
+            self.chain_bytes as f64 / elapsed_time.as_secs_f64(),
+        );
+
+        debug!("🦄 Block at height {} contains {} transactions", height, tx_count);
+
+        self.commit(certificate.clone()).await?;
+
+        let execution_block = ExecutionBlock {
+            block_hash,
+            block_number,
+            parent_hash: parent_block_hash,
+            timestamp: execution_payload.timestamp(),
+            prev_randao,
+        };
+        self.latest_block = Some(execution_block.clone());
+
+        Ok(DecidedOutcome {
+            execution_block,
+            payload_status,
+            tx_count,
+            block_bytes: execution_payload_ssz.len(),
+            blob_count,
+        })
     }
 
     /// Store a synced proposal value
@@ -800,25 +1241,12 @@ where
         );
         self.last_blob_sidecar_root = new_root;
 
-        // LAYER 3: Mark blobs as decided in blob engine
-        // CRITICAL: This MUST succeed to maintain data availability guarantee.
-        // If blob promotion fails, we cannot finalize the block because the execution layer
-        // would be unable to retrieve blobs for import, breaking the DA layer.
+        // NOTE: Blob promotion to decided state is handled by process_decided_certificate
+        // before validation and EL notification, not here in commit().
+        // This ensures proper ordering: validate first, promote only on success.
+
+        // Track round for cleanup of orphaned blobs
         let round_i64 = certificate.round.as_i64();
-        self.blob_engine.mark_decided(certificate.height, round_i64).await.map_err(|e| {
-            error!(
-                height = %certificate.height,
-                round = %certificate.round,
-                error = %e,
-                "CRITICAL: Failed to mark blobs as decided - aborting commit to preserve DA"
-            );
-            eyre::eyre!(
-                "Cannot finalize block at height {} round {} without blob availability: {}",
-                certificate.height,
-                certificate.round,
-                e
-            )
-        })?;
 
         // Store block data for decided value
         let block_data = self.store.get_block_data(certificate.height, certificate.round).await?;
@@ -891,8 +1319,9 @@ where
         self.blob_rounds.remove(&certificate.height);
 
         // Prune blob engine - keep the same retention policy (last 5 heights)
-        // The prune_archived_before() call removes blobs that have been archived before the given
-        // height
+        // NOTE: This is a basic, non-configurable implementation for Phase 5 testing.
+        // Phase 6 will add configurable retention policies (CLI flags, multiple strategies, etc.)
+        // For now, blobs older than 5 heights are permanently deleted from RocksDB.
         match self.blob_engine.prune_archived_before(retain_height).await {
             Ok(count) if count > 0 => {
                 debug!("Pruned {} blobs before height {}", count, retain_height.as_u64());
@@ -984,6 +1413,7 @@ where
 
         // Phase 2: Extract KZG commitments from blobs bundle
         let commitments = blobs_bundle.map(|bundle| bundle.commitments.clone()).unwrap_or_default();
+        let has_blobs = !commitments.is_empty();
 
         // Phase 2: Create ValueMetadata (~2KB) instead of embedding full data
         let metadata = ValueMetadata::new(header.clone(), commitments.clone());
@@ -1028,6 +1458,13 @@ where
                 eyre::eyre!("Cannot propose without storing BlobMetadata: {}", e)
             },
         )?;
+
+        // Track blob rounds for cleanup (proposer path)
+        // This mirrors the tracking in received_proposal_part() for followers
+        if has_blobs {
+            let round_i64 = round.as_i64();
+            self.blob_rounds.entry(height).or_default().insert(round_i64);
+        }
 
         debug!(
             height = %height,
@@ -1788,6 +2225,7 @@ mod tests {
         let provider = Ed25519Provider::new(private_key);
         let address = validator.address.clone();
 
+        let blob_metrics = ultramarine_blob_engine::BlobEngineMetrics::new();
         let state = State::new(
             genesis,
             LoadContext::new(),
@@ -1796,6 +2234,7 @@ mod tests {
             start_height,
             store,
             mock_engine.clone(),
+            blob_metrics,
         );
 
         (state, tmp)
