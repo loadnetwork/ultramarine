@@ -56,7 +56,7 @@ Verify complete implementation of the decided flow helper that:
 |-----------|--------|----------|----------|
 | **MockExecutionNotifier** | ✅ Perfect | `test/tests/common/mocks.rs:111-179` | Recording + error injection |
 | **Height-aware payload generator** | ✅ Perfect | `test/tests/common/mod.rs:151-179` | Deterministic payloads |
-| **blob_decided_el_rejection test** | ✅ Perfect | `test/tests/blob_decided_el_rejection.rs` | Negative coverage |
+| **blob_decided_el_rejection test** | ✅ Perfect | `test/tests/blob_state/blob_decided_el_rejection.rs` | Negative coverage |
 
 **Mock Capabilities**:
 - ✅ Records all `notify_new_block` calls
@@ -69,7 +69,7 @@ Verify complete implementation of the decided flow helper that:
 
 ### 3. Test Suite Results - ✅ ALL PASSING (13/13)
 
-**Command**: `cargo test -p ultramarine-test -- --ignored --nocapture`
+**Command**: `cargo test -p ultramarine-test -- --nocapture`
 
 ```
 Test Suite Execution Results:

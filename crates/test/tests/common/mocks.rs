@@ -31,7 +31,7 @@ pub(crate) struct MockEngineApi {
 impl MockEngineApi {
     /// Register a payload/bundle pair to be returned by `get_payload_with_blobs`.
     pub(crate) fn with_payload(
-        mut self,
+        self,
         payload_id: PayloadId,
         payload: ExecutionPayloadV3,
         bundle: Option<BlobsBundle>,
@@ -117,8 +117,6 @@ pub(crate) struct MockExecutionNotifier {
     pub new_block_calls: Arc<Mutex<Vec<(ExecutionPayloadV3, Vec<BlockHash>)>>>,
     pub forkchoice_calls: Arc<Mutex<Vec<BlockHash>>>,
     payload_status: Arc<Mutex<PayloadStatus>>,
-    new_block_error: Arc<Mutex<Option<String>>>,
-    forkchoice_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for MockExecutionNotifier {
@@ -129,8 +127,6 @@ impl Default for MockExecutionNotifier {
             payload_status: Arc::new(Mutex::new(PayloadStatus::from_status(
                 PayloadStatusEnum::Valid,
             ))),
-            new_block_error: Arc::new(Mutex::new(None)),
-            forkchoice_error: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -141,24 +137,9 @@ impl MockExecutionNotifier {
     }
 
     /// Configure the payload status returned by `notify_new_block`.
-    pub(crate) fn with_payload_status(mut self, status: PayloadStatus) -> Self {
+    pub(crate) fn with_payload_status(self, status: PayloadStatus) -> Self {
         *self.payload_status.lock().unwrap() = status;
         self
-    }
-
-    /// Override the payload status after construction.
-    pub(crate) fn set_payload_status(&self, status: PayloadStatus) {
-        *self.payload_status.lock().unwrap() = status;
-    }
-
-    /// Force `notify_new_block` to return an error.
-    pub(crate) fn set_new_block_error(&self, msg: impl Into<String>) {
-        *self.new_block_error.lock().unwrap() = Some(msg.into());
-    }
-
-    /// Force `set_latest_forkchoice_state` to return an error.
-    pub(crate) fn set_forkchoice_error(&self, msg: impl Into<String>) {
-        *self.forkchoice_error.lock().unwrap() = Some(msg.into());
     }
 }
 
@@ -171,10 +152,6 @@ impl ExecutionNotifier for MockExecutionNotifier {
     ) -> color_eyre::Result<PayloadStatus> {
         self.new_block_calls.lock().unwrap().push((payload, versioned_hashes));
 
-        if let Some(err) = self.new_block_error.lock().unwrap().clone() {
-            return Err(color_eyre::eyre::eyre!(err));
-        }
-
         Ok(self.payload_status.lock().unwrap().clone())
     }
 
@@ -183,10 +160,6 @@ impl ExecutionNotifier for MockExecutionNotifier {
         block_hash: BlockHash,
     ) -> color_eyre::Result<BlockHash> {
         self.forkchoice_calls.lock().unwrap().push(block_hash);
-
-        if let Some(err) = self.forkchoice_error.lock().unwrap().clone() {
-            return Err(color_eyre::eyre::eyre!(err));
-        }
 
         Ok(block_hash)
     }

@@ -189,9 +189,8 @@ The blob integration suite lives in the dedicated `crates/test` package so Cargo
   ```
   Under the hood this invokes
   ```bash
-  cargo test -p ultramarine-test -- --ignored --nocapture
+  cargo test -p ultramarine-test -- --nocapture
   ```
-  (the `--ignored` flag keeps the tests opt-in so they do not run during every `cargo test`).
 
 ### What the harness does
 

@@ -13,16 +13,24 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use alloy_consensus::{Signed, TxEip4844, TxEnvelope};
+use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{
-    Address as AlloyAddress, B256, Bloom, Bytes as AlloyBytes, FixedBytes, U256,
+    Address as AlloyAddress, B256, Bloom, Bytes as AlloyBytes, FixedBytes, Signature, U256,
 };
 use alloy_rpc_types_engine::{
     ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, PayloadId,
 };
+use bytes::Bytes;
 use c_kzg::{Blob as CKzgBlob, KzgSettings};
 use color_eyre::Result;
-use malachitebft_app_channel::app::types::PeerId;
+use malachitebft_app_channel::app::types::{
+    LocallyProposedValue,
+    PeerId,
+    core::Round,
+};
 use serde::Deserialize;
+use ssz::Encode;
 use tempfile::TempDir;
 use ultramarine_blob_engine::{
     BlobEngineImpl, BlobEngineMetrics, store::rocksdb::RocksDbBlobStore,
@@ -34,15 +42,16 @@ use ultramarine_types::{
     context::LoadContext,
     genesis::Genesis,
     height::Height,
+    proposal_part::BlobSidecar,
     signing::{Ed25519Provider, PrivateKey},
     validator_set::{Validator, ValidatorSet},
 };
 
 /// Type alias for the production blob engine used in tests.
-pub type TestBlobEngine = BlobEngineImpl<RocksDbBlobStore>;
+pub(crate) type TestBlobEngine = BlobEngineImpl<RocksDbBlobStore>;
 
 /// Type alias for the state tied to the production blob engine.
-pub type TestState = State<TestBlobEngine>;
+pub(crate) type TestState = State<TestBlobEngine>;
 
 /// Wrapper that keeps temporary directories alive for the duration of a test.
 ///
@@ -148,9 +157,54 @@ pub(crate) fn build_state(
     Ok(StateHarness { state, blob_metrics })
 }
 
+/// Open the stores and seed the genesis metadata so the node can process blobs immediately.
+///
+/// Most integration tests need the state to be hydrated; this helper wraps [`build_state`]
+/// and performs the asynchronous initialization steps.
+pub(crate) async fn build_seeded_state(
+    dirs: &TestDirs,
+    genesis: &Genesis,
+    validator: &ValidatorKey,
+    start_height: Height,
+) -> Result<StateHarness> {
+    let mut harness = build_state(dirs, genesis, validator, start_height)?;
+    harness.state.seed_genesis_blob_metadata().await?;
+    harness.state.hydrate_blob_parent_root().await?;
+    Ok(harness)
+}
+
+/// Propose a value with optional blobs and capture the resulting sidecars.
+pub(crate) async fn propose_with_optional_blobs(
+    state: &mut TestState,
+    height: Height,
+    round: Round,
+    payload: &ExecutionPayloadV3,
+    bundle: Option<&BlobsBundle>,
+) -> Result<(LocallyProposedValue<LoadContext>, Bytes, Option<Vec<BlobSidecar>>)> {
+    state.current_height = height;
+    state.current_round = round;
+
+    let bytes = Bytes::from(payload.as_ssz_bytes());
+    let proposed = state
+        .propose_value_with_blobs(height, round, bytes.clone(), payload, bundle)
+        .await?;
+
+    let sidecars = if let Some(bundle) = bundle {
+        let (_header, sidecars) = state.prepare_blob_sidecar_parts(&proposed, Some(bundle))?;
+        Some(sidecars)
+    } else {
+        None
+    };
+
+    Ok((proposed, bytes, sidecars))
+}
+
 /// Deterministic execution payload used by tests. Parent/child hashes are derived from the
 /// requested height so repeated invocations form a consistent chain for availability checks.
-pub(crate) fn sample_execution_payload_v3_for_height(height: Height) -> ExecutionPayloadV3 {
+pub(crate) fn sample_execution_payload_v3_for_height(
+    height: Height,
+    bundle: Option<&BlobsBundle>,
+) -> ExecutionPayloadV3 {
     let parent_byte = if height.as_u64() == 0 { 0u8 } else { height.as_u64() as u8 };
     let block_byte = parent_byte.wrapping_add(1);
 
@@ -177,6 +231,16 @@ pub(crate) fn sample_execution_payload_v3_for_height(height: Height) -> Executio
             withdrawals: Vec::new(),
         },
     };
+
+    if let Some(bundle) = bundle {
+        let versioned_hashes: Vec<B256> =
+            bundle.versioned_hashes().into_iter().map(B256::from).collect();
+        if !versioned_hashes.is_empty() {
+            let tx_bytes = dummy_blob_tx_bytes(&versioned_hashes);
+            payload.payload_inner.payload_inner.transactions = vec![tx_bytes];
+            payload.blob_gas_used = versioned_hashes.len() as u64 * 131_072;
+        }
+    }
 
     payload
 }
@@ -245,6 +309,28 @@ fn load_trusted_setup() -> Result<KzgSettings> {
     .map_err(|e| color_eyre::eyre::eyre!("failed to load KZG settings: {:?}", e))
 }
 
+/// Create a deterministic EIP-4844 transaction encoded as 2718 bytes for embedding in payloads.
+fn dummy_blob_tx_bytes(versioned_hashes: &[B256]) -> AlloyBytes {
+    let tx = TxEip4844 {
+        chain_id: 1,
+        nonce: 0,
+        gas_limit: 30_000,
+        max_fee_per_gas: 20_000_000_000,
+        max_priority_fee_per_gas: 1_000_000_000,
+        to: AlloyAddress::from([9u8; 20]),
+        value: U256::from(1u64),
+        access_list: Default::default(),
+        blob_versioned_hashes: versioned_hashes.to_vec(),
+        max_fee_per_blob_gas: 20_000_000_000,
+        input: AlloyBytes::new(),
+    };
+
+    let signature = Signature::test_signature();
+    let signed = Signed::new_unhashed(tx, signature);
+    let envelope: TxEnvelope = TxEnvelope::from(signed);
+    AlloyBytes::from(envelope.encoded_2718())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TrustedSetup {
     g1_monomial: Vec<G1Point>,
@@ -277,7 +363,7 @@ struct G2Point(#[serde(with = "hex_serde")] [u8; 96]);
 mod hex_serde {
     use serde::{Deserialize, Deserializer};
 
-    pub fn deserialize<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
+    pub(super) fn deserialize<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
     where
         D: Deserializer<'de>,
     {

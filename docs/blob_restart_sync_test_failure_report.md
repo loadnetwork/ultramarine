@@ -1,6 +1,6 @@
 # Test Report: `blob_sync_across_restart_multiple_heights`
 
-**Test File**: `crates/test/tests/blob_restart_multi_height_sync.rs`
+**Test File**: `crates/test/tests/blob_state/blob_restart_multi_height_sync.rs`
 **Function**: `blob_sync_across_restart_multiple_heights()`
 
 ---

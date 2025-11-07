@@ -19,6 +19,8 @@ malachitebft-proto.workspace = true
 
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
 bytes.workspace = true
 color-eyre.workspace = true
 async-trait.workspace = true

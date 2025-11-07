@@ -4,19 +4,16 @@
 //! verify them via `received_proposal_part`, and commit the block with all blob
 //! metadata and metrics intact.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_restream_multi_validator() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis,
+        TestDirs, build_seeded_state, make_genesis,
         mocks::{MockEngineApi, MockExecutionNotifier},
-        sample_blob_bundle, sample_execution_payload_v3_for_height, test_peer_id,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
+        test_peer_id,
     };
     use malachitebft_app_channel::app::{
         streaming::StreamMessage,
@@ -34,17 +31,15 @@ async fn blob_restream_multi_validator() -> color_eyre::Result<()> {
     let proposer_dirs = TestDirs::new();
     let follower_dirs = TestDirs::new();
 
-    let mut proposer = build_state(&proposer_dirs, &genesis, proposer_key, Height::new(0))?;
-    proposer.state.seed_genesis_blob_metadata().await?;
-    proposer.state.hydrate_blob_parent_root().await?;
+    let mut proposer =
+        build_seeded_state(&proposer_dirs, &genesis, proposer_key, Height::new(0)).await?;
 
-    let mut follower = build_state(&follower_dirs, &genesis, follower_key, Height::new(0))?;
-    follower.state.seed_genesis_blob_metadata().await?;
-    follower.state.hydrate_blob_parent_root().await?;
+    let mut follower =
+        build_seeded_state(&follower_dirs, &genesis, follower_key, Height::new(0)).await?;
 
     let height = Height::new(0);
-    let raw_payload = sample_execution_payload_v3_for_height(height);
     let raw_bundle = sample_blob_bundle(1);
+    let raw_payload = sample_execution_payload_v3_for_height(height, Some(&raw_bundle));
     let payload_id = common::payload_id(3);
     let mock_engine = MockEngineApi::default().with_payload(
         payload_id,
@@ -53,32 +48,27 @@ async fn blob_restream_multi_validator() -> color_eyre::Result<()> {
     );
     let (payload, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
     let bundle = maybe_bundle.expect("bundle");
-    let payload_bytes = Bytes::from(payload.as_ssz_bytes());
     let round = Round::new(0);
     let round_i64 = round.as_i64();
 
-    let proposed = proposer
-        .state
-        .propose_value_with_blobs(height, round, payload_bytes.clone(), &payload, Some(&bundle))
-        .await?;
-
-    let (_signed_header, sidecars) =
-        proposer.state.prepare_blob_sidecar_parts(&proposed, Some(&bundle))?;
+    let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+        &mut proposer.state,
+        height,
+        round,
+        &payload,
+        Some(&bundle),
+    )
+    .await?;
+    let sidecars = maybe_sidecars.expect("sidecars expected");
 
     if !sidecars.is_empty() {
         proposer.state.blob_engine().verify_and_store(height, round_i64, &sidecars).await?;
     }
     proposer.state.store_undecided_block_data(height, round, payload_bytes.clone()).await?;
 
-    let stream_value = malachitebft_app_channel::app::types::LocallyProposedValue::new(
-        proposed.height,
-        proposed.round,
-        proposed.value.clone(),
-    );
-
     let stream_messages: Vec<StreamMessage<_>> = proposer
         .state
-        .stream_proposal(stream_value, payload_bytes.clone(), Some(&sidecars), None)
+        .stream_proposal(proposed.clone(), payload_bytes.clone(), Some(&sidecars), None)
         .collect();
 
     let mut received = None;

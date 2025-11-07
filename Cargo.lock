@@ -7061,6 +7061,8 @@ dependencies = [
 name = "ultramarine-test"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "async-trait",

@@ -5,21 +5,16 @@
 //! 2. Validators verify, store, and commit the block.
 //! 3. Blob metadata is promoted and blobs become available for import.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_roundtrip() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis, mocks::MockExecutionNotifier, sample_blob_bundle,
-        sample_execution_payload_v3_for_height,
+        TestDirs, build_seeded_state, make_genesis, mocks::MockExecutionNotifier,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
-    use ssz::Encode;
     use ultramarine_blob_engine::BlobEngine;
     use ultramarine_types::{blob::BYTES_PER_BLOB, height::Height};
 
@@ -27,17 +22,15 @@ async fn blob_roundtrip() -> color_eyre::Result<()> {
     let (genesis, validators) = make_genesis(1);
     let validator = &validators[0];
     let dirs = TestDirs::new();
-    let mut node = build_state(&dirs, &genesis, validator, Height::new(0))?;
-    node.state.seed_genesis_blob_metadata().await?;
-    node.state.hydrate_blob_parent_root().await?;
+    let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
     use common::mocks::MockEngineApi;
     use ultramarine_execution::EngineApi;
 
     // Prepare execution payload + blobs via mock Execution API to simulate proposer flow.
     let height = Height::new(0);
-    let raw_payload = sample_execution_payload_v3_for_height(height);
     let raw_bundle = sample_blob_bundle(2);
+    let raw_payload = sample_execution_payload_v3_for_height(height, Some(&raw_bundle));
     let payload_id = common::payload_id(0);
     let mock_engine = MockEngineApi::default().with_payload(
         payload_id,
@@ -46,18 +39,10 @@ async fn blob_roundtrip() -> color_eyre::Result<()> {
     );
     let (payload, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
     let bundle = maybe_bundle.expect("bundle");
-    let payload_bytes = Bytes::from(payload.as_ssz_bytes());
-
     let round = Round::new(0);
-
-    let proposed = node
-        .state
-        .propose_value_with_blobs(height, round, payload_bytes.clone(), &payload, Some(&bundle))
-        .await?;
-
-    // Extract blob sidecars for downstream validators.
-    let (_signed_header, sidecars) =
-        node.state.prepare_blob_sidecar_parts(&proposed, Some(&bundle))?;
+    let (proposed, payload_bytes, maybe_sidecars) =
+        propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle)).await?;
+    let sidecars = maybe_sidecars.expect("sidecars present");
 
     assert_eq!(sidecars.len(), bundle.blobs.len(), "sidecar count matches blob bundle");
 
