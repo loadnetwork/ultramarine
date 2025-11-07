@@ -15,7 +15,7 @@ Cleaned up naming inconsistencies and removed obsolete commented code to improve
 
 ### 1. ✅ Test Function Name (Already Correct)
 
-**File**: `crates/test/tests/blob_restart_multi_height_sync.rs`
+**File**: `crates/test/tests/blob_state/blob_restart_multi_height_sync.rs`
 
 - **Function Name**: `blob_sync_across_restart_multiple_heights()` ✅
 - **Status**: Already correctly named to reflect sync path (not restream path)
@@ -61,14 +61,14 @@ All tests still pass after cleanup:
 
 ```bash
 # Renamed test
-cargo test -p ultramarine-test --test blob_restart_multi_height_sync -- --ignored
+cargo test -p ultramarine-test --test blob_restart_multi_height_sync
 ✅ test blob_sync_across_restart_multiple_heights ... ok (5.20s)
 
 # Other sync tests
-cargo test -p ultramarine-test --test blob_new_node_sync -- --ignored
+cargo test -p ultramarine-test --test blob_new_node_sync
 ✅ test blob_new_node_sync_and_commit ... ok (5.10s)
 
-cargo test -p ultramarine-test --test blob_sync_commitment_mismatch -- --ignored
+cargo test -p ultramarine-test --test blob_sync_commitment_mismatch
 ✅ test blob_sync_commitment_mismatch_rejected ... ok (2.53s)
 ```
 

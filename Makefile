@@ -568,12 +568,12 @@ spam-blobs: ## Spam the EL with EIP-4844 blob transactions (60s @ 50 tps, 128 bl
 .PHONY: itest
 itest: ## Run integration tests (verbose).
 	@echo "🧪 Running integration tests..."
-	cargo test -p ultramarine-test -- --ignored --nocapture
+	cargo test -p ultramarine-test -- --nocapture
 
 .PHONY: itest-quick
 itest-quick: ## Run integration tests (quiet output).
-	cargo test -p ultramarine-test -- --ignored
+	cargo test -p ultramarine-test
 
 .PHONY: itest-list
 itest-list: ## List available integration tests.
-	cargo test -p ultramarine-test -- --ignored --list
+	cargo test -p ultramarine-test -- --list

@@ -506,7 +506,7 @@ impl ExecutionNotifier for MockExecutionNotifier {
 
 ### Example Test Using Middleware
 
-**New test**: `crates/test/tests/blob_validation_failure_atomicity.rs`
+**New test**: `crates/test/tests/blob_state/blob_validation_failure_atomicity.rs`
 
 ```rust
 //! Test that validation failures leave blob state clean (Bug #3 coverage)

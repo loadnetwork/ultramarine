@@ -4,18 +4,14 @@
 //! verifies that blob gauges, lifecycle counters, and availability match the
 //! expected state at each step.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_blobless_sequence_behaves() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis, mocks::MockExecutionNotifier, sample_blob_bundle,
-        sample_execution_payload_v3_for_height,
+        TestDirs, build_seeded_state, make_genesis, mocks::MockExecutionNotifier,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
     use ssz::Encode;
@@ -26,23 +22,23 @@ async fn blob_blobless_sequence_behaves() -> color_eyre::Result<()> {
     let validator = &validators[0];
     let dirs = TestDirs::new();
 
-    let mut node = build_state(&dirs, &genesis, validator, Height::new(0))?;
-    node.state.seed_genesis_blob_metadata().await?;
-    node.state.hydrate_blob_parent_root().await?;
+    let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
     // Height 0: one blob.
     let height0 = Height::new(0);
-    let payload_h0 = sample_execution_payload_v3_for_height(height0);
     let bundle_h0 = sample_blob_bundle(1);
-    let bytes_h0 = Bytes::from(payload_h0.as_ssz_bytes());
+    let payload_h0 = sample_execution_payload_v3_for_height(height0, Some(&bundle_h0));
     let round0 = Round::new(0);
 
-    let proposed_h0 = node
-        .state
-        .propose_value_with_blobs(height0, round0, bytes_h0.clone(), &payload_h0, Some(&bundle_h0))
-        .await?;
-    let (_header_h0, sidecars_h0) =
-        node.state.prepare_blob_sidecar_parts(&proposed_h0, Some(&bundle_h0))?;
+    let (proposed_h0, bytes_h0, maybe_sidecars_h0) = propose_with_optional_blobs(
+        &mut node.state,
+        height0,
+        round0,
+        &payload_h0,
+        Some(&bundle_h0),
+    )
+    .await?;
+    let sidecars_h0 = maybe_sidecars_h0.expect("sidecars for height 0");
     node.state.blob_engine().verify_and_store(height0, round0.as_i64(), &sidecars_h0).await?;
     node.state.store_undecided_block_data(height0, round0, bytes_h0.clone()).await?;
     let cert_h0 = CommitCertificate {
@@ -61,14 +57,12 @@ async fn blob_blobless_sequence_behaves() -> color_eyre::Result<()> {
 
     // Height 1: blobless block.
     let height1 = Height::new(1);
-    let payload_h1 = sample_execution_payload_v3_for_height(height1);
-    let bytes_h1 = Bytes::from(payload_h1.as_ssz_bytes());
+    let payload_h1 = sample_execution_payload_v3_for_height(height1, None);
     let round1 = Round::new(0);
 
-    let proposed_h1 = node
-        .state
-        .propose_value_with_blobs(height1, round1, bytes_h1.clone(), &payload_h1, None)
-        .await?;
+    let (proposed_h1, bytes_h1, sidecars_h1) =
+        propose_with_optional_blobs(&mut node.state, height1, round1, &payload_h1, None).await?;
+    assert!(sidecars_h1.is_none(), "blobless height should have no sidecars");
     node.state.store_undecided_block_data(height1, round1, bytes_h1.clone()).await?;
     let cert_h1 = CommitCertificate {
         height: height1,
@@ -88,17 +82,19 @@ async fn blob_blobless_sequence_behaves() -> color_eyre::Result<()> {
 
     // Height 2: two blobs.
     let height2 = Height::new(2);
-    let payload_h2 = sample_execution_payload_v3_for_height(height2);
     let bundle_h2 = sample_blob_bundle(2);
-    let bytes_h2 = Bytes::from(payload_h2.as_ssz_bytes());
+    let payload_h2 = sample_execution_payload_v3_for_height(height2, Some(&bundle_h2));
     let round2 = Round::new(0);
 
-    let proposed_h2 = node
-        .state
-        .propose_value_with_blobs(height2, round2, bytes_h2.clone(), &payload_h2, Some(&bundle_h2))
-        .await?;
-    let (_header_h2, sidecars_h2) =
-        node.state.prepare_blob_sidecar_parts(&proposed_h2, Some(&bundle_h2))?;
+    let (proposed_h2, bytes_h2, maybe_sidecars_h2) = propose_with_optional_blobs(
+        &mut node.state,
+        height2,
+        round2,
+        &payload_h2,
+        Some(&bundle_h2),
+    )
+    .await?;
+    let sidecars_h2 = maybe_sidecars_h2.expect("sidecars for height 2");
     node.state.blob_engine().verify_and_store(height2, round2.as_i64(), &sidecars_h2).await?;
     node.state.store_undecided_block_data(height2, round2, bytes_h2.clone()).await?;
     let cert_h2 = CommitCertificate {

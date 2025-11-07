@@ -3,19 +3,15 @@
 //! Validates that blob metadata and parent-root caches survive process
 //! restarts by reusing on-disk state and invoking hydration paths.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn restart_hydrate() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis,
+        TestDirs, build_seeded_state, build_state, make_genesis,
         mocks::{MockEngineApi, MockExecutionNotifier},
-        sample_blob_bundle, sample_execution_payload_v3_for_height,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
     use ssz::Encode;
@@ -28,13 +24,11 @@ async fn restart_hydrate() -> color_eyre::Result<()> {
     let dirs = TestDirs::new();
 
     {
-        let mut first = build_state(&dirs, &genesis, validator, Height::new(0))?;
-        first.state.seed_genesis_blob_metadata().await?;
-        first.state.hydrate_blob_parent_root().await?;
+        let mut first = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
         let height = Height::new(0);
-        let raw_payload = sample_execution_payload_v3_for_height(height);
         let raw_bundle = sample_blob_bundle(1);
+        let raw_payload = sample_execution_payload_v3_for_height(height, Some(&raw_bundle));
         let payload_id = common::payload_id(1);
         let mock_engine = MockEngineApi::default().with_payload(
             payload_id,
@@ -43,17 +37,18 @@ async fn restart_hydrate() -> color_eyre::Result<()> {
         );
         let (payload, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
         let bundle = maybe_bundle.expect("bundle");
-        let payload_bytes = Bytes::from(payload.as_ssz_bytes());
         let round = Round::new(0);
         let round_i64 = round.as_i64();
 
-        let proposed = first
-            .state
-            .propose_value_with_blobs(height, round, payload_bytes.clone(), &payload, Some(&bundle))
-            .await?;
-
-        let (_signed_header, sidecars) =
-            first.state.prepare_blob_sidecar_parts(&proposed, Some(&bundle))?;
+        let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+            &mut first.state,
+            height,
+            round,
+            &payload,
+            Some(&bundle),
+        )
+        .await?;
+        let sidecars = maybe_sidecars.expect("sidecars expected");
 
         first.state.blob_engine().verify_and_store(height, round_i64, &sidecars).await?;
 

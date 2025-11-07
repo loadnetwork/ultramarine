@@ -3,18 +3,14 @@
 //! Verifies that invalid blob sidecars are rejected during the sync flow and
 //! that blob sync failure metrics are incremented accordingly.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_sync_failure_rejects_invalid_proof() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis, sample_blob_bundle,
-        sample_execution_payload_v3_for_height,
+        TestDirs, build_seeded_state, make_genesis, propose_with_optional_blobs,
+        sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::Round;
     use ssz::Encode;
@@ -25,25 +21,19 @@ async fn blob_sync_failure_rejects_invalid_proof() -> color_eyre::Result<()> {
     let validator = &validators[0];
     let dirs = TestDirs::new();
 
-    let mut node = build_state(&dirs, &genesis, validator, Height::new(0))?;
-    node.state.seed_genesis_blob_metadata().await?;
-    node.state.hydrate_blob_parent_root().await?;
+    let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
     let height = Height::new(0);
-    let payload = sample_execution_payload_v3_for_height(height);
     let bundle = sample_blob_bundle(1);
-    let payload_bytes = Bytes::from(payload.as_ssz_bytes());
-
+    let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
     let round = Round::new(0);
     let round_i64 = round.as_i64();
 
     // Build proposal and sidecars with valid data first.
-    let proposed = node
-        .state
-        .propose_value_with_blobs(height, round, payload_bytes.clone(), &payload, Some(&bundle))
-        .await?;
-    let (_signed_header, mut sidecars) =
-        node.state.prepare_blob_sidecar_parts(&proposed, Some(&bundle))?;
+    let (proposed, payload_bytes, maybe_sidecars) =
+        propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle))
+            .await?;
+    let mut sidecars = maybe_sidecars.expect("sidecars expected");
 
     // Tamper with the sidecar proof to guarantee verification failure.
     sidecars[0].kzg_proof.0[0] ^= 0xFF;

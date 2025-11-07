@@ -3,18 +3,15 @@
 //! Ensures that ingesting a `SyncedValuePackage::Full` promotes blob data and
 //! metadata immediately, matching the expectations laid out in Phase 5B.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn sync_package_roundtrip() -> color_eyre::Result<()> {
     use bytes::Bytes;
     use color_eyre::eyre::eyre;
     use common::{
-        TestDirs, build_state, make_genesis,
+        TestDirs, build_seeded_state, make_genesis,
         mocks::{MockEngineApi, MockExecutionNotifier},
         sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
@@ -34,14 +31,12 @@ async fn sync_package_roundtrip() -> color_eyre::Result<()> {
     let validator = &validators[0];
     let dirs = TestDirs::new();
 
-    let mut node = build_state(&dirs, &genesis, validator, Height::new(0))?;
-    node.state.seed_genesis_blob_metadata().await?;
-    node.state.hydrate_blob_parent_root().await?;
+    let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
     // Build sample payload + blobs mirroring a decided block.
     let height = Height::new(0);
-    let raw_payload = sample_execution_payload_v3_for_height(height);
     let raw_bundle = sample_blob_bundle(1);
+    let raw_payload = sample_execution_payload_v3_for_height(height, Some(&raw_bundle));
     let payload_id = common::payload_id(2);
     let mock_engine = MockEngineApi::default().with_payload(
         payload_id,

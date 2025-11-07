@@ -34,7 +34,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 - **Phase 5A – Metrics Instrumentation** *(2025-11-04)*: Added 12 blob metrics, wired through node startup/state helpers, updated dashboards and docs.
 - **Phase 5B – Integration Harness** *(2025-11-08)*: Thirteen deterministic blob scenarios now pass via `make itest`, covering proposer/follower commit, sync ingestion, restart hydration, pruning retention, and execution-layer rejection (see [Testing Strategy](./PHASE5_TESTNET.md#testing-strategy) for the full matrix).
 - **Phase 5C – Testnet Validation** *(2025-11-07)*: Docker harness exercised 1,158 real blobs; metrics and dashboards verified against live runs.
-- **Quality Gates**: 23/23 consensus unit tests plus 13/13 integration tests (`cargo test -p ultramarine-test -- --ignored --nocapture`); `cargo fmt --all` and `cargo clippy -p ultramarine-consensus` run clean for the consensus crate.
+- **Quality Gates**: 23/23 consensus unit tests plus 13/13 integration tests (`cargo test -p ultramarine-test -- --nocapture`); `cargo fmt --all` and `cargo clippy -p ultramarine-consensus` run clean for the consensus crate.
 
 **Up Next** 🟡:
 - Phase 6 pruning policy: configurable retention for decided blobs + harness coverage.
@@ -200,7 +200,7 @@ Modify `Decided` handler to validate blob availability before block import.
 - `ultramarine/crates/execution/src/client.rs`
 - `ultramarine/crates/execution/src/notifier.rs`
 - `ultramarine/crates/test/tests/common/mocks.rs`
-- `ultramarine/crates/test/tests/blob_decided_el_rejection.rs`
+- `ultramarine/crates/test/tests/blob_state/blob_decided_el_rejection.rs`
 
 ### Implementation References
 - `crates/node/src/app.rs` – App handler delegates to `process_decided_certificate`
@@ -208,7 +208,7 @@ Modify `Decided` handler to validate blob availability before block import.
 - `crates/execution/src/notifier.rs` & `crates/execution/src/client.rs` – Execution notifier trait and adapter
 - `crates/blob_engine/src/engine.rs` – promotion + pruning used during commit
 - `crates/blob_engine/src/store/rocksdb.rs` – undecided/decided storage semantics
-- Tests/validation: `make itest` (13 scenarios), targeted negative coverage `cargo test -p ultramarine-test blob_decided_el_rejection -- --ignored`
+- Tests/validation: `make itest` (13 scenarios), targeted negative coverage `cargo test -p ultramarine-test blob_decided_el_rejection`
 
 ### Phase 5.1: State Sync Implementation ✅ COMPLETED (2025-10-23)
 

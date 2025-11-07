@@ -85,7 +85,7 @@ assert!(
 
 ```bash
 # Run the test with fix
-cargo test -p ultramarine-test --test blob_restream_multi_round -- --ignored --nocapture
+cargo test -p ultramarine-test --test blob_restream_multi_round -- --nocapture
 
 # Result: ok. 1 passed; 0 failed
 ```
@@ -97,7 +97,7 @@ cargo test -p ultramarine-test --test blob_restream_multi_round -- --ignored --n
 | `crates/consensus/src/state.rs` | 1462-1467 | **FIX**: Proposer blob_rounds tracking |
 | `crates/consensus/src/state.rs` | 633 | Follower blob_rounds tracking (existing) |
 | `crates/consensus/src/state.rs` | 1241-1284 | Cleanup logic during commit |
-| `crates/test/tests/blob_restream_multi_round.rs` | 182-188 | Test coverage for fix |
+| `crates/test/tests/blob_state/blob_restream_multi_round.rs` | 182-188 | Test coverage for fix |
 
 **Resolution**: ✅ **FIXED** – Proposers now track blob rounds symmetrically with followers
 
@@ -110,7 +110,7 @@ cargo test -p ultramarine-test --test blob_restream_multi_round -- --ignored --n
 **Severity**: 🔴 **CRITICAL**
 **Status**: ✅ **FIXED – Metadata now created during sync (2025-11-08)**
 **Discovered**: 2025-11-05
-**Test**: `crates/test/tests/blob_new_node_sync.rs`, `crates/test/tests/sync_package_roundtrip.rs`
+**Test**: `crates/test/tests/blob_state/blob_new_node_sync.rs`, `crates/test/tests/blob_state/sync_package_roundtrip.rs`
 **Impact (pre-fix)**: **Syncing nodes would crash** when committing blocks with blobs
 
 ### The Bug
@@ -178,9 +178,9 @@ newcomer.state.commit(certificate).await?;  ✅ Passes (but shouldn't!)
 ### Verification Steps
 
 ```bash
-cargo test -p ultramarine-test --test blob_new_node_sync -- --ignored --nocapture
-cargo test -p ultramarine-test --test blob_restart_multi_height -- --ignored --nocapture
-cargo test -p ultramarine-test --test blob_restart_multi_height_sync -- --ignored --nocapture
+cargo test -p ultramarine-test --test blob_new_node_sync -- --nocapture
+cargo test -p ultramarine-test --test blob_restart_multi_height -- --nocapture
+cargo test -p ultramarine-test --test blob_restart_multi_height_sync -- --nocapture
 ```
 
 Both tests pass, confirming the sync path now persists metadata correctly.
@@ -192,8 +192,8 @@ Both tests pass, confirming the sync path now persists metadata correctly.
 | `crates/node/src/app.rs` | 724-840 | `ProcessSyncedValue` creates BlobMetadata for synced blocks |
 | `crates/consensus/src/state.rs` | 190-560 | Metadata rebuild/promotion used by commit and restream |
 | `crates/consensus/src/store.rs` | 600-670 | `mark_blob_metadata_decided` (promotes metadata to decided table) |
-| `crates/test/tests/blob_new_node_sync.rs` | 118-190 | Integration coverage for newcomer sync |
-| `crates/test/tests/sync_package_roundtrip.rs` | 52-150 | Sync package ingestion coverage |
+| `crates/test/tests/blob_state/blob_new_node_sync.rs` | 118-190 | Integration coverage for newcomer sync |
+| `crates/test/tests/blob_state/sync_package_roundtrip.rs` | 52-150 | Sync package ingestion coverage |
 
 ### Affected Tests (Historical)
 
@@ -264,7 +264,7 @@ node.state.put_blob_metadata_undecided(height, round, &blob_metadata).await?;
 **Severity**: 🟢 **MITIGATED**
 **Status**: ✅ **FIXED** (idempotency added)
 **Discovered**: 2025-11-05
-**Test**: `crates/test/tests/sync_package_roundtrip.rs`
+**Test**: `crates/test/tests/blob_state/sync_package_roundtrip.rs`
 
 ### The Issue
 
@@ -419,7 +419,7 @@ Remove `store_synced_proposal()` calls from restream tests:
 .PHONY: itest
 itest:
 	@echo "🧪 Running integration tests..."
-	cargo test -p ultramarine-test -- --ignored --nocapture
+	cargo test -p ultramarine-test -- --nocapture
 ```
 
 `DEV_WORKFLOW.md` and `PHASE5_TESTNET.md` instructions are accurate after this addition.
@@ -632,7 +632,7 @@ if !blob_sidecars.is_empty() {
 
 ### Verification Steps
 
-**1. Attack test created**: `crates/test/tests/blob_sync_commitment_mismatch.rs`
+**1. Attack test created**: `crates/test/tests/blob_state/blob_sync_commitment_mismatch.rs`
 
 The test:
 - Creates valid blob sidecars with correct KZG proofs
@@ -643,7 +643,7 @@ The test:
 
 **2. Run test**:
 ```bash
-cargo test -p ultramarine-test --test blob_sync_commitment_mismatch -- --ignored --nocapture
+cargo test -p ultramarine-test --test blob_sync_commitment_mismatch -- --nocapture
 ```
 
 ### Related Code Locations
@@ -680,7 +680,7 @@ cargo test -p ultramarine-test --test blob_sync_commitment_mismatch -- --ignored
 **Severity**: 🟡 **MEDIUM** (Test Coverage Gap)
 **Status**: ✅ **DOCUMENTED** (Limitation explained 2025-11-08)
 **Discovered**: 2025-11-07 (Post-Fix Review)
-**Test**: `crates/test/tests/blob_new_node_sync.rs`
+**Test**: `crates/test/tests/blob_state/blob_new_node_sync.rs`
 **Impact**: **Production handler logic not validated by integration tests**
 
 ### The Issue

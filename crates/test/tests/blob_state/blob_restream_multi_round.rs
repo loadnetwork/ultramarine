@@ -4,19 +4,16 @@
 //! rounds of the same height and ensures followers drop losing rounds while
 //! keeping metrics consistent.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_restream_multiple_rounds() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis,
+        TestDirs, build_seeded_state, make_genesis,
         mocks::{MockEngineApi, MockExecutionNotifier},
-        sample_blob_bundle, sample_execution_payload_v3_for_height, test_peer_id,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
+        test_peer_id,
     };
     use malachitebft_app_channel::app::{
         streaming::StreamMessage,
@@ -34,23 +31,21 @@ async fn blob_restream_multiple_rounds() -> color_eyre::Result<()> {
     let proposer_dirs = TestDirs::new();
     let follower_dirs = TestDirs::new();
 
-    let mut proposer = build_state(&proposer_dirs, &genesis, proposer_key, Height::new(0))?;
-    proposer.state.seed_genesis_blob_metadata().await?;
-    proposer.state.hydrate_blob_parent_root().await?;
+    let mut proposer =
+        build_seeded_state(&proposer_dirs, &genesis, proposer_key, Height::new(0)).await?;
 
-    let mut follower = build_state(&follower_dirs, &genesis, follower_key, Height::new(0))?;
-    follower.state.seed_genesis_blob_metadata().await?;
-    follower.state.hydrate_blob_parent_root().await?;
+    let mut follower =
+        build_seeded_state(&follower_dirs, &genesis, follower_key, Height::new(0)).await?;
 
     let height = Height::new(0);
     let rounds = [Round::new(0), Round::new(1)];
     let payload_ids = [common::payload_id(6), common::payload_id(7)];
 
-    let raw_payloads = [
-        sample_execution_payload_v3_for_height(height),
-        sample_execution_payload_v3_for_height(height),
-    ];
     let raw_bundles = [sample_blob_bundle(1), sample_blob_bundle(1)];
+    let raw_payloads = [
+        sample_execution_payload_v3_for_height(height, Some(&raw_bundles[0])),
+        sample_execution_payload_v3_for_height(height, Some(&raw_bundles[1])),
+    ];
 
     let mut mock_engine = MockEngineApi::default();
     for ((payload_id, payload), bundle) in
@@ -67,25 +62,17 @@ async fn blob_restream_multiple_rounds() -> color_eyre::Result<()> {
 
     for (idx, round) in rounds.iter().enumerate() {
         let payload_id = payload_ids[idx];
-        proposer.state.current_round = *round;
-        follower.state.current_round = *round;
         let (payload, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
         let bundle = maybe_bundle.expect("bundle");
-        let payload_bytes = Bytes::from(payload.as_ssz_bytes());
-
-        let proposed = proposer
-            .state
-            .propose_value_with_blobs(
-                height,
-                *round,
-                payload_bytes.clone(),
-                &payload,
-                Some(&bundle),
-            )
-            .await?;
-
-        let (_signed_header, sidecars) =
-            proposer.state.prepare_blob_sidecar_parts(&proposed, Some(&bundle))?;
+        let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+            &mut proposer.state,
+            height,
+            *round,
+            &payload,
+            Some(&bundle),
+        )
+        .await?;
+        let sidecars = maybe_sidecars.expect("sidecars expected");
 
         if !sidecars.is_empty() {
             proposer
@@ -152,6 +139,10 @@ async fn blob_restream_multiple_rounds() -> color_eyre::Result<()> {
 
     let metrics = follower.blob_metrics.snapshot();
     assert_eq!(metrics.verifications_success, total_success as u64);
+    assert_eq!(metrics.lifecycle_promoted, promoted_count as u64);
+    assert_eq!(metrics.lifecycle_dropped, dropped_count as u64);
+    assert_eq!(metrics.storage_bytes_decided, (promoted_count * BYTES_PER_BLOB) as i64);
+    assert_eq!(metrics.storage_bytes_undecided, 0);
 
     let undecided =
         follower.state.blob_engine().get_undecided_blobs(height, rounds[0].as_i64()).await?;

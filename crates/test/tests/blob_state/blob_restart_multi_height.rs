@@ -3,18 +3,14 @@
 //! Commits three consecutive heights (blobbed, blobless, blobbed) and verifies
 //! that after a restart the node can rebuild blob sidecars for every height.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_restart_hydrates_multiple_heights() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis, mocks::MockExecutionNotifier, sample_blob_bundle,
-        sample_execution_payload_v3_for_height,
+        TestDirs, build_seeded_state, build_state, make_genesis, mocks::MockExecutionNotifier,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
     use ssz::Encode;
@@ -27,9 +23,7 @@ async fn blob_restart_hydrates_multiple_heights() -> color_eyre::Result<()> {
     let dirs = TestDirs::new();
 
     {
-        let mut node = build_state(&dirs, &genesis, validator, Height::new(0))?;
-        node.state.seed_genesis_blob_metadata().await?;
-        node.state.hydrate_blob_parent_root().await?;
+        let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
         let scenarios = [
             (Height::new(0), Some(sample_blob_bundle(1))),
@@ -38,30 +32,15 @@ async fn blob_restart_hydrates_multiple_heights() -> color_eyre::Result<()> {
         ];
 
         for (height, maybe_bundle) in scenarios.into_iter() {
-            node.state.current_height = height;
-            node.state.current_round = Round::new(0);
-
-            let payload = sample_execution_payload_v3_for_height(height);
-            let bytes = Bytes::from(payload.as_ssz_bytes());
-
-            let proposed = node
-                .state
-                .propose_value_with_blobs(
-                    height,
-                    Round::new(0),
-                    bytes.clone(),
-                    &payload,
-                    maybe_bundle.as_ref(),
-                )
-                .await?;
-
-            let sidecars = if let Some(bundle) = maybe_bundle.as_ref() {
-                let (_header, sidecars) =
-                    node.state.prepare_blob_sidecar_parts(&proposed, Some(bundle))?;
-                Some(sidecars)
-            } else {
-                None
-            };
+            let payload = sample_execution_payload_v3_for_height(height, maybe_bundle.as_ref());
+            let (proposed, bytes, sidecars) = propose_with_optional_blobs(
+                &mut node.state,
+                height,
+                Round::new(0),
+                &payload,
+                maybe_bundle.as_ref(),
+            )
+            .await?;
 
             if let Some(ref sidecars) = sidecars {
                 node.state.blob_engine().verify_and_store(height, 0, sidecars).await?;
@@ -76,9 +55,7 @@ async fn blob_restart_hydrates_multiple_heights() -> color_eyre::Result<()> {
                 commit_signatures: Vec::new(),
             };
             let mut notifier = MockExecutionNotifier::default();
-            node.state
-                .process_decided_certificate(&certificate, bytes.clone(), &mut notifier)
-                .await?;
+            node.state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
         }
     }
 

@@ -219,8 +219,8 @@ spammer()
 
 **Progress (2025-11-05)**  
 - ✅ Scaffolded `tests/` integration harness (`tests/common/mod.rs`) with deterministic state/engine builder utilities and shared metrics accessors.
-- ✅ Implemented proposer→commit lifecycle in `tests/blob_roundtrip.rs` (verification, storage, commit, import) with metric assertions.
-- ✅ Added restart coverage in `tests/restart_hydrate.rs` (commit, restart, hydrate parent root) validating metadata persistence.
+- ✅ Implemented proposer→commit lifecycle in `tests/blob_state/blob_roundtrip.rs` (verification, storage, commit, import) with metric assertions.
+- ✅ Added restart coverage in `tests/blob_state/restart_hydrate.rs` (commit, restart, hydrate parent root) validating metadata persistence.
 - ✅ Added `SyncedValuePackage::Full` ingestion test skeleton that encodes/decodes packages, stores synced proposals, and exercises blob promotion + metrics.
 - 🧪 Introduced `tests/common/mocks.rs` with an Engine API test double to unblock future execution-client interactions.
 
@@ -246,7 +246,7 @@ spammer()
 ## Testing Strategy
 
 ### Tier 1 – In-Process (default)
-- Run via `cargo test --test '*blob*' -- --ignored` or `make itest`.
+- Run via `cargo test -p ultramarine-test` or `make itest`.
 - Uses inline helpers with a mocked Execution client (real blob engine/KZG) to exercise consensus and restream flows without Docker.
 - Covers:
   1. `blob_roundtrip`
@@ -291,7 +291,7 @@ spammer()
 | `restart_hydrate` | ✅ | 4.03 s |
 | `blob_decided_el_rejection_blocks_commit` | ✅ | 2.68 s |
 
-**Harness Summary**: 13/13 scenarios passing via `cargo test -p ultramarine-test -- --ignored --nocapture` in ~49 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
+**Harness Summary**: 13/13 scenarios passing via `cargo test -p ultramarine-test -- --nocapture` in ~49 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
 
 ---
 
@@ -436,11 +436,11 @@ Benefits:
 
 **Completed**:
 - ✅ Shared harness module (`tests/common/mod.rs`) with deterministic genesis/key fixtures, blob-engine builders, and metrics snapshots.
-- ✅ `tests/blob_roundtrip.rs`: full proposer→commit lifecycle, blob import verification, and metric assertions.
-- ✅ `tests/restart_hydrate.rs`: commits a blobbed block, restarts, hydrates parent root, and validates metadata persistence across process restarts.
-- ✅ `tests/sync_package_roundtrip.rs`: encodes/decodes `SyncedValuePackage::Full`, stores synced proposals, marks blobs decided, and validates metrics.
-- ✅ `tests/blob_restream.rs`: exercises multi-validator restream and follower commit path with blob metrics validation.
-- ✅ `tests/blob_restream_multi_round.rs`: validates losing rounds are dropped during restream replay while metrics capture promotions/drops.
+- ✅ `tests/blob_state/blob_roundtrip.rs`: full proposer→commit lifecycle, blob import verification, and metric assertions.
+- ✅ `tests/blob_state/restart_hydrate.rs`: commits a blobbed block, restarts, hydrates parent root, and validates metadata persistence across process restarts.
+- ✅ `tests/blob_state/sync_package_roundtrip.rs`: encodes/decodes `SyncedValuePackage::Full`, stores synced proposals, marks blobs decided, and validates metrics.
+- ✅ `tests/blob_state/blob_restream.rs`: exercises multi-validator restream and follower commit path with blob metrics validation.
+- ✅ `tests/blob_state/blob_restream_multi_round.rs`: validates losing rounds are dropped during restream replay while metrics capture promotions/drops.
 - ✅ Added `tests/common/mocks.rs` providing a minimal Engine API mock for future execution-layer scenarios.
 - ✅ `serial_test` wiring to keep integration suites deterministic.
 
@@ -459,7 +459,7 @@ Benefits:
 
 **Completed**:
 - ✅ Refactored integration tests to pull payloads/blobs from `MockEngineApi` so proposer flows mimic ExecutionClient usage (`blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`, `blob_restream`).
-- ✅ Added `tests/blob_restream_multi_round.rs` covering multi-round restream cleanup (promotion vs. drop metrics, undecided pruning).
+- ✅ Added `tests/blob_state/blob_restream_multi_round.rs` covering multi-round restream cleanup (promotion vs. drop metrics, undecided pruning).
 - ✅ Hardened test harness with reusable base58 peer IDs and metric snapshots for assertions (`tests/common/mod.rs`, `tests/common/mocks.rs`).
 
 **Pending**:
@@ -475,7 +475,7 @@ Benefits:
 - 🔎 Revalidated integration gaps: root `tests/` directory is excluded from workspace, no `make itest` target exists, and placeholder blob fixtures fail BlobEngine’s KZG verification path.
 - 🗺️ Drafted execution plan to stand up a dedicated `crates/test` package (mirroring malachite’s pattern) so integration suites are visible to Cargo.
 - 🧪 Materialised `crates/test` harness: migrated integration suites, hooked into workspace members, wired `make itest` targets, and replaced dummy blob fixtures with real KZG commitments/proofs (trusted setup cached once per run).
-- ✅ `cargo test -p ultramarine-test -- --ignored --nocapture` now exercises all ten Phase 5B scenarios successfully; Team Beta signed off Phase 5B integration validation.
+- ✅ `cargo test -p ultramarine-test -- --nocapture` now exercises all ten Phase 5B scenarios successfully; Team Beta signed off Phase 5B integration validation.
 
 **In Progress**:
 - Documenting harness usage in developer guides and aligning remaining TODO tests/failure modes with Phase 5B checklist.
@@ -506,7 +506,7 @@ Phase 5 Testnet is complete when:
 - ✅ Blob transactions successfully included in consensus blocks
 
 ### Integration Testing
-- ✅ In-process integration suite passes (`blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`, `blob_restream_multi_validator`, `blob_restream_multi_round`, `blob_new_node_sync`, `blob_blobless_sequence`, `blob_sync_failure_rejects_invalid_proof`, `blob_sync_commitment_mismatch_rejected`, `blob_sync_across_restart_multiple_heights`, `blob_restart_hydrates_multiple_heights`, `blob_pruning_retains_recent_heights`) via `make itest` (`cargo test -p ultramarine-test -- --ignored --nocapture`).
+- ✅ In-process integration suite passes (`blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`, `blob_restream_multi_validator`, `blob_restream_multi_round`, `blob_new_node_sync`, `blob_blobless_sequence`, `blob_sync_failure_rejects_invalid_proof`, `blob_sync_commitment_mismatch_rejected`, `blob_sync_across_restart_multiple_heights`, `blob_restart_hydrates_multiple_heights`, `blob_pruning_retains_recent_heights`) via `make itest` (`cargo test -p ultramarine-test -- --nocapture`).
 - ✅ Optional Docker smoke (`make all` + `make spam-blobs`) still validates the full network path when needed.
 - ✅ No verification failures during normal operation.
 - ✅ No memory leaks or unbounded storage growth observed during harness + smoke runs.

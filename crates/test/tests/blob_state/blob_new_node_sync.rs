@@ -5,17 +5,13 @@
 //! payload + blobs + metadata) and must promote the blobs, commit the block,
 //! and expose the same metrics/import surface as the original participants.
 
+#[path = "../common/mod.rs"]
 mod common;
 
-use serial_test::serial;
-
 #[tokio::test]
-#[serial]
-#[ignore = "integration test - run with: cargo test -p ultramarine-test -- --ignored"]
 async fn blob_new_node_sync() -> color_eyre::Result<()> {
-    use bytes::Bytes;
     use common::{
-        TestDirs, build_state, make_genesis,
+        TestDirs, build_seeded_state, make_genesis, propose_with_optional_blobs,
         mocks::{MockEngineApi, MockExecutionNotifier},
         sample_blob_bundle, sample_execution_payload_v3_for_height, test_peer_id,
     };
@@ -37,25 +33,21 @@ async fn blob_new_node_sync() -> color_eyre::Result<()> {
     let follower_dirs = TestDirs::new();
     let newcomer_dirs = TestDirs::new();
 
-    let mut proposer = build_state(&proposer_dirs, &genesis, proposer_key, Height::new(0))?;
-    proposer.state.seed_genesis_blob_metadata().await?;
-    proposer.state.hydrate_blob_parent_root().await?;
+    let mut proposer =
+        build_seeded_state(&proposer_dirs, &genesis, proposer_key, Height::new(0)).await?;
 
-    let mut follower = build_state(&follower_dirs, &genesis, follower_key, Height::new(0))?;
-    follower.state.seed_genesis_blob_metadata().await?;
-    follower.state.hydrate_blob_parent_root().await?;
+    let mut follower =
+        build_seeded_state(&follower_dirs, &genesis, follower_key, Height::new(0)).await?;
 
-    let mut newcomer = build_state(&newcomer_dirs, &genesis, newcomer_key, Height::new(0))?;
-    newcomer.state.seed_genesis_blob_metadata().await?;
-    newcomer.state.hydrate_blob_parent_root().await?;
+    let mut newcomer =
+        build_seeded_state(&newcomer_dirs, &genesis, newcomer_key, Height::new(0)).await?;
 
     let height = Height::new(0);
     let round = Round::new(0);
     let round_i64 = round.as_i64();
 
-    let payload = sample_execution_payload_v3_for_height(height);
-    let payload_bytes = Bytes::from(payload.as_ssz_bytes());
     let bundle = sample_blob_bundle(1);
+    let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
 
     let payload_id = common::payload_id(42);
     let mock_engine =
@@ -63,19 +55,15 @@ async fn blob_new_node_sync() -> color_eyre::Result<()> {
     let (_payload_echo, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
     let sidecars_bundle = maybe_bundle.expect("blob bundle present");
 
-    let proposed = proposer
-        .state
-        .propose_value_with_blobs(
-            height,
-            round,
-            payload_bytes.clone(),
-            &payload,
-            Some(&sidecars_bundle),
-        )
-        .await?;
-
-    let (_signed_header, sidecars) =
-        proposer.state.prepare_blob_sidecar_parts(&proposed, Some(&sidecars_bundle))?;
+    let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+        &mut proposer.state,
+        height,
+        round,
+        &payload,
+        Some(&sidecars_bundle),
+    )
+    .await?;
+    let sidecars = maybe_sidecars.expect("sidecars present");
 
     let stream_messages: Vec<StreamMessage<_>> = proposer
         .state
