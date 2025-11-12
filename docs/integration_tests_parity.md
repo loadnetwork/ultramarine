@@ -156,6 +156,9 @@ Decisions are recorded here; once you approve a direction it becomes part of sco
 ## 7. Notes
 
 - **Tier strategy**: Tier 0 = state-level tests (`blob_state/`), Tier 1 = full-node tests (`full_node/`) with **three** validators + followers to match Tendermint majority rules. Tier 0 stays default for `make itest`, Tier 1 becomes `make itest-node`.
+- **Harness builder**: Tier 1 now exposes `FullNodeTestBuilder` in `crates/test/tests/full_node/node_harness.rs`, so scenarios describe only the consensus actions while setup/teardown stays centralized.
+- **Execution cadence**: `make itest-node` runs each Tier 1 test in its own `cargo test` process (`blob_quorum`, `validator_restart`, `restart_mid_height`) to avoid cross-test resource leaks. Running `cargo test -p ultramarine-test --test full_node -- --ignored` is fine for ad-hoc runs but may time out when chaining all scenarios inside one process.
+- **Tier‑0 → Tier‑1 migration**: The first promotion (`blob_new_node_sync`) now lives as `full_node_new_node_sync`, exercising ValueSync end-to-end by running a 4-validator cluster, taking one validator offline for two heights, and verifying it syncs the missing blobs/metadata when it rejoins.
 - **Architecture references**: Malachite’s `TestBuilder` (networked validators + followers; see `malachite/code/crates/test/tests/it/full_nodes.rs`) and Snapchain’s consensus harness (`snapchain/tests/consensus_test.rs`) are the baselines we mirror.
 - **Next steps**: Replace the single-node helper with the multi-validator harness, then port restart/sync/negative paths (P2→P4) before wiring the execution bridge (P5).
 

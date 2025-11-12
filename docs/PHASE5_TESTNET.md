@@ -270,6 +270,8 @@ spammer()
 - Exercises proposer/follower blob flow, crash/restart, and ValueSync with the production ExecutionClient talking to the Engine RPC stub. Single-node shortcuts are no longer supported.
 - Harness requirements are derived directly from Malachite’s full-node IT suite (`malachite/code/crates/test/tests/it/full_nodes.rs:11-175`) and Snapchain’s consensus tests (`snapchain/tests/consensus_test.rs:1-370`): deterministic port allocation, serialized execution (`serial_test`), and real gossip traffic.
 - `make itest-node` must boot validators at `Height::INITIAL` and keep `config.sync.enabled` true so we test the exact paths we run in production.
+- The Makefile target invokes each Tier 1 scenario via its own `cargo test ... -- --ignored` call so every harness run starts from a clean process (running the entire `full_node` suite in one `cargo test` invocation is still possible for local debugging).
+- Current Tier 1 coverage: quorum roundtrip, validator restart recovery, restart-mid-height, and the newly promoted new-node sync case (4-validator cluster, one validator offline for two heights, then catching up via ValueSync).
 - Current scenarios: `full_node_blob_quorum_roundtrip` (quorum end-to-end) and `full_node_validator_restart_recovers` (post-height-1 restart with blob hydration checks). Attempting to advance to height 2 during a restart currently stalls consensus (repeated `RepublishVote` events); this is a known limitation feeding Phase P2 crash/sync work.
 
 - Run manually via `make all` + `make spam-blobs` (optionally gated by env vars such as `ULTRA_E2E=1`).

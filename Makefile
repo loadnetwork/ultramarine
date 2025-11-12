@@ -602,4 +602,7 @@ itest-list: ## List Tier 0 integration tests.
 
 .PHONY: itest-node
 itest-node: ## Run full-node (Tier 1) integration tests (ignored + serialized).
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_quorum_roundtrip -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_validator_restart_recovers -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_mid_height -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_new_node_sync -- --ignored --nocapture
