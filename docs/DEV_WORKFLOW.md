@@ -197,17 +197,23 @@ The blob integration suite lives in the dedicated `crates/test` package so Cargo
 
 - **Run the full-node (Tier 1) harness**
   ```bash
-  make itest-node   # spins Ultramarine + Engine stub (~20 s)
+  make itest-node   # spins Ultramarine + Engine stub (~1 min; runs each test in isolation)
   ```
-  This boots a real Ultramarine node (Malachite channel actors, WAL, libp2p) and
-  drives blobbed proposals end-to-end using the Engine API stub. The Tier 1
-  tests are tagged `#[ignore]` and `#[serial]`, so they only run via this
-  target (or `cargo test -p ultramarine-test --test full_node -- --ignored`).
-  Today the suite contains:
-  - `full_node_blob_quorum_roundtrip` – 3 validators finalize blobbed blocks
-  - `full_node_validator_restart_recovers` – restart height 1 and verify blob hydration
-  
-  Each scenario dumps store + WAL snapshots if a timeout occurs so failures are actionable.
+  This boots real Ultramarine nodes (Malachite channel actors, WAL, libp2p) and
+  drives blobbed proposals end-to-end using the Engine API stub. To avoid shared
+  process state between scenarios, the Makefile now invokes each Tier 1 test via
+  its own `cargo test -p ultramarine-test --test full_node <name> -- --ignored --nocapture`
+  invocation. Running `cargo test -p ultramarine-test --test full_node -- --ignored` directly
+  is still useful for local exploration, but the reproducible path is `make itest-node`.
+
+  The suite currently contains:
+  - `full_node_blob_quorum_roundtrip` – three validators finalize two blobbed blocks
+  - `full_node_validator_restart_recovers` – stop the proposer after height 1 and ensure it replays WAL + blobs for height 2
+  - `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
+  - `full_node_new_node_sync` – run a 4-validator cluster, take the fourth validator offline for the first two heights, then bring it back and ensure ValueSync fetches the missing blobs/metadata
+
+  Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are actionable, and they all share the new
+  builder harness (`FullNodeTestBuilder`) located in `crates/test/tests/full_node/node_harness.rs`.
 
 ### What the harness does
 

@@ -7,9 +7,11 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fs::File,
+    fs::{self, File},
+    future::Future,
     net::{SocketAddr, TcpListener as StdTcpListener},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
@@ -83,6 +85,84 @@ mod blob_common;
 use blob_common::{make_genesis, sample_blob_bundle, sample_execution_payload_v3_for_height};
 use tracing_subscriber::EnvFilter;
 
+type NodeConfigHook = Arc<dyn Fn(usize, &mut Config) + Send + Sync>;
+
+#[derive(Clone)]
+struct HarnessConfig {
+    node_count: usize,
+    start_height: Option<Height>,
+    node_config_hook: Option<NodeConfigHook>,
+}
+
+impl HarnessConfig {
+    fn apply_node_config(&self, index: usize, config: &mut Config) {
+        if let Some(hook) = &self.node_config_hook {
+            (hook)(index, config);
+        }
+    }
+}
+
+type ScenarioFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+struct FullNodeTestBuilder {
+    node_count: usize,
+    start_height: Option<Height>,
+    node_config_hook: Option<NodeConfigHook>,
+}
+
+impl Default for FullNodeTestBuilder {
+    fn default() -> Self {
+        Self { node_count: 3, start_height: Some(Height::new(1)), node_config_hook: None }
+    }
+}
+
+impl FullNodeTestBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn node_count(mut self, count: usize) -> Self {
+        self.node_count = count;
+        self
+    }
+
+    fn start_height(mut self, height: Option<Height>) -> Self {
+        self.start_height = height;
+        self
+    }
+
+    fn with_node_config<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(usize, &mut Config) + Send + Sync + 'static,
+    {
+        self.node_config_hook = Some(Arc::new(hook));
+        self
+    }
+
+    async fn run<F>(self, scenario: F) -> Result<()>
+    where
+        F: for<'network> FnOnce(&'network mut NetworkHarness) -> ScenarioFuture<'network>,
+    {
+        let config = HarnessConfig {
+            node_count: self.node_count,
+            start_height: self.start_height,
+            node_config_hook: self.node_config_hook.clone(),
+        };
+
+        let mut network = NetworkHarness::start(&config).await?;
+        let scenario_result = scenario(&mut network).await;
+        let shutdown_result = network.shutdown().await;
+
+        match scenario_result {
+            Ok(_) => shutdown_result,
+            Err(err) => {
+                shutdown_result?;
+                Err(err)
+            }
+        }
+    }
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn install_color_eyre_once() {
@@ -118,21 +198,26 @@ fn build_env_filter() -> EnvFilter {
 #[serial(full_node)]
 async fn full_node_blob_quorum_roundtrip() -> Result<()> {
     install_color_eyre_once();
-    let mut network = NetworkHarness::start(3).await?;
-    tokio::try_join!(
-        network.wait_for_height(0, Height::new(2)),
-        network.wait_for_height(1, Height::new(2)),
-        network.wait_for_height(2, Height::new(2))
-    )?;
-    sleep(Duration::from_millis(200)).await;
-    network.shutdown().await?;
-    network.assert_blobs(0, Height::new(1), 1).await?;
-    network.assert_blobs(1, Height::new(1), 1).await?;
-    network.assert_blobs(2, Height::new(1), 1).await?;
-    network.assert_blobs(0, Height::new(2), 1).await?;
-    network.assert_blobs(1, Height::new(2), 1).await?;
-    network.assert_blobs(2, Height::new(2), 1).await?;
-    Ok(())
+    FullNodeTestBuilder::new()
+        .node_count(3)
+        .run(|network| {
+            Box::pin(async move {
+                tokio::try_join!(
+                    network.wait_for_height(0, Height::new(2)),
+                    network.wait_for_height(1, Height::new(2)),
+                    network.wait_for_height(2, Height::new(2))
+                )?;
+                sleep(Duration::from_millis(200)).await;
+                network.assert_blobs(0, Height::new(1), 1).await?;
+                network.assert_blobs(1, Height::new(1), 1).await?;
+                network.assert_blobs(2, Height::new(1), 1).await?;
+                network.assert_blobs(0, Height::new(2), 1).await?;
+                network.assert_blobs(1, Height::new(2), 1).await?;
+                network.assert_blobs(2, Height::new(2), 1).await?;
+                Ok(())
+            })
+        })
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -140,24 +225,29 @@ async fn full_node_blob_quorum_roundtrip() -> Result<()> {
 #[serial(full_node)]
 async fn full_node_validator_restart_recovers() -> Result<()> {
     install_color_eyre_once();
-    let mut network = NetworkHarness::start(3).await?;
-    network.wait_all(Height::new(1)).await?;
-    sleep(Duration::from_millis(200)).await;
+    FullNodeTestBuilder::new()
+        .node_count(3)
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_all(Height::new(1)).await?;
+                sleep(Duration::from_millis(200)).await;
 
-    network.restart_node(0).await?;
-    network.wait_for_height(1, Height::new(2)).await?;
-    network.wait_for_height(2, Height::new(2)).await?;
-    network.wait_for_height(0, Height::new(2)).await?;
+                network.restart_node(0).await?;
+                network.wait_for_height(1, Height::new(2)).await?;
+                network.wait_for_height(2, Height::new(2)).await?;
+                network.wait_for_height(0, Height::new(2)).await?;
 
-    network.shutdown().await?;
-    // Verify blob metadata for both heights survived the restart
-    network.assert_blobs(0, Height::new(1), 1).await?;
-    network.assert_blobs(1, Height::new(1), 1).await?;
-    network.assert_blobs(2, Height::new(1), 1).await?;
-    network.assert_blobs(0, Height::new(2), 1).await?;
-    network.assert_blobs(1, Height::new(2), 1).await?;
-    network.assert_blobs(2, Height::new(2), 1).await?;
-    Ok(())
+                // Verify blob metadata for both heights survived the restart
+                network.assert_blobs(0, Height::new(1), 1).await?;
+                network.assert_blobs(1, Height::new(1), 1).await?;
+                network.assert_blobs(2, Height::new(1), 1).await?;
+                network.assert_blobs(0, Height::new(2), 1).await?;
+                network.assert_blobs(1, Height::new(2), 1).await?;
+                network.assert_blobs(2, Height::new(2), 1).await?;
+                Ok(())
+            })
+        })
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -165,56 +255,91 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
 #[serial(full_node)]
 async fn full_node_restart_mid_height() -> Result<()> {
     install_color_eyre_once();
-    let mut network = NetworkHarness::start(3).await?;
+    FullNodeTestBuilder::new()
+        .node_count(3)
+        .run(|network| {
+            Box::pin(async move {
+                // Drive height 1 to completion.
+                network.wait_all(Height::new(1)).await?;
 
-    // Drive height 1 to completion.
-    network.wait_all(Height::new(1)).await?;
+                // Let proposer for height 2 start streaming, then restart node 1 mid-round.
+                network.wait_for_height(0, Height::new(2)).await?;
+                sleep(Duration::from_millis(100)).await;
+                network.restart_node(1).await?;
 
-    // Let proposer for height 2 start streaming, then restart node 1 mid-round.
-    network.wait_for_height(0, Height::new(2)).await?;
-    sleep(Duration::from_millis(100)).await;
-    network.restart_node(1).await?;
+                // All nodes should eventually reach height 3.
+                network.wait_for_height(0, Height::new(3)).await?;
+                network.wait_for_height(1, Height::new(3)).await?;
+                network.wait_for_height(2, Height::new(3)).await?;
 
-    // All nodes should eventually reach height 3.
-    network.wait_for_height(0, Height::new(3)).await?;
-    network.wait_for_height(1, Height::new(3)).await?;
-    network.wait_for_height(2, Height::new(3)).await?;
+                for node in 0..3 {
+                    network.assert_blobs(node, Height::new(1), 1).await?;
+                    network.assert_blobs(node, Height::new(2), 1).await?;
+                    network.assert_blobs(node, Height::new(3), 1).await?;
+                }
 
-    network.shutdown().await?;
+                Ok(())
+            })
+        })
+        .await
+}
 
-    for node in 0..3 {
-        network.assert_blobs(node, Height::new(1), 1).await?;
-        network.assert_blobs(node, Height::new(2), 1).await?;
-        network.assert_blobs(node, Height::new(3), 1).await?;
-    }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_new_node_sync() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(4)
+        .run(|network| {
+            Box::pin(async move {
+                // Take validator 3 offline before height 1 so it misses the first two heights.
+                network.stop_node(3).await?;
 
-    Ok(())
+                tokio::try_join!(
+                    network.wait_for_height(0, Height::new(2)),
+                    network.wait_for_height(1, Height::new(2)),
+                    network.wait_for_height(2, Height::new(2))
+                )?;
+
+                // Bring the node back online and ensure ValueSync catches it up.
+                network.start_node(3).await?;
+                network.wait_for_height(3, Height::new(2)).await?;
+
+                network.assert_blobs(3, Height::new(1), 1).await?;
+                network.assert_blobs(3, Height::new(2), 1).await?;
+                Ok(())
+            })
+        })
+        .await
 }
 
 /// Representation of a node running inside the multi-node harness.
 struct NodeProcess {
-    handle: Handle,
+    handle: Option<Handle>,
     home: TempDir,
-    engine_stub: EngineRpcStub,
+    engine_stub: Option<EngineRpcStub>,
     event_rx: TokioMutex<RxEvent<LoadContext>>,
     config: Config,
     genesis_path: PathBuf,
     key_path: PathBuf,
     jwt_path: PathBuf,
+    start_height: Option<Height>,
+    running: bool,
 }
 
 impl NodeProcess {
-    async fn restart(&mut self) -> Result<()> {
-        self.handle.kill(None).await?;
-        sleep(Duration::from_millis(200)).await;
-        self.engine_stub.shutdown().await;
+    async fn start(&mut self) -> Result<()> {
+        if self.running {
+            return Ok(());
+        }
         let new_stub = EngineRpcStub::start().await?;
         let app = App {
             config: self.config.clone(),
             home_dir: self.home.path().to_path_buf(),
             genesis_file: self.genesis_path.clone(),
             private_key_file: self.key_path.clone(),
-            start_height: Some(Height::new(1)),
+            start_height: self.start_height,
             engine_http_url: Some(new_stub.url()),
             engine_ipc_path: None,
             eth1_rpc_url: Some(new_stub.url()),
@@ -222,25 +347,47 @@ impl NodeProcess {
         };
         let handle = app.start().await?;
         self.event_rx = TokioMutex::new(handle.tx_event.subscribe());
-        self.handle = handle;
-        self.engine_stub = new_stub;
+        self.handle = Some(handle);
+        self.engine_stub = Some(new_stub);
+        self.running = true;
         Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        if !self.running {
+            return Ok(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.kill(None).await?;
+        }
+        sleep(Duration::from_millis(200)).await;
+        if let Some(stub) = self.engine_stub.take() {
+            stub.shutdown().await;
+        }
+        self.running = false;
+        Ok(())
+    }
+
+    async fn restart(&mut self) -> Result<()> {
+        self.stop().await?;
+        self.start().await
     }
 }
 
 /// Harness that manages multiple Ultramarine nodes connected over real libp2p transport.
 struct NetworkHarness {
     nodes: Vec<NodeProcess>,
+    is_shutdown: bool,
 }
 
 impl NetworkHarness {
-    async fn start(node_count: usize) -> Result<Self> {
-        eyre::ensure!(node_count > 0, "at least one node required");
-        let (genesis, validator_keys) = make_genesis(node_count);
-        let addresses: Vec<NodeAddrs> = (0..node_count).map(|_| NodeAddrs::new()).collect();
-        let mut nodes = Vec::with_capacity(node_count);
+    async fn start(config: &HarnessConfig) -> Result<Self> {
+        eyre::ensure!(config.node_count > 0, "at least one node required");
+        let (genesis, validator_keys) = make_genesis(config.node_count);
+        let addresses: Vec<NodeAddrs> = (0..config.node_count).map(|_| NodeAddrs::new()).collect();
+        let mut nodes = Vec::with_capacity(config.node_count);
 
-        for index in 0..node_count {
+        for index in 0..config.node_count {
             let engine_stub = EngineRpcStub::start().await?;
             let home = TempDir::new().wrap_err("create node tempdir")?;
             let validator = &validator_keys[index];
@@ -249,9 +396,9 @@ impl NetworkHarness {
                 write_json(home.path().join("validator_key.json"), &validator.private_key())?;
             let jwt_path = write_jwt(home.path().join("jwt.hex"))?;
 
-            let mut config = generate_config(
+            let mut node_config = generate_config(
                 index,
-                node_count,
+                config.node_count,
                 RuntimeConfig::default(),
                 false,
                 BootstrapProtocol::Kademlia,
@@ -262,23 +409,25 @@ impl NetworkHarness {
                 TransportProtocol::Tcp,
                 LoggingConfig::default(),
             );
-            config.metrics.enabled = false;
+            node_config.metrics.enabled = false;
 
             // Tune ValueSync for faster catch-up during restarts
-            config.sync.status_update_interval = Duration::from_secs(1);
-            config.sync.request_timeout = Duration::from_secs(5);
-            config.sync.parallel_requests = 3;
+            node_config.sync.status_update_interval = Duration::from_secs(1);
+            node_config.sync.request_timeout = Duration::from_secs(5);
+            node_config.sync.parallel_requests = 3;
 
-            config.consensus.p2p.listen_addr = addresses[index].consensus.clone();
-            config.consensus.p2p.persistent_peers =
+            node_config.consensus.p2p.listen_addr = addresses[index].consensus.clone();
+            node_config.consensus.p2p.persistent_peers =
                 peer_multiaddrs(&addresses, index, |addr| &addr.consensus);
-            config.consensus.p2p.discovery.enabled = false;
-            config.mempool.p2p.listen_addr = addresses[index].mempool.clone();
-            config.mempool.p2p.persistent_peers =
+            node_config.consensus.p2p.discovery.enabled = false;
+            node_config.mempool.p2p.listen_addr = addresses[index].mempool.clone();
+            node_config.mempool.p2p.persistent_peers =
                 peer_multiaddrs(&addresses, index, |addr| &addr.mempool);
-            config.mempool.p2p.discovery.enabled = false;
+            node_config.mempool.p2p.discovery.enabled = false;
 
-            let stored_config = config.clone();
+            config.apply_node_config(index, &mut node_config);
+
+            let stored_config = node_config.clone();
 
             let stored_genesis = genesis_path.clone();
             let stored_key = key_path.clone();
@@ -287,11 +436,11 @@ impl NetworkHarness {
             // Let the node handle genesis initialization naturally through App::start()
             // which calls State::hydrate_blob_parent_root() to seed genesis metadata if needed
             let app = App {
-                config,
+                config: node_config,
                 home_dir: home.path().to_path_buf(),
                 genesis_file: genesis_path,
                 private_key_file: key_path,
-                start_height: Some(Height::new(1)),
+                start_height: config.start_height,
                 engine_http_url: Some(engine_stub.url()),
                 engine_ipc_path: None,
                 eth1_rpc_url: Some(engine_stub.url()),
@@ -301,14 +450,16 @@ impl NetworkHarness {
             let handle = app.start().await?;
             let event_rx = TokioMutex::new(handle.tx_event.subscribe());
             nodes.push(NodeProcess {
-                handle,
+                handle: Some(handle),
                 home,
-                engine_stub,
+                engine_stub: Some(engine_stub),
                 event_rx,
                 config: stored_config,
                 genesis_path: stored_genesis,
                 key_path: stored_key,
                 jwt_path: stored_jwt,
+                start_height: config.start_height,
+                running: true,
             });
         }
 
@@ -316,7 +467,7 @@ impl NetworkHarness {
         // before consensus begins. Without this, late-starting nodes miss proposals.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        Ok(Self { nodes })
+        Ok(Self { nodes, is_shutdown: false })
     }
 
     async fn wait_for_height(&self, node_index: usize, target_height: Height) -> Result<()> {
@@ -344,11 +495,14 @@ impl NetworkHarness {
         match timeout(TEST_TIMEOUT, wait).await {
             Ok(res) => res,
             Err(_) => {
-                let snapshot = events_log.lock().unwrap();
-                dump_node_state(node_index, node).await?;
+                let snapshot = {
+                    let log = events_log.lock().unwrap();
+                    log.join(" | ")
+                };
+                dump_node_state(node_index, node).await;
                 Err(eyre::eyre!(
                     "node {node_index} timed out waiting for height {target_height}; last events: {}",
-                    snapshot.join(" | ")
+                    snapshot
                 ))
             }
         }
@@ -369,18 +523,44 @@ impl NetworkHarness {
         node.restart().await
     }
 
+    async fn stop_node(&mut self, node_index: usize) -> Result<()> {
+        let node = self
+            .nodes
+            .get_mut(node_index)
+            .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        node.stop().await
+    }
+
+    async fn start_node(&mut self, node_index: usize) -> Result<()> {
+        let node = self
+            .nodes
+            .get_mut(node_index)
+            .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        node.start().await
+    }
+
     async fn shutdown(&mut self) -> Result<()> {
+        if self.is_shutdown {
+            return Ok(());
+        }
         for node in &mut self.nodes {
-            node.handle.kill(None).await?;
+            node.stop().await?;
         }
-        sleep(Duration::from_millis(200)).await;
-        for node in &self.nodes {
-            node.engine_stub.shutdown().await;
-        }
+        self.is_shutdown = true;
         Ok(())
     }
 
-    async fn assert_blobs(&self, node_index: usize, height: Height, expected: usize) -> Result<()> {
+    async fn assert_blobs(
+        &mut self,
+        node_index: usize,
+        height: Height,
+        expected: usize,
+    ) -> Result<()> {
+        if !self.is_shutdown {
+            self.shutdown().await?;
+            // Give RocksDB time to release file locks before reopening for inspection.
+            sleep(Duration::from_millis(100)).await;
+        }
         let node =
             self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
         let blob_store = RocksDbBlobStore::open(node.home.path().join("blob_store.db"))
@@ -777,20 +957,35 @@ fn build_success(id: &Value, result: Value) -> Value {
     })
 }
 
-async fn dump_node_state(node_index: usize, node: &NodeProcess) -> Result<()> {
-    let store = Store::open(node.home.path().join("store.db"), DbMetrics::new())?;
-    let latest_decided = store.max_decided_value_height().await;
-    let undecided = store
-        .get_all_undecided_blob_metadata_before(Height::new(u64::MAX))
-        .await
-        .unwrap_or_default();
+async fn dump_node_state(node_index: usize, node: &NodeProcess) {
+    if let Err(e) = async {
+        let store_snapshot = tempfile::tempdir().wrap_err("create store snapshot dir")?;
+        let store_snapshot_path = store_snapshot.path().join("store.db");
+        copy_dir_recursive(&node.home.path().join("store.db"), &store_snapshot_path)
+            .wrap_err("snapshot store db")?;
+        let store = Store::open(store_snapshot_path, DbMetrics::new())?;
+        let latest_decided = store.max_decided_value_height().await;
+        let undecided = store
+            .get_all_undecided_blob_metadata_before(Height::new(u64::MAX))
+            .await
+            .unwrap_or_default();
 
-    tracing::warn!(
-        node = node_index,
-        ?latest_decided,
-        undecided_rounds = ?undecided,
-        "Timeout diagnostics: store snapshot"
-    );
+        tracing::warn!(
+            node = node_index,
+            ?latest_decided,
+            undecided_rounds = ?undecided,
+            "Timeout diagnostics: store snapshot"
+        );
+        Ok::<(), color_eyre::Report>(())
+    }
+    .await
+    {
+        tracing::warn!(
+            node = node_index,
+            error = %e,
+            "Timeout diagnostics: failed to capture store snapshot"
+        );
+    }
 
     let wal_path = node.home.path().join("wal/consensus.wal");
     if wal_path.exists() {
@@ -835,8 +1030,6 @@ async fn dump_node_state(node_index: usize, node: &NodeProcess) -> Result<()> {
             "Timeout diagnostics: WAL file missing"
         );
     }
-
-    Ok(())
 }
 
 fn build_error(id: &Value, code: i64, message: String) -> Value {
@@ -845,4 +1038,27 @@ fn build_error(id: &Value, code: i64, message: String) -> Value {
         "error": { "code": code, "message": message },
         "id": id,
     })
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_file() {
+        fs::create_dir_all(dst)?;
+        let file_name = src.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "source file missing name")
+        })?;
+        fs::copy(src, dst.join(file_name))?;
+        return Ok(());
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
