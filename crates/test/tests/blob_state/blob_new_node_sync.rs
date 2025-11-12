@@ -11,9 +11,10 @@ mod common;
 #[tokio::test]
 async fn blob_new_node_sync() -> color_eyre::Result<()> {
     use common::{
-        TestDirs, build_seeded_state, make_genesis, propose_with_optional_blobs,
+        TestDirs, build_seeded_state, make_genesis,
         mocks::{MockEngineApi, MockExecutionNotifier},
-        sample_blob_bundle, sample_execution_payload_v3_for_height, test_peer_id,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
+        test_peer_id,
     };
     use malachitebft_app_channel::app::{
         streaming::StreamMessage,

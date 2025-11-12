@@ -199,9 +199,16 @@ where
         }
     }
 
-    /// Returns the earliest height available in the state
+    /// Returns the earliest height available in the state.
+    /// If no values have been decided yet (empty store), returns the current height.
     pub async fn get_earliest_height(&self) -> Height {
-        self.store.min_decided_value_height().await.unwrap_or_default()
+        self.store.min_decided_value_height().await.unwrap_or(self.current_height)
+    }
+
+    /// Returns the latest (maximum) decided height from the store.
+    /// Returns None if no heights have been decided yet.
+    pub async fn get_latest_decided_height(&self) -> Option<Height> {
+        self.store.max_decided_value_height().await
     }
 
     /// Returns a reference to the blob engine for blob operations
@@ -654,14 +661,32 @@ where
 
         // Store the proposal and its data
         self.store.store_undecided_proposal(value.clone()).await?;
-        self.store_undecided_proposal_data(data).await?;
+
+        // DIAGNOSTIC: Capture data length before move
+        let data_len = data.len();
+
+        self.store_undecided_proposal_data(parts.height, parts.round, data).await?;
+
+        // DIAGNOSTIC: Confirm follower stored block data
+        info!(
+            "[DIAG] ✅ Follower stored block data: height={}, round={}, size={} bytes, address={}",
+            parts.height,
+            parts.round,
+            data_len,
+            self.validator_address()
+        );
 
         Ok(Some(value))
     }
 
-    pub async fn store_undecided_proposal_data(&mut self, data: Bytes) -> eyre::Result<()> {
+    pub async fn store_undecided_proposal_data(
+        &mut self,
+        height: Height,
+        round: Round,
+        data: Bytes,
+    ) -> eyre::Result<()> {
         self.store
-            .store_undecided_block_data(self.current_height, self.current_round, data)
+            .store_undecided_block_data(height, round, data)
             .await
             .map_err(|e| eyre::Report::new(e))
     }
@@ -676,10 +701,7 @@ where
         round: Round,
         data: Bytes,
     ) -> eyre::Result<()> {
-        self.store
-            .store_undecided_block_data(height, round, data)
-            .await
-            .map_err(|e| eyre::Report::new(e))
+        self.store_undecided_proposal_data(height, round, data).await
     }
 
     /// Process a [`SyncedValuePackage`] received during state sync.
@@ -1135,235 +1157,271 @@ where
         let proposal =
             self.store.get_undecided_proposal(certificate.height, certificate.round).await;
 
-        let proposal = match proposal {
-            Ok(Some(proposal)) => proposal,
+        let (proposal, is_idempotent_replay) = match proposal {
+            Ok(Some(proposal)) => (proposal, false),
             Ok(None) => {
-                error!(
-                    height = %certificate.height,
-                    round = %certificate.round,
-                    "Trying to commit a value that is not decided"
-                );
-
-                return Ok(()); // FIXME: Return an actual error and handle in caller
+                // Undecided proposal missing: if the decided value already exists (e.g., WAL
+                // replay), we're in idempotent mode. We still need to advance current_height
+                // and clean up state, but we skip re-creating metadata that already exists.
+                match self.store.get_decided_value(certificate.height).await {
+                    Ok(Some(decided_value)) => {
+                        info!(
+                            height = %certificate.height,
+                            round = %certificate.round,
+                            "Decided value already present; entering idempotent commit mode (WAL replay)"
+                        );
+                        // In idempotent mode, metadata/blobs should already be decided, so we
+                        // just need to advance height. We create a minimal ProposedValue to
+                        // satisfy the borrow checker, but we'll skip metadata operations.
+                        let minimal_proposal = ProposedValue {
+                            height: certificate.height,
+                            round: certificate.round,
+                            valid_round: Round::Nil,
+                            proposer: Address::new([0u8; 20]), /* Placeholder, not used in
+                                                                * idempotent path */
+                            value: decided_value.value,
+                            validity: Validity::Valid,
+                        };
+                        (minimal_proposal, true)
+                    }
+                    Ok(None) => {
+                        return Err(eyre::eyre!(
+                            "Cannot commit height {} round {}: neither undecided proposal nor decided value found",
+                            certificate.height,
+                            certificate.round
+                        ));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             Err(e) => return Err(e.into()),
         };
 
-        self.store.store_decided_value(&certificate, proposal.value.clone()).await?;
+        // Only perform persistence and metadata operations on first commit (not WAL replay)
+        if !is_idempotent_replay {
+            self.store.store_decided_value(&certificate, proposal.value.clone()).await?;
 
-        // Phase 4: Three-layer metadata promotion (Layer 1 → Layer 2 → Layer 3)
-        // This follows the architectural principle: Consensus → Ethereum → Blobs
+            // Phase 4: Three-layer metadata promotion (Layer 1 → Layer 2 → Layer 3)
+            // This follows the architectural principle: Consensus → Ethereum → Blobs
 
-        // LAYER 1: Store ConsensusBlockMetadata (pure BFT consensus state)
-        // Build from certificate and proposal data
+            // LAYER 1: Store ConsensusBlockMetadata (pure BFT consensus state)
+            // Build from certificate and proposal data
 
-        // Compute validator set hash using SSZ tree-hash for deterministic ordering
-        let validator_set_hash = {
-            use tree_hash::{Hash256 as TreeHash256, merkle_root};
+            // Compute validator set hash using SSZ tree-hash for deterministic ordering
+            let validator_set_hash = {
+                use tree_hash::{Hash256 as TreeHash256, merkle_root};
 
-            let leaves: Vec<TreeHash256> = self
-                .genesis
-                .validator_set
-                .validators
-                .iter()
-                .map(|validator| {
-                    let address_bytes = validator.address.into_inner();
-                    let mut padded = [0u8; 32];
-                    padded[..address_bytes.len()].copy_from_slice(&address_bytes);
-                    TreeHash256::from_slice(&padded)
-                })
-                .collect();
+                let leaves: Vec<TreeHash256> = self
+                    .genesis
+                    .validator_set
+                    .validators
+                    .iter()
+                    .map(|validator| {
+                        let address_bytes = validator.address.into_inner();
+                        let mut padded = [0u8; 32];
+                        padded[..address_bytes.len()].copy_from_slice(&address_bytes);
+                        TreeHash256::from_slice(&padded)
+                    })
+                    .collect();
 
-            if leaves.is_empty() {
-                B256::ZERO
-            } else {
-                let mut leaf_bytes = Vec::with_capacity(leaves.len() * 32);
-                for hash in &leaves {
-                    leaf_bytes.extend_from_slice(hash.as_ref());
-                }
-                let root = merkle_root(&leaf_bytes, leaves.len());
-                B256::from_slice(root.as_ref())
-            }
-        };
-
-        let consensus_metadata = ConsensusBlockMetadata::new(
-            certificate.height,
-            certificate.round,
-            proposal.proposer,
-            proposal.value.metadata.execution_payload_header.timestamp,
-            validator_set_hash,
-            proposal.value.metadata.execution_payload_header.block_hash,
-            proposal.value.metadata.execution_payload_header.gas_limit,
-            proposal.value.metadata.execution_payload_header.gas_used,
-        );
-
-        self.store
-            .put_consensus_block_metadata(certificate.height, &consensus_metadata)
-            .await
-            .map_err(|e| {
-                error!(
-                    height = %certificate.height,
-                    round = %certificate.round,
-                    error = %e,
-                    "Failed to store ConsensusBlockMetadata"
-                );
-                eyre::eyre!(
-                    "Cannot finalize block at height {} without consensus metadata: {}",
-                    certificate.height,
-                    e
-                )
-            })?;
-
-        // LAYER 2: Promote BlobMetadata from undecided → decided
-        // This MUST happen before blob engine promotion to maintain data consistency.
-        // If this fails, we abort the commit because the Ethereum compatibility layer is broken.
-        self.store
-            .mark_blob_metadata_decided(certificate.height, certificate.round)
-            .await
-            .map_err(|e| {
-                error!(
-                    height = %certificate.height,
-                    round = %certificate.round,
-                    error = %e,
-                    "CRITICAL: Failed to promote BlobMetadata - aborting commit"
-                );
-                eyre::eyre!(
-                    "Cannot finalize block at height {} round {} without BlobMetadata: {}",
-                    certificate.height,
-                    certificate.round,
-                    e
-                )
-            })?;
-
-        let metadata = self
-            .store
-            .get_blob_metadata(certificate.height)
-            .await
-            .map_err(|e| {
-                error!(
-                    height = %certificate.height,
-                    error = %e,
-                    "CRITICAL: Failed to load BlobMetadata after promotion"
-                );
-                eyre::eyre!("Failed to load BlobMetadata: {}", e)
-            })?
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "Promoted BlobMetadata missing for height {}",
-                    certificate.height.as_u64()
-                )
-            })?;
-
-        let header = metadata.to_beacon_header();
-        let new_root = header.hash_tree_root();
-        info!(
-            height = %certificate.height,
-            old_root = ?self.last_blob_sidecar_root,
-            new_root = ?new_root,
-            "Updated blob parent root from decided BlobMetadata"
-        );
-        self.last_blob_sidecar_root = new_root;
-
-        // NOTE: Blob promotion to decided state is handled by process_decided_certificate
-        // before validation and EL notification, not here in commit().
-        // This ensures proper ordering: validate first, promote only on success.
-
-        // Track round for cleanup of orphaned blobs
-        let round_i64 = certificate.round.as_i64();
-
-        // Store block data for decided value
-        let block_data = self.store.get_block_data(certificate.height, certificate.round).await?;
-
-        // Log first 32 bytes of block data with JNT prefix
-        if let Some(data) = &block_data &&
-            data.len() >= 32
-        {
-            info!("Committed block_data[0..32]: {}", hex::encode(&data[..32]));
-        }
-
-        if let Some(data) = block_data {
-            self.store.store_decided_block_data(certificate.height, data).await?;
-        }
-
-        // Phase 4: Cache update moved above (after BlobMetadata promotion)
-        // Old blob sidecar header loading removed - we now use BlobMetadata
-
-        // Prune the store, keeping recent decided heights within the retention window
-        let window = self.blob_retention_window.max(1);
-        let retain_floor = certificate.height.as_u64().saturating_sub(window - 1);
-        let retain_height = Height::new(retain_floor);
-        self.store.prune(retain_height).await?;
-
-        // Clean up orphaned blobs from failed rounds before advancing height
-        // Any blobs that were stored but not marked as decided are orphaned and should be removed
-        if let Some(rounds) = self.blob_rounds.get(&certificate.height) {
-            for &round in rounds.iter() {
-                // Skip the decided round
-                if round != round_i64 {
-                    let Some(round_u32) = u32::try_from(round).ok() else {
-                        warn!(
-                            height = %certificate.height,
-                            round = round,
-                            "Invalid negative round encountered during metadata cleanup"
-                        );
-                        continue;
-                    };
-
-                    if let Err(e) = self
-                        .store
-                        .delete_blob_metadata_undecided(certificate.height, Round::new(round_u32))
-                        .await
-                    {
-                        warn!(
-                            height = %certificate.height,
-                            round = round,
-                            error = %e,
-                            "Failed to delete undecided BlobMetadata for failed round"
-                        );
+                if leaves.is_empty() {
+                    B256::ZERO
+                } else {
+                    let mut leaf_bytes = Vec::with_capacity(leaves.len() * 32);
+                    for hash in &leaves {
+                        leaf_bytes.extend_from_slice(hash.as_ref());
                     }
+                    let root = merkle_root(&leaf_bytes, leaves.len());
+                    B256::from_slice(root.as_ref())
+                }
+            };
 
-                    if let Err(e) = self.blob_engine.drop_round(certificate.height, round).await {
-                        error!(
-                            height = %certificate.height,
-                            round = round,
-                            error = %e,
-                            "Failed to drop orphaned blobs for failed round"
-                        );
-                        // Don't fail commit - this is cleanup
-                    } else {
-                        debug!(
-                            height = %certificate.height,
-                            round = round,
-                            "Dropped orphaned blobs for failed round"
-                        );
+            let consensus_metadata = ConsensusBlockMetadata::new(
+                certificate.height,
+                certificate.round,
+                proposal.proposer,
+                proposal.value.metadata.execution_payload_header.timestamp,
+                validator_set_hash,
+                proposal.value.metadata.execution_payload_header.block_hash,
+                proposal.value.metadata.execution_payload_header.gas_limit,
+                proposal.value.metadata.execution_payload_header.gas_used,
+            );
+
+            self.store
+                .put_consensus_block_metadata(certificate.height, &consensus_metadata)
+                .await
+                .map_err(|e| {
+                    error!(
+                        height = %certificate.height,
+                        round = %certificate.round,
+                        error = %e,
+                        "Failed to store ConsensusBlockMetadata"
+                    );
+                    eyre::eyre!(
+                        "Cannot finalize block at height {} without consensus metadata: {}",
+                        certificate.height,
+                        e
+                    )
+                })?;
+
+            // LAYER 2: Promote BlobMetadata from undecided → decided
+            // This MUST happen before blob engine promotion to maintain data consistency.
+            // If this fails, we abort the commit because the Ethereum compatibility layer is
+            // broken.
+            self.store
+                .mark_blob_metadata_decided(certificate.height, certificate.round)
+                .await
+                .map_err(|e| {
+                    error!(
+                        height = %certificate.height,
+                        round = %certificate.round,
+                        error = %e,
+                        "CRITICAL: Failed to promote BlobMetadata - aborting commit"
+                    );
+                    eyre::eyre!(
+                        "Cannot finalize block at height {} round {} without BlobMetadata: {}",
+                        certificate.height,
+                        certificate.round,
+                        e
+                    )
+                })?;
+
+            let metadata = self
+                .store
+                .get_blob_metadata(certificate.height)
+                .await
+                .map_err(|e| {
+                    error!(
+                        height = %certificate.height,
+                        error = %e,
+                        "CRITICAL: Failed to load BlobMetadata after promotion"
+                    );
+                    eyre::eyre!("Failed to load BlobMetadata: {}", e)
+                })?
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Promoted BlobMetadata missing for height {}",
+                        certificate.height.as_u64()
+                    )
+                })?;
+
+            let header = metadata.to_beacon_header();
+            let new_root = header.hash_tree_root();
+            info!(
+                height = %certificate.height,
+                old_root = ?self.last_blob_sidecar_root,
+                new_root = ?new_root,
+                "Updated blob parent root from decided BlobMetadata"
+            );
+            self.last_blob_sidecar_root = new_root;
+
+            // NOTE: Blob promotion to decided state is handled by process_decided_certificate
+            // before validation and EL notification, not here in commit().
+            // This ensures proper ordering: validate first, promote only on success.
+
+            // Track round for cleanup of orphaned blobs
+            let round_i64 = certificate.round.as_i64();
+
+            // Store block data for decided value
+            let block_data =
+                self.store.get_block_data(certificate.height, certificate.round).await?;
+
+            // Log first 32 bytes of block data with JNT prefix
+            if let Some(data) = &block_data &&
+                data.len() >= 32
+            {
+                info!("Committed block_data[0..32]: {}", hex::encode(&data[..32]));
+            }
+
+            if let Some(data) = block_data {
+                self.store.store_decided_block_data(certificate.height, data).await?;
+            }
+
+            // Phase 4: Cache update moved above (after BlobMetadata promotion)
+            // Old blob sidecar header loading removed - we now use BlobMetadata
+
+            // Prune the store, keeping recent decided heights within the retention window
+            let window = self.blob_retention_window.max(1);
+            let retain_floor = certificate.height.as_u64().saturating_sub(window - 1);
+            let retain_height = Height::new(retain_floor);
+            self.store.prune(retain_height).await?;
+
+            // Clean up orphaned blobs from failed rounds before advancing height
+            // Any blobs that were stored but not marked as decided are orphaned and should be
+            // removed
+            if let Some(rounds) = self.blob_rounds.get(&certificate.height) {
+                for &round in rounds.iter() {
+                    // Skip the decided round
+                    if round != round_i64 {
+                        let Some(round_u32) = u32::try_from(round).ok() else {
+                            warn!(
+                                height = %certificate.height,
+                                round = round,
+                                "Invalid negative round encountered during metadata cleanup"
+                            );
+                            continue;
+                        };
+
+                        if let Err(e) = self
+                            .store
+                            .delete_blob_metadata_undecided(
+                                certificate.height,
+                                Round::new(round_u32),
+                            )
+                            .await
+                        {
+                            warn!(
+                                height = %certificate.height,
+                                round = round,
+                                error = %e,
+                                "Failed to delete undecided BlobMetadata for failed round"
+                            );
+                        }
+
+                        if let Err(e) = self.blob_engine.drop_round(certificate.height, round).await
+                        {
+                            error!(
+                                height = %certificate.height,
+                                round = round,
+                                error = %e,
+                                "Failed to drop orphaned blobs for failed round"
+                            );
+                            // Don't fail commit - this is cleanup
+                        } else {
+                            debug!(
+                                height = %certificate.height,
+                                round = round,
+                                "Dropped orphaned blobs for failed round"
+                            );
+                        }
                     }
                 }
             }
-        }
-        // Remove blob tracking for current height (we're advancing)
-        self.blob_rounds.remove(&certificate.height);
+            // Remove blob tracking for current height (we're advancing)
+            self.blob_rounds.remove(&certificate.height);
 
-        // Prune blob engine - keep the same retention policy (last 5 heights)
-        // NOTE: This is a basic, non-configurable implementation for Phase 5 testing.
-        // Phase 6 will add configurable retention policies (CLI flags, multiple strategies, etc.)
-        // For now, blobs older than 5 heights are permanently deleted from RocksDB.
-        match self.blob_engine.prune_archived_before(retain_height).await {
-            Ok(count) if count > 0 => {
-                debug!("Pruned {} blobs before height {}", count, retain_height.as_u64());
+            // Prune blob engine - keep the same retention policy (last 5 heights)
+            // NOTE: This is a basic, non-configurable implementation for Phase 5 testing.
+            // Phase 6 will add configurable retention policies (CLI flags, multiple strategies,
+            // etc.) For now, blobs older than 5 heights are permanently deleted from
+            // RocksDB.
+            match self.blob_engine.prune_archived_before(retain_height).await {
+                Ok(count) if count > 0 => {
+                    debug!("Pruned {} blobs before height {}", count, retain_height.as_u64());
+                }
+                Ok(_) => {} // No blobs to prune
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        height = %retain_height,
+                        "Failed to prune blobs from blob engine"
+                    );
+                    // Don't fail the commit if blob pruning fails - just log the error
+                }
             }
-            Ok(_) => {} // No blobs to prune
-            Err(e) => {
-                error!(
-                    error = %e,
-                    height = %retain_height,
-                    "Failed to prune blobs from blob engine"
-                );
-                // Don't fail the commit if blob pruning fails - just log the error
-            }
-        }
+        } // End of !is_idempotent_replay block
 
-        // Also clean up blob round tracking for old heights
-        self.blob_rounds.retain(|h, _| *h >= retain_height);
+        // Move to next height (always execute, even in idempotent replay)
 
         // Move to next height
         self.current_height = self.current_height.increment();

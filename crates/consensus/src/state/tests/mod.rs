@@ -10,7 +10,6 @@ use malachitebft_app_channel::app::types::{
 };
 use support::*;
 use ultramarine_blob_engine::BlobEngine;
-use crate::{metrics::DbMetrics, store::Store};
 use ultramarine_types::{
     aliases::Bytes as BlobBytes,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
@@ -24,6 +23,7 @@ use ultramarine_types::{
 };
 
 use super::*;
+use crate::{metrics::DbMetrics, store::Store};
 
 #[tokio::test]
 async fn hydrate_blob_parent_root_uses_decided_metadata() {
@@ -145,6 +145,34 @@ async fn cleanup_stale_blob_metadata_removes_lower_entries() {
             .expect("get")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn store_undecided_proposal_data_uses_explicit_height_round() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(3));
+    state.current_height = Height::new(3);
+    state.current_round = Round::new(1);
+
+    let target_height = Height::new(1);
+    let target_round = Round::new(0);
+    let payload = NetworkBytes::from_static(b"payload-h1r0");
+
+    state
+        .store_undecided_proposal_data(target_height, target_round, payload.clone())
+        .await
+        .expect("store payload");
+
+    let stored =
+        state.store.get_block_data(target_height, target_round).await.expect("load payload");
+    assert_eq!(stored, Some(payload), "payload stored at explicit key");
+
+    let wrong_slot = state
+        .store
+        .get_block_data(state.current_height, state.current_round)
+        .await
+        .expect("load current slot");
+    assert!(wrong_slot.is_none(), "current round remains untouched");
 }
 
 #[tokio::test]
@@ -308,10 +336,7 @@ async fn commit_promotes_metadata_and_updates_parent_root() {
     assert_eq!(consensus.height(), height);
     assert_eq!(consensus.round(), round);
     assert_eq!(consensus.proposer(), &proposer);
-    assert_eq!(
-        consensus.execution_block_hash(),
-        metadata.execution_payload_header().block_hash
-    );
+    assert_eq!(consensus.execution_block_hash(), metadata.execution_payload_header().block_hash);
     assert_eq!(consensus.gas_limit(), metadata.execution_payload_header().gas_limit);
     assert_eq!(consensus.gas_used(), metadata.execution_payload_header().gas_used);
     let mut expected_validator_root = [0u8; 32];
@@ -926,10 +951,8 @@ async fn proposer_rotation_updates_metadata_hint() {
     use ultramarine_types::signing::PrivateKey;
 
     let private_keys = [PrivateKey::from([1u8; 32]), PrivateKey::from([2u8; 32])];
-    let validators: Vec<Validator> = private_keys
-        .iter()
-        .map(|key| Validator::new(key.public_key(), 1))
-        .collect();
+    let validators: Vec<Validator> =
+        private_keys.iter().map(|key| Validator::new(key.public_key(), 1)).collect();
     let validator_set = ValidatorSet::new(validators.clone());
     let genesis = Genesis { validator_set };
 
@@ -970,10 +993,7 @@ async fn proposer_rotation_updates_metadata_hint() {
         let (proposed, metadata, sidecars, _bundle, payload_bytes) =
             propose_blobbed_value(state, height, round, 1).await;
 
-        engine
-            .verify_and_store(height, round.as_i64(), &sidecars)
-            .await
-            .expect("store blobs");
+        engine.verify_and_store(height, round.as_i64(), &sidecars).await.expect("store blobs");
         state
             .store
             .store_undecided_block_data(height, round, payload_bytes.clone())

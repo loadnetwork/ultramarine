@@ -1,31 +1,34 @@
 #![allow(missing_docs)]
+use alloy_rpc_types_engine::ExecutionPayloadV3;
+use alloy_rpc_types_eth::BlockNumberOrTag;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
 use malachitebft_app_channel::{
     AppMsg, Channels, NetworkMsg,
     app::{
         streaming::StreamContent,
-        types::{
-            LocallyProposedValue, ProposedValue,
-            core::{Round, Validity},
-            sync::RawDecidedValue,
-        },
+        types::{LocallyProposedValue, core::Round, sync::RawDecidedValue},
     },
 };
 use malachitebft_engine::host::Next;
-use ssz::{Decode, Encode};
+use ssz::Encode;
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::State;
 use ultramarine_execution::client::ExecutionClient;
-use ultramarine_types::{aliases::B256, context::LoadContext, sync::SyncedValuePackage};
+use ultramarine_types::{
+    context::LoadContext, engine_api::ExecutionBlock, height::Height, sync::SyncedValuePackage,
+};
 
 pub async fn run(
     state: &mut State,
     channels: &mut Channels<LoadContext>,
     execution_layer: ExecutionClient,
 ) -> eyre::Result<()> {
+    info!("🚀 App message loop starting");
     while let Some(msg) = channels.consensus.recv().await {
+        debug!("📨 Received message: {:?}", std::mem::discriminant(&msg));
         match msg {
             // The first message to handle is the `ConsensusReady` message, signaling to the app
             // that Malachite is ready to start consensus
@@ -40,7 +43,8 @@ pub async fn run(
 
                 info!("✅ Execution client capabilities check passed.");
 
-                // Get the latest block from the execution engine
+                // Try to get the latest block from the execution engine.
+                // If this fails, we'll lazy-fetch it later in GetValue instead of crashing.
                 match execution_layer
                     .eth
                     .get_block_by_number(alloy_rpc_types_eth::BlockNumberOrTag::Latest, false)
@@ -51,25 +55,27 @@ pub async fn run(
                         state.latest_block = Some(latest_block);
                     }
                     Ok(None) => {
-                        let e = eyre!("Execution client returned no block for 'latest'");
-                        error!("{}", e);
-                        return Err(e)
+                        warn!(
+                            "Execution client returned no block for 'latest'; will lazy-fetch in GetValue"
+                        );
+                        state.latest_block = None;
                     }
                     Err(e) => {
-                        error!("Failed to get latest block from execution client: {}", e);
-                        return Err(e)
+                        warn!(%e, "Failed to fetch latest block from execution client; will lazy-fetch in GetValue");
+                        state.latest_block = None;
                     }
                 }
 
-                info!(start_height = %state.current_height, "Sending StartHeight to consensus engine.");
+                // Calculate start_height following Malachite's pattern:
+                // - If store has decided values, start at max_decided_height + 1
+                // - Otherwise, start at Height(1) (Height::INITIAL)
+                let max_decided = state.get_latest_decided_height().await;
+                let start_height =
+                    max_decided.map(|h| h.increment()).unwrap_or_else(|| Height::new(1));
 
-                if reply
-                    .send((
-                        state.current_height,
-                        state.get_validator_set().clone(),
-                    ))
-                    .is_err()
-                {
+                info!(?max_decided, %start_height, "Sending StartHeight to consensus engine.");
+
+                if reply.send((start_height, state.get_validator_set().clone())).is_err() {
                     // If we can't reply, the consensus engine has likely crashed.
                     // We should return an error instead of just logging.
                     let e = eyre!("Failed to send StartHeight reply; consensus channel closed.");
@@ -96,208 +102,17 @@ pub async fn run(
             // At some point, we may end up being the proposer for that round, and the consensus
             // engine will then ask us for a value to propose to the other validators.
             AppMsg::GetValue { height, round, timeout: _, reply } => {
-                // TODO(round-0-timeout): On round 0 at startup, peers may still be wiring up and
-                // miss the streamed proposal, leading to Prevote(nil) and rebroadcast loops.
-                // Consider a small proposer grace (sleep until N-1 peers are connected or
-                // an env-configured delay) or increase initial TimeoutConfig for dev/testnets.
-               // NOTE: We can ignore the timeout as we are building the value right away.
-                // If we were let's say reaping as many txes from a mempool and executing them,
-                // then we would need to respect the timeout and stop at a certain point.
-
-                info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
-
-                // Phase 3 Integration: Request execution payload WITH blobs
-                let latest_block = state.latest_block.expect("Head block hash is not set");
-                debug!("Requesting EL to build payload with blobs on top of head");
-
-                // Call generate_block_with_blobs() instead of generate_block()
-                let (execution_payload, blobs_bundle) = execution_layer
-                    .generate_block_with_blobs(&latest_block)
-                    .await?;
-
-                // Log blob information
-                let blob_count = blobs_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
-                debug!(
-                    "🌈 Got execution payload with {} blobs",
-                    blob_count
-                );
-
-                // Store block in state and propagate to peers.
-                let bytes = Bytes::from(execution_payload.as_ssz_bytes());
-                debug!("🎁 block size: {:?}, height: {}, blobs: {}", bytes.len(), height, blob_count);
-
-                // Prepare block proposal using new method that creates proper metadata
-                let proposal: LocallyProposedValue<LoadContext> =
-                    state.propose_value_with_blobs(height, round, bytes.clone(), &execution_payload, blobs_bundle.as_ref()).await?;
-
-                // When the node is not the proposer, store the block data,
-                // which will be passed to the execution client (EL) on commit.
-                state.store_undecided_proposal_data(bytes.clone()).await?;
-
-                // Transform bundle into signed header + sidecars with inclusion proofs
-                let (signed_header, sidecars) = state
-                    .prepare_blob_sidecar_parts(&proposal, blobs_bundle.as_ref())
-                    .map_err(|e| eyre!("Failed to prepare blob sidecars: {}", e))?;
-
-                // CRITICAL FIX (Finding #1): Store blobs locally for our own proposal
-                // Without this, the proposer never stores its own blobs, causing get_for_import()
-                // to return empty when the block is decided, leading to blob count mismatch errors.
-                let round_i64 = round.as_i64();
-                let sidecars_slice = sidecars.as_slice();
-                if !sidecars_slice.is_empty() {
-                    debug!(
-                        "Storing {} blobs locally for our own proposal at height {}, round {}",
-                        sidecars_slice.len(),
-                        height,
-                        round
-                    );
-                }
-
-                state
-                    .blob_engine()
-                    .verify_and_store(height, round_i64, sidecars_slice)
-                    .await
-                    .map_err(|e| {
-                        error!("Failed to store our own blobs: {}", e);
-                        eyre!("Proposer blob storage failed: {}", e)
-                    })?;
-
-                if !sidecars_slice.is_empty() {
-                    info!(
-                        "✅ Successfully stored {} blobs for height {} (proposer's own)",
-                        sidecars_slice.len(),
-                        height
-                    );
-                }
-
-                // Send it to consensus
-                if reply.send(proposal.clone()).is_err() {
-                    error!(%height, %round, "Failed to send GetValue reply; channel closed");
-                }
-
-                // Now what's left to do is to break down the value to propose into parts,
-                // and send those parts over the network to our peers, for them to re-assemble the full value.
-                // Phase 3: Stream with blobs!
-                // Pass None for proposer since this is our own proposal
-                let stream_sidecars = if sidecars.is_empty() {
-                    None
-                } else {
-                    Some(sidecars.as_slice())
-                };
-
-                for stream_message in state.stream_proposal(proposal, bytes, stream_sidecars, None)
+                if let Err(e) =
+                    handle_get_value(state, channels, &execution_layer, height, round, reply).await
                 {
-                    info!(%height, %round, "Streaming proposal part: {stream_message:?}");
-                    if let Err(e) = channels
-                        .network
-                        .send(NetworkMsg::PublishProposalPart(stream_message))
-                        .await
-                    {
-                        error!(%height, %round, "Failed to stream proposal part: {e}");
-                        return Err(e.into());
-                    }
-                }
-                debug!(%height, %round, "✅ Proposal sent");
-            }
-                /*
-                info!(%height, %round, ?timeout, "🟢🟢 Consensus is requesting a value to propose");
-
-                // Define an async task to generate the full proposal.
-                // All operations that can fail or take time are inside this block.
-                let get_proposal_task = async {
-                    let started = std::time::Instant::now();
-                    let latest_block = state.latest_block.expect("Head block hash is not set");
-
-                    // 1. Generate the block from the execution layer.
-                    let payload = execution_layer.generate_block(&latest_block).await?;
-                    let bytes = Bytes::from(payload.as_ssz_bytes());
-
-                    // 2. Create the proposal value and store it.
-                    let proposal = state.propose_value(height, round, bytes.clone()).await?;
-
-                    // 3. Store the associated block data.
-                    state.store_undecided_proposal_data(bytes.clone()).await?;
-
-                    let elapsed = started.elapsed();
-                    debug!(?elapsed, "Built proposal and prepared bytes");
-
-                    // Return both the proposal for the reply and the bytes for streaming.
-                    eyre::Result::<_>::Ok((proposal, bytes))
-                };
-
-                // Allow bypassing the timeout (malaketh-layered behavior) while tuning.
-                let ignore_timeout = std::env::var("ULTRAMARINE_IGNORE_PROPOSE_TIMEOUT")
-                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-                    .unwrap_or(false);
-
-                if ignore_timeout {
-                    match get_proposal_task.await {
-                        Ok((proposal, bytes)) => {
-                            if reply.send(proposal.clone()).is_err() {
-                                error!("Failed to send GetValue reply; channel closed.");
-                                return Ok(());
-                            }
-                            for stream_message in state.stream_proposal(proposal, bytes) {
-                                if let Err(e) = channels.network.send(NetworkMsg::PublishProposalPart(stream_message)).await {
-                                    error!("Failed to stream proposal part: {}", e);
-                                    break;
-                                }
-                            }
-                            debug!(%height, %round, "✅ Proposal sent and streamed");
-                        }
-                        Err(e) => {
-                            error!("Failed to generate proposal: {}. Not replying; letting timeout drive prevote-nil.", e);
-                        }
-                    }
-                    continue;
-                }
-
-                // Race the proposal generation against the consensus timeout.
-                match tokio::time::timeout(timeout, get_proposal_task).await {
-                    // Task completed successfully within the timeout.
-                    Ok(Ok((proposal, bytes))) => {
-                        debug!(
-                            "Successfully generated proposal for height {} round {}",
-                            height, round
-                        );
-                        // Reply to the consensus engine immediately.
-                        if reply.send(proposal.clone()).is_err() {
-                            // If we can't reply, the consensus engine has moved on. Nothing more to
-                            // do.
-                            error!("Failed to send GetValue reply; channel closed.");
-                            return Ok(());
-                        }
-
-                        // Now that we've replied, stream the proposal parts.
-                        // This part is not bound by the initial timeout.
-                        for stream_message in state.stream_proposal(proposal, bytes) {
-                            if let Err(e) = channels
-                                .network
-                                .send(NetworkMsg::PublishProposalPart(stream_message))
-                                .await
-                            {
-                                error!("Failed to stream proposal part: {}", e);
-                                break; // Stop streaming if network channel is closed.
-                            }
-                        }
-                        debug!(%height, %round, "✅ Proposal sent and streamed");
-                    }
-                    // Task failed internally before the timeout.
-                    Ok(Err(e)) => {
-                        // Do not fabricate a proposal. Let consensus handle propose timeout
-                        // and progress via prevote-nil.
-                        error!(
-                            "Failed to generate proposal: {}. Not replying; letting timeout drive prevote-nil.",
-                            e
-                        );
-                    }
-                    // Task took too long and timed out.
-                    Err(_) => {
-                        info!(?timeout, "GetValue task timed out; not replying; letting timeout drive prevote-nil.");
+                    error!(
+                        %height,
+                        %round,
+                        error = ?e,
+                        "GetValue handler failed; letting consensus timeout drive prevote-nil"
+                    );
                 }
             }
-            }
-*/
             AppMsg::ExtendVote { reply, .. } => {
                 if reply.send(None).is_err() {
                     error!("🔴 Failed to send ExtendVote reply");
@@ -324,9 +139,10 @@ pub async fn run(
             AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
                 // CRITICAL: Only the original proposer should handle RestreamProposal.
                 // The Fin part is signed with self.signing_provider, which must match the proposer
-                // address stamped in the Init part. If we're not the original proposer, our signature
-                // will fail verification on all peers (they'll look up the Init proposer's public key
-                // and find our signature doesn't match).
+                // address stamped in the Init part. If we're not the original proposer, our
+                // signature will fail verification on all peers (they'll look up
+                // the Init proposer's public key and find our signature doesn't
+                // match).
                 if state.validator_address() != &address {
                     debug!(
                         %height, %round, %address,
@@ -338,28 +154,29 @@ pub async fn run(
 
                 info!(%height, %round, %value_id, %address, "Restreaming our own proposal");
 
-                // The `valid_round` indicates the round in which the proposal gathered a POLC (Proof-of-Lock-Change).
-                // If it's `Round::Nil`, the proposal was for the original round.
-                let proposal_round = if valid_round == Round::Nil {
-                    round
-                } else {
-                    valid_round
-                };
+                // The `valid_round` indicates the round in which the proposal gathered a POLC
+                // (Proof-of-Lock-Change). If it's `Round::Nil`, the proposal was
+                // for the original round.
+                let proposal_round = if valid_round == Round::Nil { round } else { valid_round };
 
                 match state.load_undecided_proposal(height, proposal_round).await {
                     Ok(Some(proposal)) => {
                         // Sanity check: verify stored proposal is indeed ours
-                        // (Should always pass since we checked validator_address() == address above)
+                        // (Should always pass since we checked validator_address() == address
+                        // above)
                         if proposal.proposer != address {
                             error!(
                                 "Internal error: stored proposal proposer ({}) doesn't match our address ({})",
-                                proposal.proposer, state.validator_address()
+                                proposal.proposer,
+                                state.validator_address()
                             );
                             continue;
                         }
 
                         // Get the block data bytes
-                        let proposal_bytes = match state.get_block_data(height, proposal_round).await
+                        let proposal_bytes = match state
+                            .get_block_data(height, proposal_round)
+                            .await
                         {
                             Some(bytes) => bytes,
                             None => {
@@ -438,15 +255,80 @@ pub async fn run(
                             }
                         };
 
+                        // If we're restreaming into a *new* round, replicate the proposal and
+                        // payload under the target round locally so commit() can find it later.
+                        if round != proposal_round {
+                            let mut restreamed_value = proposal.clone();
+                            restreamed_value.round = round;
+
+                            if let Err(e) = state.store_synced_proposal(restreamed_value).await {
+                                error!(
+                                    %height,
+                                    %round,
+                                    "Failed to store restreamed proposal for new round: {}",
+                                    e
+                                );
+                                continue;
+                            }
+
+                            if let Err(e) = state
+                                .store_undecided_proposal_data(
+                                    height,
+                                    round,
+                                    proposal_bytes.clone(),
+                                )
+                                .await
+                            {
+                                error!(
+                                    %height,
+                                    %round,
+                                    "Failed to store restreamed block bytes: {}",
+                                    e
+                                );
+                                continue;
+                            }
+
+                            if let Err(e) = state
+                                .put_blob_metadata_undecided(height, round, &blob_metadata)
+                                .await
+                            {
+                                error!(
+                                    %height,
+                                    %round,
+                                    "Failed to store restreamed blob metadata: {}",
+                                    e
+                                );
+                                continue;
+                            }
+
+                            if let Some(ref sidecars) = restream_blob_sidecars {
+                                if let Err(e) = state
+                                    .blob_engine()
+                                    .verify_and_store(height, round.as_i64(), sidecars)
+                                    .await
+                                {
+                                    error!(
+                                        %height,
+                                        %round,
+                                        "Failed to store restreamed blob sidecars: {}",
+                                        e
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+
                         // Create the locally proposed value for streaming
                         let locally_proposed_value = LocallyProposedValue {
                             height,
-                            round, // Note: we use the *current* round for the stream, not necessarily the original proposal round.
+                            round, /* Note: we use the *current* round for the stream, not
+                                    * necessarily the original proposal round. */
                             value: proposal.value,
                         };
 
                         // Stream the proposal with our address (we are the original proposer)
-                        // Pass explicit proposer so the Init part reflects the original proposer address
+                        // Pass explicit proposer so the Init part reflects the original proposer
+                        // address
                         for stream_message in state.stream_proposal(
                             locally_proposed_value,
                             proposal_bytes,
@@ -454,7 +336,11 @@ pub async fn run(
                             Some(address), // Explicit proposer for restreaming
                         ) {
                             info!(%height, %round, "Restreaming proposal part: {stream_message:?}");
-                            if let Err(e) = channels.network.send(NetworkMsg::PublishProposalPart(stream_message)).await {
+                            if let Err(e) = channels
+                                .network
+                                .send(NetworkMsg::PublishProposalPart(stream_message))
+                                .await
+                            {
                                 error!("Failed to restream proposal part: {}", e);
                                 // If the network channel is closed, we can't continue.
                                 break;
@@ -524,12 +410,32 @@ pub async fn run(
             AppMsg::Decided { certificate, extensions: _, reply } => {
                 let height = certificate.height;
                 let round = certificate.round;
+
+                // DIAGNOSTIC: Log entry to Decided handler
+                debug!(
+                    "[DIAG] Decided handler entry: height={}, round={}, address={}, value_id={}",
+                    height,
+                    round,
+                    state.validator_address(),
+                    certificate.value_id
+                );
+
                 info!(
                     %height, %round, value = %certificate.value_id,
                     "🟢🟢 Consensus has decided on value"
                 );
 
                 let Some(block_bytes) = state.get_block_data(height, round).await else {
+                    // DIAGNOSTIC: Enhanced error logging for missing block bytes
+                    error!(
+                        "[DIAG] ❌ CRITICAL: Missing block bytes for height {} round {} on node {}",
+                        height,
+                        round,
+                        state.validator_address()
+                    );
+                    error!(
+                        "[DIAG] This means either: (1) proposal was never received, (2) storage failed, or (3) key mismatch"
+                    );
                     let e = eyre!(
                         "Missing block bytes for decided value at height {} round {}",
                         height,
@@ -538,6 +444,14 @@ pub async fn run(
                     error!(%e, "Cannot decode decided value: block bytes not found");
                     return Err(e);
                 };
+
+                // DIAGNOSTIC: Confirm block bytes found
+                debug!(
+                    "[DIAG] ✅ Found block bytes: {} bytes for height {} round {}",
+                    block_bytes.len(),
+                    height,
+                    round
+                );
 
                 if block_bytes.is_empty() {
                     let e = eyre!(
@@ -552,9 +466,31 @@ pub async fn run(
                 debug!("🎁 block size: {:?}, height: {}", block_bytes.len(), height);
 
                 let mut notifier = execution_layer.as_notifier();
+
+                // DIAGNOSTIC: Log before processing certificate
+                debug!(
+                    "[DIAG] Calling process_decided_certificate for height {} round {}",
+                    height, round
+                );
+
                 let outcome = state
                     .process_decided_certificate(&certificate, block_bytes.clone(), &mut notifier)
-                    .await?;
+                    .await;
+
+                // DIAGNOSTIC: Log outcome
+                match &outcome {
+                    Ok(o) => {
+                        debug!(
+                            "[DIAG] ✅ process_decided_certificate succeeded: {} txs, {} blobs, current_height now={}",
+                            o.tx_count, o.blob_count, state.current_height
+                        );
+                    }
+                    Err(e) => {
+                        error!("[DIAG] ❌ process_decided_certificate failed: {}", e);
+                    }
+                }
+
+                let outcome = outcome?;
 
                 debug!(
                     height = %height,
@@ -567,15 +503,26 @@ pub async fn run(
                 // Pause briefly before starting next height, just to make following the logs easier
                 // tokio::time::sleep(Duration::from_millis(500)).await;
 
+                // DIAGNOSTIC: Log before sending Next::Start
+                debug!(
+                    "[DIAG] Sending Next::Start for height {} (after deciding height {})",
+                    state.current_height, height
+                );
+
                 // And then we instruct consensus to start the next height
                 if reply
-                    .send(Next::Start(
-                        state.current_height,
-                        state.get_validator_set().clone(),
-                    ))
+                    .send(Next::Start(state.current_height, state.get_validator_set().clone()))
                     .is_err()
                 {
+                    error!("[DIAG] ❌ Failed to send Decided reply - channel closed?");
                     error!("Failed to send Decided reply");
+                } else {
+                    // DIAGNOSTIC: Confirm sent
+                    debug!(
+                        "[DIAG] ✅ Successfully sent Next::Start for height {} on node {}",
+                        state.current_height,
+                        state.validator_address()
+                    );
                 }
             }
 
@@ -596,16 +543,14 @@ pub async fn run(
                     Ok(pkg) => pkg,
                     Err(e) => {
                         error!(%height, %round, "Failed to decode SyncedValuePackage: {}", e);
-                        // Send None to signal failure (Malachite protocol expects Option<ProposedValue>)
+                        // Send None to signal failure (Malachite protocol expects
+                        // Option<ProposedValue>)
                         let _ = reply.send(None);
                         continue;
                     }
                 };
 
-                match state
-                    .process_synced_package(height, round, proposer.clone(), package)
-                    .await
-                {
+                match state.process_synced_package(height, round, proposer.clone(), package).await {
                     Ok(Some(proposed_value)) => {
                         if reply.send(Some(proposed_value)).is_err() {
                             error!("Failed to send ProcessSyncedValue success reply");
@@ -719,4 +664,123 @@ pub async fn run(
     // from consensus has been closed, meaning that the consensus actor has died.
     // We can do nothing but return an error here.
     Err(eyre!("Consensus channel closed unexpectedly"))
+}
+
+async fn handle_get_value(
+    state: &mut State,
+    channels: &mut Channels<LoadContext>,
+    execution_layer: &ExecutionClient,
+    height: Height,
+    round: Round,
+    reply: oneshot::Sender<LocallyProposedValue<LoadContext>>,
+) -> eyre::Result<()> {
+    info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
+
+    let latest_block = ensure_latest_block(state, execution_layer).await?;
+    debug!("Requesting EL to build payload with blobs on top of head");
+
+    let (execution_payload, blobs_bundle) =
+        execution_layer.generate_block_with_blobs(&latest_block).await?;
+
+    let blob_count = blobs_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
+    debug!("🌈 Got execution payload with {} blobs", blob_count);
+
+    let bytes = Bytes::from(execution_payload.as_ssz_bytes());
+    debug!("🎁 block size: {:?}, height: {}, blobs: {}", bytes.len(), height, blob_count);
+
+    let proposal = state
+        .propose_value_with_blobs(
+            height,
+            round,
+            bytes.clone(),
+            &execution_payload,
+            blobs_bundle.as_ref(),
+        )
+        .await?;
+    state.store_undecided_proposal_data(height, round, bytes.clone()).await?;
+
+    // DIAGNOSTIC: Confirm proposer stored block data
+    info!(
+        "[DIAG] ✅ Proposer stored block data: height={}, round={}, size={} bytes, address={}",
+        height,
+        round,
+        bytes.len(),
+        state.validator_address()
+    );
+
+    let (_signed_header, sidecars) = state
+        .prepare_blob_sidecar_parts(&proposal, blobs_bundle.as_ref())
+        .map_err(|e| eyre!("Failed to prepare blob sidecars: {}", e))?;
+
+    let round_i64 = round.as_i64();
+    let sidecars_slice = sidecars.as_slice();
+    if !sidecars_slice.is_empty() {
+        debug!(
+            "Storing {} blobs locally for our own proposal at height {}, round {}",
+            sidecars_slice.len(),
+            height,
+            round
+        );
+    }
+
+    state
+        .blob_engine()
+        .verify_and_store(height, round_i64, sidecars_slice)
+        .await
+        .map_err(|e| eyre!("Proposer blob storage failed: {}", e))?;
+
+    if !sidecars_slice.is_empty() {
+        info!(
+            "✅ Successfully stored {} blobs for height {} (proposer's own)",
+            sidecars_slice.len(),
+            height
+        );
+    }
+
+    if reply.send(proposal.clone()).is_err() {
+        return Err(eyre!("Failed to send GetValue reply; channel closed"));
+    }
+
+    let stream_sidecars = if sidecars.is_empty() { None } else { Some(sidecars.as_slice()) };
+    for stream_message in state.stream_proposal(proposal, bytes, stream_sidecars, None) {
+        info!(%height, %round, "Streaming proposal part: {stream_message:?}");
+        channels
+            .network
+            .send(NetworkMsg::PublishProposalPart(stream_message))
+            .await
+            .map_err(|e| eyre!("Failed to stream proposal part: {}", e))?;
+    }
+
+    debug!(%height, %round, "✅ Proposal sent");
+    Ok(())
+}
+
+async fn ensure_latest_block(
+    state: &mut State,
+    execution_layer: &ExecutionClient,
+) -> eyre::Result<ExecutionBlock> {
+    if let Some(block) = state.latest_block {
+        return Ok(block);
+    }
+
+    warn!("latest execution block missing; refetching from EL");
+    let block = execution_layer
+        .eth
+        .get_block_by_number(BlockNumberOrTag::Latest, false)
+        .await
+        .map_err(|e| eyre!("Failed to fetch latest block: {}", e))?
+        .ok_or_else(|| eyre!("Execution client returned no block for 'latest'"))?;
+    state.latest_block = Some(block);
+    Ok(block)
+}
+
+fn payload_to_execution_block(payload: &ExecutionPayloadV3) -> ExecutionBlock {
+    let inner = &payload.payload_inner.payload_inner;
+    ExecutionBlock {
+        block_hash: inner.block_hash,
+        block_number: inner.block_number,
+        parent_hash: inner.parent_hash,
+        timestamp: inner.timestamp,
+        prev_randao: inner.prev_randao,
+    }
 }

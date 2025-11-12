@@ -565,15 +565,41 @@ spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 spam-blobs: ## Spam the EL with EIP-4844 blob transactions (60s @ 50 tps, 128 blobs per tx).
 	cargo run --bin ultramarine-utils -- spam --time=60 --rate=50 --rpc-url=http://127.0.0.1:8545 --blobs --blobs-per-tx=6
 
+TIER0_TESTS := \
+	blob_roundtrip \
+	blob_restream \
+	blob_restream_multi_round \
+	blob_restart_multi_height \
+	blob_restart_multi_height_sync \
+	blob_blobless_sequence \
+	blob_new_node_sync \
+	blob_sync_failure \
+	blob_sync_commitment_mismatch \
+	blob_decided_el_rejection \
+	blob_pruning \
+	restart_hydrate \
+	sync_package_roundtrip
+
 .PHONY: itest
-itest: ## Run integration tests (verbose).
-	@echo "🧪 Running integration tests..."
-	cargo test -p ultramarine-test -- --nocapture
+itest: ## Run Tier 0 integration tests (verbose).
+	@echo "🧪 Running Tier 0 blob-state tests..."
+	@set -e; for test in $(TIER0_TESTS); do \
+		echo "→ $$test"; \
+		cargo test -p ultramarine-test --test $$test -- --nocapture; \
+	done
 
 .PHONY: itest-quick
-itest-quick: ## Run integration tests (quiet output).
-	cargo test -p ultramarine-test
+itest-quick: ## Run Tier 0 integration tests (quiet output).
+	@set -e; for test in $(TIER0_TESTS); do \
+		cargo test -p ultramarine-test --test $$test; \
+	done
 
 .PHONY: itest-list
-itest-list: ## List available integration tests.
-	cargo test -p ultramarine-test -- --list
+itest-list: ## List Tier 0 integration tests.
+	@set -e; for test in $(TIER0_TESTS); do \
+		cargo test -p ultramarine-test --test $$test -- --list; \
+	done
+
+.PHONY: itest-node
+itest-node: ## Run full-node (Tier 1) integration tests (ignored + serialized).
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node -- --ignored --nocapture

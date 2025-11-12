@@ -10,8 +10,8 @@ mod common;
 #[tokio::test]
 async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
     use common::{
-        TestDirs, build_seeded_state, make_genesis, mocks::MockExecutionNotifier, propose_with_optional_blobs,
-        sample_blob_bundle, sample_execution_payload_v3_for_height,
+        TestDirs, build_seeded_state, make_genesis, mocks::MockExecutionNotifier,
+        propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
     use ssz::Encode;
@@ -57,8 +57,7 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
     let expected_pruned = TOTAL_HEIGHTS.saturating_sub(retention_window);
     assert_eq!(metrics.lifecycle_promoted, TOTAL_HEIGHTS as u64);
     assert_eq!(
-        metrics.lifecycle_pruned,
-        expected_pruned as u64,
+        metrics.lifecycle_pruned, expected_pruned as u64,
         "pruning metric should reflect heights beyond retention window"
     );
 
@@ -70,8 +69,7 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
 
     // Heights older than retention window should have no decided blobs after pruning.
     for height in 0..expected_pruned {
-        let decided =
-            node.state.blob_engine().get_for_import(Height::new(height as u64)).await?;
+        let decided = node.state.blob_engine().get_for_import(Height::new(height as u64)).await?;
         assert!(decided.is_empty(), "height {} should be pruned", height);
     }
 

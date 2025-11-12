@@ -187,10 +187,27 @@ The blob integration suite lives in the dedicated `crates/test` package so Cargo
   ```bash
   make itest        # verbose output (~15 s)
   ```
-  Under the hood this invokes
+  This loops over each blob-state scenario and runs
+  `cargo test -p ultramarine-test --test <name> -- --nocapture` so Tier 0
+  stays isolated from the heavier full-node harness. Run the specific command
+  directly if you only need a single scenario (e.g.,
+  `cargo test -p ultramarine-test --test blob_roundtrip -- --nocapture`).
+  Calling `cargo test -p ultramarine-test` without filters executes the **entire**
+  suite (Tier 0 + Tier 1).
+
+- **Run the full-node (Tier 1) harness**
   ```bash
-  cargo test -p ultramarine-test -- --nocapture
+  make itest-node   # spins Ultramarine + Engine stub (~20 s)
   ```
+  This boots a real Ultramarine node (Malachite channel actors, WAL, libp2p) and
+  drives blobbed proposals end-to-end using the Engine API stub. The Tier 1
+  tests are tagged `#[ignore]` and `#[serial]`, so they only run via this
+  target (or `cargo test -p ultramarine-test --test full_node -- --ignored`).
+  Today the suite contains:
+  - `full_node_blob_quorum_roundtrip` – 3 validators finalize blobbed blocks
+  - `full_node_validator_restart_recovers` – restart height 1 and verify blob hydration
+  
+  Each scenario dumps store + WAL snapshots if a timeout occurs so failures are actionable.
 
 ### What the harness does
 
