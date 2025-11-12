@@ -41,7 +41,8 @@ async fn blob_roundtrip() -> color_eyre::Result<()> {
     let bundle = maybe_bundle.expect("bundle");
     let round = Round::new(0);
     let (proposed, payload_bytes, maybe_sidecars) =
-        propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle)).await?;
+        propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle))
+            .await?;
     let sidecars = maybe_sidecars.expect("sidecars present");
 
     assert_eq!(sidecars.len(), bundle.blobs.len(), "sidecar count matches blob bundle");

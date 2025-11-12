@@ -117,13 +117,8 @@ pub async fn propose_blobbed_value(
     height: Height,
     round: Round,
     blob_count: usize,
-) -> (
-    LocallyProposedValue<LoadContext>,
-    BlobMetadata,
-    Vec<BlobSidecar>,
-    BlobsBundle,
-    NetworkBytes,
-) {
+) -> (LocallyProposedValue<LoadContext>, BlobMetadata, Vec<BlobSidecar>, BlobsBundle, NetworkBytes)
+{
     let payload = sample_execution_payload_v3();
     let bundle = sample_blob_bundle(blob_count);
     let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());

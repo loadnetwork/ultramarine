@@ -245,7 +245,7 @@ spammer()
 
 ## Testing Strategy
 
-### Tier 1 – In-Process (default)
+### Tier 0 – State-Level (default)
 - Run via `cargo test -p ultramarine-test` or `make itest`.
 - Uses inline helpers with a mocked Execution client (real blob engine/KZG) to exercise consensus and restream flows without Docker.
 - Covers:
@@ -264,6 +264,13 @@ spammer()
   13. `blob_decided_el_rejection_blocks_commit`
 - Each test completes in ~2–6 s and relies on `tempfile::TempDir` Drop for cleanup.
 - Assertions rely on store state, blob engine metrics, and deterministic logs.
+
+### Tier 1 – Full-Node (multi-validator)
+- Mirrors Malachite’s TestBuilder blueprint by spinning **three** validators (2f + 1) plus optional follower nodes under the real channel actors, WAL, and libp2p transport.
+- Exercises proposer/follower blob flow, crash/restart, and ValueSync with the production ExecutionClient talking to the Engine RPC stub. Single-node shortcuts are no longer supported.
+- Harness requirements are derived directly from Malachite’s full-node IT suite (`malachite/code/crates/test/tests/it/full_nodes.rs:11-175`) and Snapchain’s consensus tests (`snapchain/tests/consensus_test.rs:1-370`): deterministic port allocation, serialized execution (`serial_test`), and real gossip traffic.
+- `make itest-node` must boot validators at `Height::INITIAL` and keep `config.sync.enabled` true so we test the exact paths we run in production.
+- Current scenarios: `full_node_blob_quorum_roundtrip` (quorum end-to-end) and `full_node_validator_restart_recovers` (post-height-1 restart with blob hydration checks). Attempting to advance to height 2 during a restart currently stalls consensus (repeated `RepublishVote` events); this is a known limitation feeding Phase P2 crash/sync work.
 
 - Run manually via `make all` + `make spam-blobs` (optionally gated by env vars such as `ULTRA_E2E=1`).
 - Boots docker stack (`make all`), runs blob spam script, queries RPC/metrics for verification, tears down (`make clean-net`).

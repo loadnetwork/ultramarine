@@ -24,11 +24,7 @@ use alloy_rpc_types_engine::{
 use bytes::Bytes;
 use c_kzg::{Blob as CKzgBlob, KzgSettings};
 use color_eyre::Result;
-use malachitebft_app_channel::app::types::{
-    LocallyProposedValue,
-    PeerId,
-    core::Round,
-};
+use malachitebft_app_channel::app::types::{LocallyProposedValue, PeerId, core::Round};
 use serde::Deserialize;
 use ssz::Encode;
 use tempfile::TempDir;
@@ -185,9 +181,8 @@ pub(crate) async fn propose_with_optional_blobs(
     state.current_round = round;
 
     let bytes = Bytes::from(payload.as_ssz_bytes());
-    let proposed = state
-        .propose_value_with_blobs(height, round, bytes.clone(), payload, bundle)
-        .await?;
+    let proposed =
+        state.propose_value_with_blobs(height, round, bytes.clone(), payload, bundle).await?;
 
     let sidecars = if let Some(bundle) = bundle {
         let (_header, sidecars) = state.prepare_blob_sidecar_parts(&proposed, Some(bundle))?;
@@ -205,8 +200,9 @@ pub(crate) fn sample_execution_payload_v3_for_height(
     height: Height,
     bundle: Option<&BlobsBundle>,
 ) -> ExecutionPayloadV3 {
-    let parent_byte = if height.as_u64() == 0 { 0u8 } else { height.as_u64() as u8 };
-    let block_byte = parent_byte.wrapping_add(1);
+    let parent_byte =
+        if height.as_u64() == 0 { 0u8 } else { height.as_u64().saturating_sub(1) as u8 };
+    let block_byte = height.as_u64() as u8;
 
     let mut payload = ExecutionPayloadV3 {
         blob_gas_used: 0,
@@ -219,7 +215,7 @@ pub(crate) fn sample_execution_payload_v3_for_height(
                 receipts_root: B256::from([4u8; 32]),
                 logs_bloom: Bloom::ZERO,
                 prev_randao: B256::from([5u8; 32]),
-                block_number: height.as_u64() + 1,
+                block_number: height.as_u64(), // Fix: block_number should equal height
                 gas_limit: 30_000_000,
                 gas_used: 15_000_000,
                 timestamp: 1_700_000_000 + height.as_u64(),

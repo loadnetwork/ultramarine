@@ -12,10 +12,14 @@ ultramarine-blob-engine.workspace = true
 ultramarine-consensus.workspace = true
 ultramarine-execution.workspace = true
 ultramarine-types.workspace = true
+ultramarine-cli.workspace = true
+ultramarine-node.workspace = true
 
 malachitebft-app-channel.workspace = true
 malachitebft-app.workspace = true
 malachitebft-proto.workspace = true
+malachitebft-config.workspace = true
+malachitebft-engine.workspace = true
 
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
@@ -32,6 +36,10 @@ c-kzg.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+multiaddr = "0.18.2"
 
 # Tokio async runtime for integration tests
 [dev-dependencies.tokio]

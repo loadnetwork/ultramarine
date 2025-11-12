@@ -51,14 +51,9 @@ async fn blob_restream_multi_validator() -> color_eyre::Result<()> {
     let round = Round::new(0);
     let round_i64 = round.as_i64();
 
-    let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
-        &mut proposer.state,
-        height,
-        round,
-        &payload,
-        Some(&bundle),
-    )
-    .await?;
+    let (proposed, payload_bytes, maybe_sidecars) =
+        propose_with_optional_blobs(&mut proposer.state, height, round, &payload, Some(&bundle))
+            .await?;
     let sidecars = maybe_sidecars.expect("sidecars expected");
 
     if !sidecars.is_empty() {

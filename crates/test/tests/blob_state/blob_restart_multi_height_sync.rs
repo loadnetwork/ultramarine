@@ -9,11 +9,11 @@ mod common;
 
 #[tokio::test]
 async fn blob_sync_across_restart_multiple_heights() -> color_eyre::Result<()> {
+    use alloy_primitives::B256;
     use common::{
         TestDirs, build_seeded_state, build_state, make_genesis, mocks::MockExecutionNotifier,
         propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
-    use alloy_primitives::B256;
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
     use ultramarine_blob_engine::BlobEngine;
     use ultramarine_types::{
@@ -41,7 +41,8 @@ async fn blob_sync_across_restart_multiple_heights() -> color_eyre::Result<()> {
         for (height, blob_count) in configurations {
             let round = Round::new(0);
 
-            let mut bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
+            let mut bundle =
+                if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
             let payload = sample_execution_payload_v3_for_height(height, bundle.as_ref());
             let (proposed, bytes, maybe_sidecars) = propose_with_optional_blobs(
                 &mut proposer.state,
@@ -73,7 +74,11 @@ async fn blob_sync_across_restart_multiple_heights() -> color_eyre::Result<()> {
                 Some(
                     proposer
                         .state
-                        .rebuild_blob_sidecars_for_restream(&metadata, &proposer_key.address(), sidecars)
+                        .rebuild_blob_sidecars_for_restream(
+                            &metadata,
+                            &proposer_key.address(),
+                            sidecars,
+                        )
                         .expect("rebuild sidecars with correct parent root"),
                 )
             } else {
@@ -115,7 +120,6 @@ async fn blob_sync_across_restart_multiple_heights() -> color_eyre::Result<()> {
                 .state
                 .process_decided_certificate(&certificate, follower_payload, &mut notifier)
                 .await?;
-
         }
 
         let metrics = follower.blob_metrics.snapshot();
