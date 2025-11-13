@@ -1,6 +1,6 @@
 # Integration Test Parity Plan
 
-_Last updated: 2025-11-07_
+_Last updated: 2025-11-12_
 
 Ultramarine currently ships fast, deterministic blob-focused integration tests that exercise
 `State<TestBlobEngine>` with real RocksDB stores and KZG verification. These scenarios caught
@@ -157,15 +157,29 @@ Decisions are recorded here; once you approve a direction it becomes part of sco
 
 - **Tier strategy**: Tier 0 = state-level tests (`blob_state/`), Tier 1 = full-node tests (`full_node/`) with **three** validators + followers to match Tendermint majority rules. Tier 0 stays default for `make itest`, Tier 1 becomes `make itest-node`.
 - **Harness builder**: Tier 1 now exposes `FullNodeTestBuilder` in `crates/test/tests/full_node/node_harness.rs`, so scenarios describe only the consensus actions while setup/teardown stays centralized.
-- **Execution cadence**: `make itest-node` runs each Tier 1 test in its own `cargo test` process (`blob_quorum`, `validator_restart`, `restart_mid_height`) to avoid cross-test resource leaks. Running `cargo test -p ultramarine-test --test full_node -- --ignored` is fine for ad-hoc runs but may time out when chaining all scenarios inside one process.
-- **Tier‑0 → Tier‑1 migration**: The first promotion (`blob_new_node_sync`) now lives as `full_node_new_node_sync`, exercising ValueSync end-to-end by running a 4-validator cluster, taking one validator offline for two heights, and verifying it syncs the missing blobs/metadata when it rejoins.
+- **Payload planning**: The builder can inject a per-height blob schedule into the Engine stub, enabling blobless heights and multi-blob rounds (needed for the multi-height ValueSync restart scenario and future negative-path work).
+- **State inspection helpers**: The harness can now reopen a validator’s stores after a clean shutdown, rebuild blob sidecars, and run `State::process_synced_package` directly. This powers the restart hydration, restream cleanup, and commitment-mismatch tests without hand-editing RocksDB.
+- **Execution cadence**: `make itest-node` runs each Tier 1 test in its own `cargo test` process (`blob_quorum`, `validator_restart`, `restart_mid_height`, `new_node_sync`, `multi_height_valuesync_restart`, `restart_multi_height_rebuilds`, `restream_multiple_rounds_cleanup`, `restream_multi_validator`, `value_sync_commitment_mismatch`, `value_sync_inclusion_proof_failure`, `blob_blobless_sequence_behaves`, `blob_pruning_retains_recent_heights`, `sync_package_roundtrip`, `value_sync_proof_failure`) to avoid cross-test resource leaks. Running `cargo test -p ultramarine-test --test full_node -- --ignored` is fine for ad-hoc runs but may time out when chaining all scenarios inside one process.
+- **Tier‑0 → Tier‑1 migration**: We now have a broader set of promotions:  
+  1. `blob_new_node_sync` → `full_node_new_node_sync` (4-validator cluster, validator 3 rejoins after heights 1–2 and ValueSync fetches blobs/metadata).  
+  2. `blob_restart_multi_height_sync` → `full_node_multi_height_valuesync_restart` (validator 3 misses heights 1–3 with a 1/0/2 blob mix, ValueSync imports them, and we restart to assert store + parent-root hydration).  
+  3. `blob_restart_multi_height` → `full_node_restart_multi_height_rebuilds` (multi-height blob mix without ValueSync; restarts rely purely on on-disk metadata + blob store).  
+  4. `blob_restream_multiple_rounds` → `full_node_restream_multiple_rounds_cleanup` (uses real stores/keys to drive two rounds and ensure losing-round blobs are dropped at commit).  
+  5. `blob_sync_commitment_mismatch_rejected` → `full_node_value_sync_commitment_mismatch` (feeds a tampered ValueSync package through a full-node state to verify rejection + cleanup).  
+  6. `blob_restream_multi_validator` → `full_node_restream_multi_validator` (proposer/follower restream over real channels to confirm metrics/import paths).  
+  7. `blob_sync_inclusion_proof_failure_rejected` → `full_node_value_sync_inclusion_proof_failure` (corrupt inclusion proofs inside ValueSync packages and assert full-node rejection/cleanup).  
+  8. `blob_blobless_sequence_behaves` → `full_node_blob_blobless_sequence_behaves` (exercise mixed blob/bless heights with real metrics + storage).  
+  9. `blob_pruning_retains_recent_heights` → `full_node_blob_pruning_retains_recent_heights` (override retention window and ensure pruning/metrics behave with real stores).  
+  10. `sync_package_roundtrip` → `full_node_sync_package_roundtrip` (ingest a full ValueSync package and commit it end-to-end).  
+  11. `blob_sync_failure_rejects_invalid_proof` → `full_node_value_sync_proof_failure` (tamper blob proofs to cover the last ValueSync rejection path).  
+  These scenarios prove the builder can handle restart, restream, and sync-negative paths without hand-editing RocksDB.
 - **Architecture references**: Malachite’s `TestBuilder` (networked validators + followers; see `malachite/code/crates/test/tests/it/full_nodes.rs`) and Snapchain’s consensus harness (`snapchain/tests/consensus_test.rs`) are the baselines we mirror.
-- **Next steps**: Replace the single-node helper with the multi-validator harness, then port restart/sync/negative paths (P2→P4) before wiring the execution bridge (P5).
+- **Next steps**: With the Tier‑0 backlog promoted, the remaining work is wiring the builder to the execution bridge (real EngineClient / payload status plumbing) and deciding how to run those heavier cases in CI (Phase P5).
 
 ## 8. Current Status (Nov 2025)
 
-- Tier 1 currently ships two scenarios: `full_node_blob_quorum_roundtrip` (quorum end-to-end) and `full_node_validator_restart_recovers` (post-height-1 restart with blob hydration checks). After the Nov 2025 harness fixes (start height alignment, tracing, deterministic parent hashes) both pass deterministically (~18 s).
-- **Known limitation for P2:** restart coverage still stops at the “restart after height 1 decided” case. Extending to height 2+ restarts will require richer ValueSync/WAL diagnostics; keep this open for Phase P2 once instrumentation (store/WAL dumps, serial gating) lands.
+- Tier 1 now ships fourteen scenarios: `full_node_blob_quorum_roundtrip`, `full_node_validator_restart_recovers`, `full_node_restart_mid_height`, `full_node_new_node_sync`, `full_node_multi_height_valuesync_restart`, `full_node_restart_multi_height_rebuilds`, `full_node_restream_multiple_rounds_cleanup`, `full_node_restream_multi_validator`, `full_node_value_sync_commitment_mismatch`, `full_node_value_sync_inclusion_proof_failure`, `full_node_blob_blobless_sequence_behaves`, `full_node_blob_pruning_retains_recent_heights`, `full_node_sync_package_roundtrip`, and `full_node_value_sync_proof_failure`. Together they cover quorum flow, restart hydration (with and without ValueSync), restream cleanup (multi-round + multi-validator), blobless/pruning behavior, and every ValueSync rejection path using the production state/engine wiring.
+- **Known limitation for P2:** the remaining negative-path coverage (e.g., inclusion-proof failures) still lives only in Tier 0. With the builder now able to reopen states and inject custom blob schedules, porting those cases plus additional restream permutations is unblocked but still pending.
 
 ---
 

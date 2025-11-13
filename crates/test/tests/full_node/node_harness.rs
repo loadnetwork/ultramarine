@@ -39,6 +39,7 @@ use alloy_rpc_types_engine::{
     BlobsBundleV1, ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState,
     PayloadAttributes,
 };
+use bytes::Bytes;
 use color_eyre::{
     Result,
     eyre::{self, WrapErr},
@@ -48,7 +49,14 @@ use malachitebft_app::{
     node::{Node, NodeHandle},
     wal::Log as WalLog,
 };
-use malachitebft_app_channel::app::events::RxEvent;
+use malachitebft_app_channel::app::{
+    events::RxEvent,
+    streaming::StreamMessage,
+    types::{
+        LocallyProposedValue,
+        core::{CommitCertificate, Round},
+    },
+};
 use malachitebft_config::{
     BootstrapProtocol, LoggingConfig, RuntimeConfig, Selector, TransportProtocol,
 };
@@ -57,6 +65,7 @@ use multiaddr::Multiaddr;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use serial_test::serial;
+use ssz::Encode;
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -69,29 +78,44 @@ use ultramarine_blob_engine::{
     BlobEngine, BlobEngineImpl, metrics::BlobEngineMetrics, store::rocksdb::RocksDbBlobStore,
 };
 use ultramarine_cli::{config::Config, new::generate_config};
-use ultramarine_consensus::{metrics::DbMetrics, store::Store};
+use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
 use ultramarine_node::node::{App, Handle};
 use ultramarine_types::{
-    blob::{BYTES_PER_BLOB, BlobsBundle},
+    address::Address,
+    blob::{BYTES_PER_BLOB, BlobsBundle, KzgCommitment},
+    blob_metadata::BlobMetadata,
     codec::proto::ProtobufCodec,
     context::LoadContext,
-    engine_api::{ExecutionBlock, JsonExecutionPayloadV3},
+    engine_api::{ExecutionBlock, ExecutionPayloadHeader, JsonExecutionPayloadV3},
+    genesis::Genesis,
     height::Height,
+    signing::{Ed25519Provider, PrivateKey},
+    sync::SyncedValuePackage,
+    value::Value as StateValue,
+    value_metadata::ValueMetadata,
 };
 
 #[path = "../common/mod.rs"]
 mod blob_common;
 
-use blob_common::{make_genesis, sample_blob_bundle, sample_execution_payload_v3_for_height};
+use blob_common::{
+    make_genesis,
+    mocks::{MockEngineApi, MockExecutionNotifier},
+    payload_id, propose_with_optional_blobs, sample_blob_bundle,
+    sample_execution_payload_v3_for_height, test_peer_id,
+};
 use tracing_subscriber::EnvFilter;
+use ultramarine_execution::EngineApi;
 
 type NodeConfigHook = Arc<dyn Fn(usize, &mut Config) + Send + Sync>;
+type PayloadPlan = Arc<dyn Fn(Height) -> usize + Send + Sync>;
 
 #[derive(Clone)]
 struct HarnessConfig {
     node_count: usize,
     start_height: Option<Height>,
     node_config_hook: Option<NodeConfigHook>,
+    payload_plan: Option<PayloadPlan>,
 }
 
 impl HarnessConfig {
@@ -99,6 +123,10 @@ impl HarnessConfig {
         if let Some(hook) = &self.node_config_hook {
             (hook)(index, config);
         }
+    }
+
+    fn payload_plan(&self) -> Option<PayloadPlan> {
+        self.payload_plan.clone()
     }
 }
 
@@ -108,11 +136,17 @@ struct FullNodeTestBuilder {
     node_count: usize,
     start_height: Option<Height>,
     node_config_hook: Option<NodeConfigHook>,
+    payload_plan: Option<PayloadPlan>,
 }
 
 impl Default for FullNodeTestBuilder {
     fn default() -> Self {
-        Self { node_count: 3, start_height: Some(Height::new(1)), node_config_hook: None }
+        Self {
+            node_count: 3,
+            start_height: Some(Height::new(1)),
+            node_config_hook: None,
+            payload_plan: None,
+        }
     }
 }
 
@@ -131,11 +165,20 @@ impl FullNodeTestBuilder {
         self
     }
 
+    #[allow(dead_code)]
     fn with_node_config<F>(mut self, hook: F) -> Self
     where
         F: Fn(usize, &mut Config) + Send + Sync + 'static,
     {
         self.node_config_hook = Some(Arc::new(hook));
+        self
+    }
+
+    fn with_payload_plan<F>(mut self, plan: F) -> Self
+    where
+        F: Fn(Height) -> usize + Send + Sync + 'static,
+    {
+        self.payload_plan = Some(Arc::new(plan));
         self
     }
 
@@ -147,6 +190,7 @@ impl FullNodeTestBuilder {
             node_count: self.node_count,
             start_height: self.start_height,
             node_config_hook: self.node_config_hook.clone(),
+            payload_plan: self.payload_plan.clone(),
         };
 
         let mut network = NetworkHarness::start(&config).await?;
@@ -314,6 +358,860 @@ async fn full_node_new_node_sync() -> Result<()> {
         .await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_multi_height_valuesync_restart() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(4)
+        .with_payload_plan(|height: Height| match height.as_u64() {
+            1 => 1,
+            2 => 0,
+            3 => 2,
+            _ => 1,
+        })
+        .run(|network| {
+            Box::pin(async move {
+                // Keep validator 3 offline so it misses the first three heights.
+                network.stop_node(3).await?;
+                tokio::try_join!(
+                    network.wait_for_height(0, Height::new(3)),
+                    network.wait_for_height(1, Height::new(3)),
+                    network.wait_for_height(2, Height::new(3))
+                )?;
+
+                // Bring it back online and wait for ValueSync to replay the missing heights.
+                network.start_node(3).await?;
+                network.wait_for_height(3, Height::new(3)).await?;
+
+                // After the cluster shuts down, verify mixed blob metadata survived the restart.
+                network.assert_blob_metadata(3, Height::new(1), 1).await?;
+                network.assert_blob_metadata(3, Height::new(2), 0).await?;
+                network.assert_blob_metadata(3, Height::new(3), 2).await?;
+                network.assert_parent_root_matches(3, Height::new(3)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_restart_multi_height_rebuilds() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let mut node_state = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready(node).await?
+                };
+
+                let scenarios = [
+                    (Height::new(0), Some(sample_blob_bundle(1))),
+                    (Height::new(1), None),
+                    (Height::new(2), Some(sample_blob_bundle(2))),
+                ];
+
+                for (height, maybe_bundle) in scenarios.into_iter() {
+                    let payload =
+                        sample_execution_payload_v3_for_height(height, maybe_bundle.as_ref());
+                    let (proposed, bytes, sidecars) = propose_with_optional_blobs(
+                        &mut node_state,
+                        height,
+                        Round::new(0),
+                        &payload,
+                        maybe_bundle.as_ref(),
+                    )
+                    .await?;
+
+                    if let Some(ref bundle_sidecars) = sidecars {
+                        node_state
+                            .blob_engine()
+                            .verify_and_store(height, 0, bundle_sidecars)
+                            .await?;
+                    }
+
+                    node_state
+                        .store_undecided_block_data(height, Round::new(0), bytes.clone())
+                        .await?;
+
+                    let certificate = CommitCertificate {
+                        height,
+                        round: Round::new(0),
+                        value_id: proposed.value.id(),
+                        commit_signatures: Vec::new(),
+                    };
+                    let mut notifier = MockExecutionNotifier::default();
+                    node_state
+                        .process_decided_certificate(&certificate, bytes, &mut notifier)
+                        .await?;
+                }
+
+                drop(node_state);
+                network.shutdown().await?;
+                network.assert_rebuilds_sidecars(0, Height::new(0), 1).await?;
+                network.assert_rebuilds_sidecars(0, Height::new(1), 0).await?;
+                network.assert_rebuilds_sidecars(0, Height::new(2), 2).await?;
+                network.assert_parent_root_matches(0, Height::new(2)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                network.stop_node(1).await?;
+
+                let (mut proposer, _) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+                let (mut follower, follower_metrics) = {
+                    let node = network.node_ref(1)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let rounds = [Round::new(0), Round::new(1)];
+                let payload_ids = [payload_id(6), payload_id(7)];
+
+                let raw_bundles = [sample_blob_bundle(1), sample_blob_bundle(1)];
+                let raw_payloads = [
+                    sample_execution_payload_v3_for_height(height, Some(&raw_bundles[0])),
+                    sample_execution_payload_v3_for_height(height, Some(&raw_bundles[1])),
+                ];
+
+                let mut mock_engine = MockEngineApi::default();
+                for ((payload_id, payload), bundle) in
+                    payload_ids.iter().zip(raw_payloads.iter()).zip(raw_bundles.iter())
+                {
+                    mock_engine = mock_engine.with_payload(
+                        *payload_id,
+                        payload.clone(),
+                        Some(bundle.clone()),
+                    );
+                }
+
+                let mut total_success = 0usize;
+                let mut dropped_count = 0usize;
+                let mut promoted_count = 0usize;
+                let mut winning_proposal = None;
+                let mut winning_payload_bytes = None;
+
+                for (idx, round) in rounds.iter().enumerate() {
+                    let payload_id = payload_ids[idx];
+                    let (payload, maybe_bundle) =
+                        mock_engine.get_payload_with_blobs(payload_id).await?;
+                    let bundle = maybe_bundle.expect("bundle should exist");
+                    let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+                        &mut proposer,
+                        height,
+                        *round,
+                        &payload,
+                        Some(&bundle),
+                    )
+                    .await?;
+                    let sidecars = maybe_sidecars.expect("sidecars expected");
+
+                    if !sidecars.is_empty() {
+                        proposer
+                            .blob_engine()
+                            .verify_and_store(height, round.as_i64(), &sidecars)
+                            .await?;
+                    }
+                    proposer
+                        .store_undecided_block_data(height, *round, payload_bytes.clone())
+                        .await?;
+
+                    total_success += sidecars.len();
+                    if round.as_u32() == Some(0) {
+                        dropped_count = sidecars.len();
+                    } else {
+                        promoted_count = sidecars.len();
+                    }
+
+                    let stream_messages: Vec<StreamMessage<_>> = proposer
+                        .stream_proposal(
+                            proposed,
+                            payload_bytes.clone(),
+                            Some(sidecars.as_slice()),
+                            None,
+                        )
+                        .collect();
+
+                    let mut received = None;
+                    for msg in stream_messages {
+                        if let Some(value) = follower
+                            .received_proposal_part(
+                                test_peer_id(round.as_u32().expect("round") as u8 + 20),
+                                msg,
+                            )
+                            .await?
+                        {
+                            received = Some(value);
+                        }
+                    }
+                    let received = received.expect("follower should reconstruct proposal");
+                    if round.as_u32() == Some(1) {
+                        winning_proposal = Some(received);
+                        winning_payload_bytes = Some(payload_bytes.clone());
+                    }
+                }
+
+                let winning_round = rounds[1];
+                let certificate = CommitCertificate {
+                    height,
+                    round: winning_round,
+                    value_id: winning_proposal
+                        .as_ref()
+                        .expect("winning proposal stored")
+                        .value
+                        .id(),
+                    commit_signatures: Vec::new(),
+                };
+                let payload_bytes = winning_payload_bytes.expect("winning payload bytes tracked");
+
+                let follower_payload = follower
+                    .get_block_data(height, winning_round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut follower_notifier = MockExecutionNotifier::default();
+                let follower_outcome = follower
+                    .process_decided_certificate(
+                        &certificate,
+                        follower_payload,
+                        &mut follower_notifier,
+                    )
+                    .await?;
+
+                let imported = follower.blob_engine().get_for_import(height).await?;
+
+                let metrics = follower_metrics.snapshot();
+                assert_eq!(metrics.verifications_success, total_success as u64);
+                assert_eq!(metrics.lifecycle_promoted, promoted_count as u64);
+                assert_eq!(metrics.lifecycle_dropped, dropped_count as u64);
+                assert_eq!(metrics.storage_bytes_decided, (promoted_count * BYTES_PER_BLOB) as i64);
+                assert_eq!(metrics.storage_bytes_undecided, 0);
+
+                let undecided =
+                    follower.blob_engine().get_undecided_blobs(height, rounds[0].as_i64()).await?;
+                assert!(undecided.is_empty(), "losing round blobs should be dropped");
+                assert_eq!(follower.current_height, Height::new(1));
+                assert_eq!(follower_outcome.blob_count, promoted_count);
+                assert!(
+                    imported.len() >= follower_outcome.blob_count,
+                    "expected at least {} decided blobs, found {}",
+                    follower_outcome.blob_count,
+                    imported.len()
+                );
+                assert_eq!(follower_notifier.new_block_calls.lock().unwrap().len(), 1);
+
+                let proposer_payload = proposer
+                    .get_block_data(height, winning_round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut proposer_notifier = MockExecutionNotifier::default();
+                proposer
+                    .process_decided_certificate(
+                        &certificate,
+                        proposer_payload,
+                        &mut proposer_notifier,
+                    )
+                    .await?;
+                assert_eq!(proposer.current_height, Height::new(1));
+                assert_eq!(proposer_notifier.new_block_calls.lock().unwrap().len(), 1);
+
+                let proposer_undecided =
+                    proposer.blob_engine().get_undecided_blobs(height, rounds[0].as_i64()).await?;
+                assert!(
+                    proposer_undecided.is_empty(),
+                    "proposer should drop losing round blobs during commit"
+                );
+
+                drop(proposer);
+                drop(follower);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_restream_multi_validator() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                network.stop_node(1).await?;
+
+                let (mut proposer, _) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+                let (mut follower, follower_metrics) = {
+                    let node = network.node_ref(1)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let bundle = sample_blob_bundle(1);
+                let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+                let payload_id = payload_id(3);
+                let mock_engine = MockEngineApi::default().with_payload(
+                    payload_id,
+                    payload.clone(),
+                    Some(bundle.clone()),
+                );
+
+                let (payload, maybe_bundle) =
+                    mock_engine.get_payload_with_blobs(payload_id).await?;
+                let bundle = maybe_bundle.expect("bundle");
+
+                let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+                    &mut proposer,
+                    height,
+                    round,
+                    &payload,
+                    Some(&bundle),
+                )
+                .await?;
+                let sidecars = maybe_sidecars.expect("sidecars expected");
+                if !sidecars.is_empty() {
+                    proposer
+                        .blob_engine()
+                        .verify_and_store(height, round.as_i64(), &sidecars)
+                        .await?;
+                }
+                proposer.store_undecided_block_data(height, round, payload_bytes.clone()).await?;
+
+                let stream_messages: Vec<StreamMessage<_>> = proposer
+                    .stream_proposal(proposed.clone(), payload_bytes.clone(), Some(&sidecars), None)
+                    .collect();
+
+                let mut received = None;
+                for msg in stream_messages {
+                    let peer_id = test_peer_id(1);
+                    if let Some(value) = follower.received_proposal_part(peer_id, msg).await? {
+                        received = Some(value);
+                    }
+                }
+                let received = received.expect("follower should reconstruct proposal");
+
+                let certificate = CommitCertificate {
+                    height,
+                    round,
+                    value_id: received.value.id(),
+                    commit_signatures: Vec::new(),
+                };
+
+                let follower_payload = follower
+                    .get_block_data(height, round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut follower_notifier = MockExecutionNotifier::default();
+                let follower_outcome = follower
+                    .process_decided_certificate(
+                        &certificate,
+                        follower_payload,
+                        &mut follower_notifier,
+                    )
+                    .await?;
+
+                let imported = follower.blob_engine().get_for_import(height).await?;
+                assert_eq!(imported.len(), sidecars.len());
+                assert_eq!(follower.current_height, Height::new(1));
+                assert_eq!(follower_outcome.blob_count, sidecars.len());
+                assert_eq!(follower_notifier.new_block_calls.lock().unwrap().len(), 1);
+
+                let metrics = follower_metrics.snapshot();
+                assert_eq!(metrics.verifications_success, sidecars.len() as u64);
+                assert_eq!(metrics.verifications_failure, 0);
+                assert_eq!(metrics.lifecycle_promoted, sidecars.len() as u64);
+                assert_eq!(metrics.storage_bytes_decided, (sidecars.len() * BYTES_PER_BLOB) as i64);
+
+                let proposer_payload = proposer
+                    .get_block_data(height, round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut proposer_notifier = MockExecutionNotifier::default();
+                proposer
+                    .process_decided_certificate(
+                        &certificate,
+                        proposer_payload,
+                        &mut proposer_notifier,
+                    )
+                    .await?;
+                assert_eq!(proposer.current_height, Height::new(1));
+                assert_eq!(proposer_notifier.new_block_calls.lock().unwrap().len(), 1);
+
+                drop(proposer);
+                drop(follower);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let validator_address = network.node_address(0)?;
+                let (mut node_state, node_metrics) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let bundle = sample_blob_bundle(1);
+                let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+
+                let (_proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+                    &mut node_state,
+                    height,
+                    round,
+                    &payload,
+                    Some(&bundle),
+                )
+                .await?;
+                let sidecars = maybe_sidecars.expect("sidecars expected");
+
+                let mut fake_commitment_bytes = sidecars[0].kzg_commitment.0;
+                fake_commitment_bytes[0] ^= 0xFF;
+                let fake_commitment = KzgCommitment(fake_commitment_bytes);
+
+                let header = ExecutionPayloadHeader::from_payload(&payload);
+                let fake_metadata = ValueMetadata::new(header, vec![fake_commitment]);
+                let fake_value = StateValue::new(fake_metadata);
+
+                let package = SyncedValuePackage::Full {
+                    value: fake_value,
+                    execution_payload_ssz: payload_bytes.clone(),
+                    blob_sidecars: sidecars.clone(),
+                };
+
+                let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
+                let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
+
+                let result = node_state
+                    .process_synced_package(height, round, validator_address, decoded)
+                    .await?;
+                assert!(result.is_none(), "commitment mismatch should be rejected");
+
+                let metrics = node_metrics.snapshot();
+                assert_eq!(metrics.sync_failures, 1);
+                assert_eq!(metrics.verifications_success, 1);
+
+                let round_i64 = round.as_i64();
+                let undecided =
+                    node_state.blob_engine().get_undecided_blobs(height, round_i64).await?;
+                assert!(
+                    undecided.is_empty(),
+                    "invalid blobs should be dropped after validation failure"
+                );
+
+                let metadata = node_state.load_blob_metadata_for_round(height, round).await?;
+                assert!(
+                    metadata.map_or(true, |m| m.blob_count() == 0),
+                    "fake metadata should not be stored"
+                );
+
+                drop(node_state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_value_sync_inclusion_proof_failure() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let validator_address = network.node_address(0)?;
+                let (mut node_state, node_metrics) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let bundle = sample_blob_bundle(1);
+                let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+
+                let (_proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+                    &mut node_state,
+                    height,
+                    round,
+                    &payload,
+                    Some(&bundle),
+                )
+                .await?;
+                let mut sidecars = maybe_sidecars.expect("sidecars expected");
+                sidecars[0].kzg_commitment_inclusion_proof.clear();
+
+                let header = ExecutionPayloadHeader::from_payload(&payload);
+                let metadata = ValueMetadata::new(header, bundle.commitments.clone());
+                let value = StateValue::new(metadata);
+
+                let package = SyncedValuePackage::Full {
+                    value,
+                    execution_payload_ssz: payload_bytes.clone(),
+                    blob_sidecars: sidecars.clone(),
+                };
+
+                let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
+                let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
+
+                let result = node_state
+                    .process_synced_package(height, round, validator_address, decoded)
+                    .await?;
+                assert!(result.is_none(), "inclusion proof failure should be rejected");
+
+                let metrics = node_metrics.snapshot();
+                assert_eq!(metrics.sync_failures, 1);
+                assert_eq!(metrics.verifications_success, 1);
+
+                let round_i64 = round.as_i64();
+                let undecided =
+                    node_state.blob_engine().get_undecided_blobs(height, round_i64).await?;
+                assert!(
+                    undecided.is_empty(),
+                    "invalid blobs should be dropped after inclusion proof failure"
+                );
+
+                let decided = node_state.blob_engine().get_for_import(height).await?;
+                assert!(
+                    decided.is_empty(),
+                    "no blobs should be promoted when inclusion proof verification fails"
+                );
+
+                drop(node_state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_blob_blobless_sequence_behaves() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let (mut state, metrics) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let mut commit_block = |height: Height, blob_count: usize| async {
+                    let round = Round::new(0);
+                    let bundle =
+                        if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
+                    let payload = sample_execution_payload_v3_for_height(height, bundle.as_ref());
+                    let (proposed, bytes, maybe_sidecars) = propose_with_optional_blobs(
+                        &mut state,
+                        height,
+                        round,
+                        &payload,
+                        bundle.as_ref(),
+                    )
+                    .await?;
+                    if let Some(sidecars) = maybe_sidecars.as_ref() {
+                        state
+                            .blob_engine()
+                            .verify_and_store(height, round.as_i64(), sidecars)
+                            .await?;
+                    }
+                    state.store_undecided_block_data(height, round, bytes.clone()).await?;
+                    let certificate = CommitCertificate {
+                        height,
+                        round,
+                        value_id: proposed.value.id(),
+                        commit_signatures: Vec::new(),
+                    };
+                    let mut notifier = MockExecutionNotifier::default();
+                    state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
+                    eyre::Result::<()>::Ok(())
+                };
+
+                commit_block(Height::new(0), 1).await?;
+                commit_block(Height::new(1), 0).await?;
+                commit_block(Height::new(2), 2).await?;
+
+                let metrics_snapshot = metrics.snapshot();
+                assert_eq!(metrics_snapshot.lifecycle_promoted, 3);
+                assert_eq!(metrics_snapshot.storage_bytes_decided, (3 * BYTES_PER_BLOB) as i64);
+
+                let blobs_h0 = state.blob_engine().get_for_import(Height::new(0)).await?;
+                assert_eq!(blobs_h0.len(), 1);
+                let blobs_h1 = state.blob_engine().get_for_import(Height::new(1)).await?;
+                assert!(blobs_h1.is_empty());
+                let blobs_h2 = state.blob_engine().get_for_import(Height::new(2)).await?;
+                assert_eq!(blobs_h2.len(), 2);
+                assert_eq!(state.current_height, Height::new(3));
+                drop(state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_blob_pruning_retains_recent_heights() -> Result<()> {
+    install_color_eyre_once();
+    const TOTAL_HEIGHTS: usize = 8;
+    const RETENTION: u64 = 5;
+
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let (mut state, metrics) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+                state.set_blob_retention_window_for_testing(RETENTION);
+
+                for idx in 0..TOTAL_HEIGHTS {
+                    let height = Height::new(idx as u64);
+                    let round = Round::new(0);
+                    let bundle = sample_blob_bundle(1);
+                    let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+                    let (proposed, bytes, sidecars) = propose_with_optional_blobs(
+                        &mut state,
+                        height,
+                        round,
+                        &payload,
+                        Some(&bundle),
+                    )
+                    .await?;
+                    let sidecars = sidecars.expect("sidecars expected");
+                    state.blob_engine().verify_and_store(height, round.as_i64(), &sidecars).await?;
+                    state.store_undecided_block_data(height, round, bytes.clone()).await?;
+                    let certificate = CommitCertificate {
+                        height,
+                        round,
+                        value_id: proposed.value.id(),
+                        commit_signatures: Vec::new(),
+                    };
+                    let mut notifier = MockExecutionNotifier::default();
+                    state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
+                }
+
+                let metrics_snapshot = metrics.snapshot();
+                let retention_window = RETENTION as usize;
+                let expected_pruned = TOTAL_HEIGHTS.saturating_sub(retention_window);
+                assert_eq!(metrics_snapshot.lifecycle_promoted, TOTAL_HEIGHTS as u64);
+                assert_eq!(metrics_snapshot.lifecycle_pruned, expected_pruned as u64);
+                assert_eq!(
+                    metrics_snapshot.storage_bytes_decided,
+                    ((TOTAL_HEIGHTS - expected_pruned) * BYTES_PER_BLOB) as i64
+                );
+
+                for height in 0..expected_pruned {
+                    let decided =
+                        state.blob_engine().get_for_import(Height::new(height as u64)).await?;
+                    assert!(
+                        decided.is_empty(),
+                        "height {} should be pruned beyond retention window",
+                        height
+                    );
+                }
+                for height in expected_pruned..TOTAL_HEIGHTS {
+                    let decided =
+                        state.blob_engine().get_for_import(Height::new(height as u64)).await?;
+                    assert_eq!(decided.len(), 1, "height {} should retain blob", height);
+                }
+                assert_eq!(state.current_height, Height::new(TOTAL_HEIGHTS as u64));
+                drop(state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_sync_package_roundtrip() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let (mut state, metrics) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let bundle = sample_blob_bundle(1);
+                let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+                let payload_bytes = Bytes::from(payload.as_ssz_bytes());
+                let header = ExecutionPayloadHeader::from_payload(&payload);
+                let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
+                let value = StateValue::new(value_metadata.clone());
+
+                let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
+                let (_signed_header, sidecars) =
+                    state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))?;
+
+                let package = SyncedValuePackage::Full {
+                    value: value.clone(),
+                    execution_payload_ssz: payload_bytes.clone(),
+                    blob_sidecars: sidecars.clone(),
+                };
+                let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
+                let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
+
+                let proposer = state.validator_address().clone();
+                let proposed_value = state
+                    .process_synced_package(height, round, proposer, decoded)
+                    .await?
+                    .expect("sync package should yield proposal");
+
+                let certificate = CommitCertificate {
+                    height,
+                    round,
+                    value_id: proposed_value.value.id(),
+                    commit_signatures: Vec::new(),
+                };
+                let payload_for_commit = state
+                    .get_block_data(height, round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut notifier = MockExecutionNotifier::default();
+                state
+                    .process_decided_certificate(&certificate, payload_for_commit, &mut notifier)
+                    .await?;
+
+                let imported = state.blob_engine().get_for_import(height).await?;
+                assert_eq!(imported.len(), 1);
+                assert_eq!(imported[0].kzg_commitment, bundle.commitments[0]);
+                assert!(state.get_blob_metadata(height).await?.is_some());
+
+                let metrics_snapshot = metrics.snapshot();
+                assert_eq!(metrics_snapshot.verifications_success, 1);
+                assert_eq!(metrics_snapshot.lifecycle_promoted, 1);
+                drop(state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_value_sync_proof_failure() -> Result<()> {
+    install_color_eyre_once();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let (mut node_state, node_metrics) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let bundle = sample_blob_bundle(1);
+                let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+
+                let (_proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+                    &mut node_state,
+                    height,
+                    round,
+                    &payload,
+                    Some(&bundle),
+                )
+                .await?;
+                let mut sidecars = maybe_sidecars.expect("sidecars expected");
+                sidecars[0].kzg_proof.0[0] ^= 0xFF;
+
+                let package = SyncedValuePackage::Full {
+                    value: StateValue::new(ValueMetadata::new(
+                        ExecutionPayloadHeader::from_payload(&payload),
+                        bundle.commitments.clone(),
+                    )),
+                    execution_payload_ssz: payload_bytes.clone(),
+                    blob_sidecars: sidecars.clone(),
+                };
+                let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
+                let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
+
+                let result = node_state
+                    .process_synced_package(height, round, network.node_address(0)?, decoded)
+                    .await?;
+                assert!(result.is_none(), "tampered proof should be rejected");
+
+                let metrics = node_metrics.snapshot();
+                assert_eq!(metrics.sync_failures, 1);
+                assert_eq!(metrics.verifications_failure, sidecars.len() as u64);
+                assert_eq!(metrics.verifications_success, 0);
+                let round_i64 = round.as_i64();
+                let undecided =
+                    node_state.blob_engine().get_undecided_blobs(height, round_i64).await?;
+                assert!(undecided.is_empty());
+                drop(node_state);
+                Ok(())
+            })
+        })
+        .await
+}
+
 /// Representation of a node running inside the multi-node harness.
 struct NodeProcess {
     handle: Option<Handle>,
@@ -325,6 +1223,8 @@ struct NodeProcess {
     key_path: PathBuf,
     jwt_path: PathBuf,
     start_height: Option<Height>,
+    payload_plan: Option<PayloadPlan>,
+    validator_address: Address,
     running: bool,
 }
 
@@ -333,7 +1233,7 @@ impl NodeProcess {
         if self.running {
             return Ok(());
         }
-        let new_stub = EngineRpcStub::start().await?;
+        let new_stub = EngineRpcStub::start(self.payload_plan.clone()).await?;
         let app = App {
             config: self.config.clone(),
             home_dir: self.home.path().to_path_buf(),
@@ -388,9 +1288,11 @@ impl NetworkHarness {
         let mut nodes = Vec::with_capacity(config.node_count);
 
         for index in 0..config.node_count {
-            let engine_stub = EngineRpcStub::start().await?;
+            let payload_plan = config.payload_plan();
+            let engine_stub = EngineRpcStub::start(payload_plan.clone()).await?;
             let home = TempDir::new().wrap_err("create node tempdir")?;
             let validator = &validator_keys[index];
+            let validator_address = validator.address();
             let genesis_path = write_json(home.path().join("genesis.json"), &genesis)?;
             let key_path =
                 write_json(home.path().join("validator_key.json"), &validator.private_key())?;
@@ -459,6 +1361,8 @@ impl NetworkHarness {
                 key_path: stored_key,
                 jwt_path: stored_jwt,
                 start_height: config.start_height,
+                payload_plan,
+                validator_address,
                 running: true,
             });
         }
@@ -539,6 +1443,22 @@ impl NetworkHarness {
         node.start().await
     }
 
+    fn node_ref(&self, node_index: usize) -> Result<&NodeProcess> {
+        self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))
+    }
+
+    fn node_address(&self, node_index: usize) -> Result<Address> {
+        Ok(self.node_ref(node_index)?.validator_address.clone())
+    }
+
+    async fn ensure_shutdown(&mut self) -> Result<()> {
+        if !self.is_shutdown {
+            self.shutdown().await?;
+            sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+
     async fn shutdown(&mut self) -> Result<()> {
         if self.is_shutdown {
             return Ok(());
@@ -556,11 +1476,7 @@ impl NetworkHarness {
         height: Height,
         expected: usize,
     ) -> Result<()> {
-        if !self.is_shutdown {
-            self.shutdown().await?;
-            // Give RocksDB time to release file locks before reopening for inspection.
-            sleep(Duration::from_millis(100)).await;
-        }
+        self.ensure_shutdown().await?;
         let node =
             self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
         let blob_store = RocksDbBlobStore::open(node.home.path().join("blob_store.db"))
@@ -573,6 +1489,77 @@ impl NetworkHarness {
             expected,
             "expected {expected} blobs at height {height}, found {}",
             blobs.len()
+        );
+        Ok(())
+    }
+
+    async fn assert_blob_metadata(
+        &mut self,
+        node_index: usize,
+        height: Height,
+        expected_blobs: usize,
+    ) -> Result<()> {
+        self.ensure_shutdown().await?;
+        let node =
+            self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        let metadata = load_blob_metadata(node, node_index, height).await?;
+        let actual = usize::from(metadata.blob_count());
+        assert_eq!(
+            actual, expected_blobs,
+            "node {node_index} expected {expected_blobs} blobs at height {height}, found {}",
+            actual
+        );
+        Ok(())
+    }
+
+    async fn assert_parent_root_matches(
+        &mut self,
+        node_index: usize,
+        height: Height,
+    ) -> Result<()> {
+        self.ensure_shutdown().await?;
+        let node =
+            self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        let mut state = open_state_from_disk(node)?;
+        state.hydrate_blob_parent_root().await?;
+        let metadata = state
+            .get_blob_metadata(height)
+            .await?
+            .ok_or_else(|| eyre::eyre!("node {node_index} missing metadata at height {height}"))?;
+        let expected_root = metadata.to_beacon_header().hash_tree_root();
+        let cached_root = state.blob_parent_root();
+        assert_eq!(
+            cached_root,
+            expected_root,
+            "node {node_index} parent root mismatch at height {height}: expected {}, got {}",
+            format_b256(expected_root),
+            format_b256(cached_root)
+        );
+        Ok(())
+    }
+
+    async fn assert_rebuilds_sidecars(
+        &mut self,
+        node_index: usize,
+        height: Height,
+        expected_blobs: usize,
+    ) -> Result<()> {
+        self.ensure_shutdown().await?;
+        let node =
+            self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        let state = open_state_ready(node).await?;
+        let metadata = state
+            .get_blob_metadata(height)
+            .await?
+            .ok_or_else(|| eyre::eyre!("node {node_index} missing metadata for height {height}"))?;
+        let blobs = state.blob_engine().get_for_import(height).await?;
+        let rebuilt =
+            state.rebuild_blob_sidecars_for_restream(&metadata, &node.validator_address, &blobs)?;
+        assert_eq!(
+            rebuilt.len(),
+            expected_blobs,
+            "node {node_index} expected {expected_blobs} rebuilt sidecars at height {height}, found {}",
+            rebuilt.len()
         );
         Ok(())
     }
@@ -614,6 +1601,66 @@ fn local_multiaddr() -> Multiaddr {
     TransportProtocol::Tcp.multiaddr("127.0.0.1", port)
 }
 
+async fn load_blob_metadata(
+    node: &NodeProcess,
+    node_index: usize,
+    height: Height,
+) -> Result<BlobMetadata> {
+    let store = Store::open(node.home.path().join("store.db"), DbMetrics::new())
+        .wrap_err_with(|| format!("open store for node {node_index} to read metadata"))?;
+    store
+        .get_blob_metadata(height)
+        .await?
+        .ok_or_else(|| eyre::eyre!("node {node_index} missing metadata for height {height}"))
+}
+
+fn open_state_and_metrics(
+    node: &NodeProcess,
+) -> Result<(State<BlobEngineImpl<RocksDbBlobStore>>, BlobEngineMetrics)> {
+    let genesis_file = File::open(&node.genesis_path).wrap_err("open genesis file")?;
+    let genesis: Genesis = serde_json::from_reader(genesis_file).wrap_err("decode genesis file")?;
+    let key_file = File::open(&node.key_path).wrap_err("open validator key file")?;
+    let private_key: PrivateKey =
+        serde_json::from_reader(key_file).wrap_err("decode validator key")?;
+    let store = Store::open(node.home.path().join("store.db"), DbMetrics::new())?;
+    let blob_store = RocksDbBlobStore::open(node.home.path().join("blob_store.db"))?;
+    let blob_metrics = BlobEngineMetrics::new();
+    let blob_engine = BlobEngineImpl::new(blob_store, blob_metrics.clone())?;
+    let provider = Ed25519Provider::new(private_key);
+    let state = State::new(
+        genesis,
+        LoadContext::new(),
+        provider,
+        node.validator_address.clone(),
+        node.start_height.unwrap_or_else(|| Height::new(1)),
+        store,
+        blob_engine,
+        blob_metrics.clone(),
+    );
+    Ok((state, blob_metrics))
+}
+
+fn open_state_from_disk(node: &NodeProcess) -> Result<State<BlobEngineImpl<RocksDbBlobStore>>> {
+    let (state, _) = open_state_and_metrics(node)?;
+    Ok(state)
+}
+
+async fn open_state_ready(node: &NodeProcess) -> Result<State<BlobEngineImpl<RocksDbBlobStore>>> {
+    let (mut state, _) = open_state_and_metrics(node)?;
+    state.seed_genesis_blob_metadata().await?;
+    state.hydrate_blob_parent_root().await?;
+    Ok(state)
+}
+
+async fn open_state_ready_with_metrics(
+    node: &NodeProcess,
+) -> Result<(State<BlobEngineImpl<RocksDbBlobStore>>, BlobEngineMetrics)> {
+    let (mut state, metrics) = open_state_and_metrics(node)?;
+    state.seed_genesis_blob_metadata().await?;
+    state.hydrate_blob_parent_root().await?;
+    Ok((state, metrics))
+}
+
 /// Minimal Engine + Eth RPC stub that satisfies the calls Ultramarine makes during tests.
 struct EngineRpcStub {
     addr: SocketAddr,
@@ -622,10 +1669,10 @@ struct EngineRpcStub {
 }
 
 impl EngineRpcStub {
-    async fn start() -> Result<Self> {
+    async fn start(payload_plan: Option<PayloadPlan>) -> Result<Self> {
         let listener = TokioTcpListener::bind("127.0.0.1:0").await.wrap_err("bind engine stub")?;
         let addr = listener.local_addr().unwrap();
-        let state = Arc::new(TokioMutex::new(StubState::default()));
+        let state = Arc::new(TokioMutex::new(StubState::new(payload_plan)));
         let accept_state = Arc::clone(&state);
         debug_log!("engine stub listening on {}", addr);
 
@@ -664,15 +1711,21 @@ struct StubState {
     latest_block: ExecutionBlock,
     next_payload_id: u64,
     pending: HashMap<[u8; 8], (ExecutionPayloadV3, Option<BlobsBundle>)>,
+    payload_plan: Option<PayloadPlan>,
 }
 
-impl Default for StubState {
-    fn default() -> Self {
+impl StubState {
+    fn new(payload_plan: Option<PayloadPlan>) -> Self {
         Self {
             latest_block: default_execution_block(),
             next_payload_id: 0,
             pending: HashMap::new(),
+            payload_plan,
         }
+    }
+
+    fn blob_count_for_height(&self, height: Height) -> usize {
+        self.payload_plan.as_ref().map(|plan| plan(height)).unwrap_or(1)
     }
 }
 
@@ -798,9 +1851,9 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
 
         debug_log!("engine_forkchoiceUpdatedV3: generating payload for height {}", next_height);
 
-        let raw_bundle = sample_blob_bundle(1);
-        let payload = sample_execution_payload_v3_for_height(next_height, Some(&raw_bundle));
-        let bundle = Some(raw_bundle);
+        let blob_count = guard.blob_count_for_height(next_height);
+        let bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
+        let payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
         let payload_id = guard.next_payload_id;
         guard.next_payload_id += 1;
         guard.pending.insert(payload_id.to_be_bytes(), (payload.clone(), bundle.clone()));

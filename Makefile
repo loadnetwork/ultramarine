@@ -606,3 +606,13 @@ itest-node: ## Run full-node (Tier 1) integration tests (ignored + serialized).
 	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_validator_restart_recovers -- --ignored --nocapture
 	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_mid_height -- --ignored --nocapture
 	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_new_node_sync -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_multi_height_valuesync_restart -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_multi_height_rebuilds -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multiple_rounds_cleanup -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_commitment_mismatch -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multi_validator -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_inclusion_proof_failure -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_blobless_sequence_behaves -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_pruning_retains_recent_heights -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_sync_package_roundtrip -- --ignored --nocapture
+	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_proof_failure -- --ignored --nocapture
