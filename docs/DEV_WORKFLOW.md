@@ -211,6 +211,16 @@ The blob integration suite lives in the dedicated `crates/test` package so Cargo
   - `full_node_validator_restart_recovers` – stop the proposer after height 1 and ensure it replays WAL + blobs for height 2
   - `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
   - `full_node_new_node_sync` – run a 4-validator cluster, take the fourth validator offline for the first two heights, then bring it back and ensure ValueSync fetches the missing blobs/metadata
+  - `full_node_multi_height_valuesync_restart` – keep validator 3 offline through heights 1–3, let ValueSync import a 1/0/2 blob mix, then restart and inspect the on-disk metadata + parent-root cache.
+  - `full_node_restart_multi_height_rebuilds` – drive a 1/0/2 blob mix to height 3, then restart a validator and assert it can rebuild blob sidecars + parent roots solely from disk.
+  - `full_node_restream_multiple_rounds_cleanup` – reproduce the multi-round proposer/follower flow with real stores and ensure losing-round blobs are dropped after commit.
+  - `full_node_value_sync_commitment_mismatch` – feed a tampered ValueSync package (mismatched commitments vs. blobs) through a full-node state and assert it is rejected with proper metrics/cleanup.
+  - `full_node_restream_multi_validator` – end-to-end restream between two real validators to ensure sidecar transmission, metrics, and commit bookkeeping match the state-level harness.
+  - `full_node_value_sync_inclusion_proof_failure` – corrupt a blob inclusion proof inside a ValueSync package and verify the full-node state rejects it, records the sync failure, and leaves no blobs behind.
+  - `full_node_blob_blobless_sequence_behaves` – commit a blobbed → blobless → blobbed sequence in the real state and assert metrics/blobs match expectations.
+  - `full_node_blob_pruning_retains_recent_heights` – override the retention window, commit eight blobbed heights, and ensure pruning + metrics reflect the configured window.
+  - `full_node_sync_package_roundtrip` – ingest a synthetic `SyncedValuePackage::Full` and confirm the node promotes blobs/metadata immediately before commit.
+  - `full_node_value_sync_proof_failure` – tamper with blob proofs (not commitments/inclusion proofs) to cover the remaining sync failure path.
 
   Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are actionable, and they all share the new
   builder harness (`FullNodeTestBuilder`) located in `crates/test/tests/full_node/node_harness.rs`.
