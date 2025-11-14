@@ -103,6 +103,7 @@ where
 
     // Hash tree root of the latest decided blob sidecar header (used as parent_root for proposals)
     last_blob_sidecar_root: B256,
+    last_blob_sidecar_height: Height,
 
     /// Retention window (in heights) for decided blobs.
     blob_retention_window: u64,
@@ -192,6 +193,7 @@ where
             latest_block: None,
             blob_rounds: HashMap::new(),
             last_blob_sidecar_root: B256::ZERO,
+            last_blob_sidecar_height: Height::new(0),
             blob_retention_window: BLOB_RETENTION_WINDOW,
             txs_count: 0,
             chain_bytes: 0,
@@ -260,6 +262,7 @@ where
         {
             let header = metadata.to_beacon_header();
             self.last_blob_sidecar_root = header.hash_tree_root();
+            self.last_blob_sidecar_height = height;
             info!(
                 height = %height,
                 parent_root = ?self.last_blob_sidecar_root,
@@ -274,6 +277,7 @@ where
             self.store.seed_genesis_blob_metadata().await.map_err(|e| eyre::Report::new(e))?;
             let genesis_root = genesis_metadata.to_beacon_header().hash_tree_root();
             self.last_blob_sidecar_root = genesis_root;
+            self.last_blob_sidecar_height = Height::new(0);
             info!(
                 parent_root = ?self.last_blob_sidecar_root,
                 "Seeded genesis BlobMetadata at height 0"
@@ -837,6 +841,10 @@ where
                 };
 
                 self.put_blob_metadata_undecided(height, round, &blob_metadata).await?;
+                self.store.mark_blob_metadata_decided(height, round).await?;
+                let header = blob_metadata.to_beacon_header();
+                self.last_blob_sidecar_root = header.hash_tree_root();
+                self.last_blob_sidecar_height = height;
 
                 let proposed_value = ProposedValue {
                     height,
@@ -1314,6 +1322,7 @@ where
                 "Updated blob parent root from decided BlobMetadata"
             );
             self.last_blob_sidecar_root = new_root;
+            self.last_blob_sidecar_height = certificate.height;
 
             // NOTE: Blob promotion to decided state is handled by process_decided_certificate
             // before validation and EL notification, not here in commit().
@@ -1420,6 +1429,79 @@ where
                 }
             }
         } // End of !is_idempotent_replay block
+
+        if is_idempotent_replay {
+            let round = certificate.round;
+            let round_i64 = round.as_i64();
+
+            if let Err(e) = self.blob_engine.mark_decided(certificate.height, round_i64).await {
+                warn!(
+                    height = %certificate.height,
+                    round = %round,
+                    error = %e,
+                    "Failed to mark blobs decided during WAL replay"
+                );
+            }
+
+            let decided_metadata = match self.store.get_blob_metadata(certificate.height).await {
+                Ok(Some(metadata)) => Some(metadata),
+                Ok(None) => {
+                    match self.store.get_blob_metadata_undecided(certificate.height, round).await {
+                        Ok(Some(metadata)) => {
+                            if let Err(e) = self
+                                .store
+                                .mark_blob_metadata_decided(certificate.height, round)
+                                .await
+                            {
+                                warn!(
+                                    height = %certificate.height,
+                                    round = %round,
+                                    error = %e,
+                                    "Failed to promote BlobMetadata during WAL replay"
+                                );
+                            }
+                            Some(metadata)
+                        }
+                        Ok(None) => {
+                            warn!(
+                                height = %certificate.height,
+                                round = %round,
+                                "Idempotent replay could not find decided or undecided BlobMetadata"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            warn!(
+                                height = %certificate.height,
+                                round = %round,
+                                error = %e,
+                                "Failed to load undecided BlobMetadata during WAL replay"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        height = %certificate.height,
+                        error = %e,
+                        "Failed to load decided BlobMetadata during WAL replay"
+                    );
+                    None
+                }
+            };
+
+            if let Some(metadata) = decided_metadata {
+                let header = metadata.to_beacon_header();
+                self.last_blob_sidecar_root = header.hash_tree_root();
+                self.last_blob_sidecar_height = certificate.height;
+                debug!(
+                    height = %certificate.height,
+                    round = %round,
+                    "Refreshed blob parent cache during WAL replay"
+                );
+            }
+        }
 
         // Move to next height (always execute, even in idempotent replay)
 
@@ -1892,10 +1974,27 @@ where
             match self.store.get_blob_metadata(prev_height).await {
                 Ok(Some(prev_metadata)) => prev_metadata.to_beacon_header().hash_tree_root(),
                 Ok(None) => {
-                    return Err(format!(
-                        "Missing decided BlobMetadata for parent height {}",
-                        prev_height.as_u64()
-                    ));
+                    if prev_height == self.last_blob_sidecar_height {
+                        warn!(
+                            height = %height,
+                            parent_height = %prev_height,
+                            "Missing decided BlobMetadata for parent height {}; using cached blob root",
+                            prev_height.as_u64()
+                        );
+                        self.last_blob_sidecar_root
+                    } else {
+                        warn!(
+                            height = %height,
+                            parent_height = %prev_height,
+                            cache_height = %self.last_blob_sidecar_height,
+                            "Missing decided BlobMetadata for parent height {}; cache points to different height",
+                            prev_height.as_u64()
+                        );
+                        return Err(format!(
+                            "Missing decided BlobMetadata for parent height {}",
+                            prev_height.as_u64()
+                        ));
+                    }
                 }
                 Err(e) => {
                     return Err(format!(

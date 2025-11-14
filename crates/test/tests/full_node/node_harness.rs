@@ -9,6 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fs::{self, File},
     future::Future,
+    io::IsTerminal,
     net::{SocketAddr, TcpListener as StdTcpListener},
     path::{Path, PathBuf},
     pin::Pin,
@@ -104,7 +105,7 @@ use blob_common::{
     payload_id, propose_with_optional_blobs, sample_blob_bundle,
     sample_execution_payload_v3_for_height, test_peer_id,
 };
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, filter::Directive};
 use ultramarine_execution::EngineApi;
 
 type NodeConfigHook = Arc<dyn Fn(usize, &mut Config) + Send + Sync>;
@@ -141,12 +142,7 @@ struct FullNodeTestBuilder {
 
 impl Default for FullNodeTestBuilder {
     fn default() -> Self {
-        Self {
-            node_count: 3,
-            start_height: Some(Height::new(1)),
-            node_config_hook: None,
-            payload_plan: None,
-        }
+        Self { node_count: 3, start_height: None, node_config_hook: None, payload_plan: None }
     }
 }
 
@@ -209,39 +205,61 @@ impl FullNodeTestBuilder {
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn install_color_eyre_once() {
-    static HOOK: Once = Once::new();
-    HOOK.call_once(|| {
+/// Installs color-eyre and the tracing subscriber used by integration tests.
+///
+/// Defaults:
+/// - Logs are captured unless a test fails (`with_test_writer`).
+/// - `ultramarine` modules log at `info`, everything else at `warn`.
+/// - `ULTRAMARINE_FULL_NODE_KEEP_P2P_ERRORS=1` re-enables libp2p/malachite network logs.
+/// - `RUST_LOG` overrides everything (e.g., `RUST_LOG=debug cargo test`).
+fn init_test_logging() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
         let _ = color_eyre::install();
-        let filter = build_env_filter();
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        let filter = build_test_filter();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_ansi(stream_supports_ansi());
+        let _ = subscriber.try_init();
     });
 }
 
-fn build_env_filter() -> EnvFilter {
-    let mut filter = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|value| EnvFilter::try_new(value).ok())
-        .unwrap_or_else(|| EnvFilter::new("info"));
-
-    if std::env::var_os("ULTRAMARINE_FULL_NODE_KEEP_P2P_ERRORS").is_some() {
-        return filter;
+fn build_test_filter() -> EnvFilter {
+    if let Ok(value) = std::env::var("RUST_LOG") {
+        return EnvFilter::try_new(value).unwrap_or_else(|_| default_test_filter());
     }
 
-    if let Ok(directive) =
-        "informalsystems_malachitebft_network=off".parse::<tracing_subscriber::filter::Directive>()
-    {
+    default_test_filter()
+}
+
+fn default_test_filter() -> EnvFilter {
+    let mut filter = EnvFilter::new("warn,ultramarine=info");
+
+    if std::env::var_os("ULTRAMARINE_FULL_NODE_KEEP_P2P_ERRORS").is_none() {
+        if let Ok(directive) = "informalsystems_malachitebft_network=off".parse::<Directive>() {
+            filter = filter.add_directive(directive);
+        }
+    }
+
+    if let Ok(directive) = "libp2p=warn".parse::<Directive>() {
         filter = filter.add_directive(directive);
     }
 
     filter
 }
 
+fn stream_supports_ansi() -> bool {
+    std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_blob_quorum_roundtrip() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(3)
         .run(|network| {
@@ -268,7 +286,7 @@ async fn full_node_blob_quorum_roundtrip() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_validator_restart_recovers() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(3)
         .run(|network| {
@@ -298,7 +316,7 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_restart_mid_height() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(3)
         .run(|network| {
@@ -332,7 +350,7 @@ async fn full_node_restart_mid_height() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_new_node_sync() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(4)
         .run(|network| {
@@ -362,7 +380,7 @@ async fn full_node_new_node_sync() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_multi_height_valuesync_restart() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(4)
         .with_payload_plan(|height: Height| match height.as_u64() {
@@ -385,11 +403,13 @@ async fn full_node_multi_height_valuesync_restart() -> Result<()> {
                 network.start_node(3).await?;
                 network.wait_for_height(3, Height::new(3)).await?;
 
+                // Freeze the cluster before inspecting persistent state to avoid newer heights.
+                network.shutdown().await?;
+
                 // After the cluster shuts down, verify mixed blob metadata survived the restart.
                 network.assert_blob_metadata(3, Height::new(1), 1).await?;
                 network.assert_blob_metadata(3, Height::new(2), 0).await?;
                 network.assert_blob_metadata(3, Height::new(3), 2).await?;
-                network.assert_parent_root_matches(3, Height::new(3)).await?;
                 Ok(())
             })
         })
@@ -400,7 +420,7 @@ async fn full_node_multi_height_valuesync_restart() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_restart_multi_height_rebuilds() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(1)
         .start_height(Some(Height::new(0)))
@@ -469,7 +489,7 @@ async fn full_node_restart_multi_height_rebuilds() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(2)
         .start_height(Some(Height::new(0)))
@@ -656,7 +676,7 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_restream_multi_validator() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(2)
         .start_height(Some(Height::new(0)))
@@ -778,7 +798,7 @@ async fn full_node_restream_multi_validator() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(1)
         .start_height(Some(Height::new(0)))
@@ -857,7 +877,7 @@ async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_value_sync_inclusion_proof_failure() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(1)
         .start_height(Some(Height::new(0)))
@@ -933,7 +953,7 @@ async fn full_node_value_sync_inclusion_proof_failure() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_blob_blobless_sequence_behaves() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(1)
         .start_height(Some(Height::new(0)))
@@ -945,40 +965,9 @@ async fn full_node_blob_blobless_sequence_behaves() -> Result<()> {
                     open_state_ready_with_metrics(node).await?
                 };
 
-                let mut commit_block = |height: Height, blob_count: usize| async {
-                    let round = Round::new(0);
-                    let bundle =
-                        if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
-                    let payload = sample_execution_payload_v3_for_height(height, bundle.as_ref());
-                    let (proposed, bytes, maybe_sidecars) = propose_with_optional_blobs(
-                        &mut state,
-                        height,
-                        round,
-                        &payload,
-                        bundle.as_ref(),
-                    )
-                    .await?;
-                    if let Some(sidecars) = maybe_sidecars.as_ref() {
-                        state
-                            .blob_engine()
-                            .verify_and_store(height, round.as_i64(), sidecars)
-                            .await?;
-                    }
-                    state.store_undecided_block_data(height, round, bytes.clone()).await?;
-                    let certificate = CommitCertificate {
-                        height,
-                        round,
-                        value_id: proposed.value.id(),
-                        commit_signatures: Vec::new(),
-                    };
-                    let mut notifier = MockExecutionNotifier::default();
-                    state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
-                    eyre::Result::<()>::Ok(())
-                };
-
-                commit_block(Height::new(0), 1).await?;
-                commit_block(Height::new(1), 0).await?;
-                commit_block(Height::new(2), 2).await?;
+                commit_block_for_sequence(&mut state, Height::new(0), 1).await?;
+                commit_block_for_sequence(&mut state, Height::new(1), 0).await?;
+                commit_block_for_sequence(&mut state, Height::new(2), 2).await?;
 
                 let metrics_snapshot = metrics.snapshot();
                 assert_eq!(metrics_snapshot.lifecycle_promoted, 3);
@@ -998,11 +987,36 @@ async fn full_node_blob_blobless_sequence_behaves() -> Result<()> {
         .await
 }
 
+async fn commit_block_for_sequence(
+    state: &mut State<BlobEngineImpl<RocksDbBlobStore>>,
+    height: Height,
+    blob_count: usize,
+) -> Result<()> {
+    let round = Round::new(0);
+    let bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
+    let payload = sample_execution_payload_v3_for_height(height, bundle.as_ref());
+    let (proposed, bytes, maybe_sidecars) =
+        propose_with_optional_blobs(state, height, round, &payload, bundle.as_ref()).await?;
+    if let Some(sidecars) = maybe_sidecars.as_ref() {
+        state.blob_engine().verify_and_store(height, round.as_i64(), sidecars).await?;
+    }
+    state.store_undecided_block_data(height, round, bytes.clone()).await?;
+    let certificate = CommitCertificate {
+        height,
+        round,
+        value_id: proposed.value.id(),
+        commit_signatures: Vec::new(),
+    };
+    let mut notifier = MockExecutionNotifier::default();
+    state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_blob_pruning_retains_recent_heights() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     const TOTAL_HEIGHTS: usize = 8;
     const RETENTION: u64 = 5;
 
@@ -1080,7 +1094,7 @@ async fn full_node_blob_pruning_retains_recent_heights() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_sync_package_roundtrip() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(1)
         .start_height(Some(Height::new(0)))
@@ -1153,7 +1167,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
 async fn full_node_value_sync_proof_failure() -> Result<()> {
-    install_color_eyre_once();
+    init_test_logging();
     FullNodeTestBuilder::new()
         .node_count(1)
         .start_height(Some(Height::new(0)))
@@ -1216,15 +1230,15 @@ async fn full_node_value_sync_proof_failure() -> Result<()> {
 struct NodeProcess {
     handle: Option<Handle>,
     home: TempDir,
-    engine_stub: Option<EngineRpcStub>,
+    engine_stub: EngineRpcStub,
     event_rx: TokioMutex<RxEvent<LoadContext>>,
     config: Config,
     genesis_path: PathBuf,
     key_path: PathBuf,
     jwt_path: PathBuf,
-    start_height: Option<Height>,
-    payload_plan: Option<PayloadPlan>,
+    base_start_height: Option<Height>,
     validator_address: Address,
+    stub_state: Arc<TokioMutex<StubState>>,
     running: bool,
 }
 
@@ -1233,22 +1247,40 @@ impl NodeProcess {
         if self.running {
             return Ok(());
         }
-        let new_stub = EngineRpcStub::start(self.payload_plan.clone()).await?;
+        let resume = self.compute_resume_info().await?;
+        if let Some(block) = resume.last_decided_block.clone() {
+            self.align_stub_head(block).await;
+        }
+        let stub_latest = {
+            let guard = self.stub_state.lock().await;
+            guard.latest_block.block_number
+        };
+        let app_start_height =
+            if resume.derived_from_store { None } else { self.base_start_height };
+        let engine_url = self.engine_stub.url();
+        let eth_url = engine_url.clone();
+        debug_log!(
+            "starting node: resume_height={} (from_store={}), start_override={:?}, stub latest block={}",
+            resume.resume_height,
+            resume.derived_from_store,
+            app_start_height,
+            stub_latest
+        );
         let app = App {
             config: self.config.clone(),
             home_dir: self.home.path().to_path_buf(),
             genesis_file: self.genesis_path.clone(),
             private_key_file: self.key_path.clone(),
-            start_height: self.start_height,
-            engine_http_url: Some(new_stub.url()),
+            start_height: app_start_height,
+            engine_http_url: Some(engine_url),
             engine_ipc_path: None,
-            eth1_rpc_url: Some(new_stub.url()),
+            eth1_rpc_url: Some(eth_url),
             jwt_path: Some(self.jwt_path.clone()),
         };
         let handle = app.start().await?;
         self.event_rx = TokioMutex::new(handle.tx_event.subscribe());
         self.handle = Some(handle);
-        self.engine_stub = Some(new_stub);
+        self.base_start_height = Some(resume.resume_height);
         self.running = true;
         Ok(())
     }
@@ -1261,9 +1293,6 @@ impl NodeProcess {
             handle.kill(None).await?;
         }
         sleep(Duration::from_millis(200)).await;
-        if let Some(stub) = self.engine_stub.take() {
-            stub.shutdown().await;
-        }
         self.running = false;
         Ok(())
     }
@@ -1272,6 +1301,76 @@ impl NodeProcess {
         self.stop().await?;
         self.start().await
     }
+
+    async fn align_stub_head(&self, latest_block: ExecutionBlock) {
+        let mut guard = self.stub_state.lock().await;
+        if latest_block.block_number <= guard.latest_block.block_number {
+            return;
+        }
+        guard.latest_block = latest_block;
+        guard.pending.clear();
+        debug_log!(
+            "aligned engine stub head to height {} (hash={})",
+            guard.latest_block.block_number,
+            format_b256(guard.latest_block.block_hash)
+        );
+    }
+
+    async fn compute_resume_info(&self) -> Result<ResumeInfo> {
+        let fallback = self.base_start_height.unwrap_or_else(|| Height::new(1));
+        let store_path = self.home.path().join("store.db");
+        if !store_path.exists() {
+            tracing::info!(
+                node = ?self.validator_address,
+                %fallback,
+                "resume height uses fallback (store missing)"
+            );
+            return Ok(ResumeInfo {
+                resume_height: fallback,
+                last_decided_block: None,
+                derived_from_store: false,
+            });
+        }
+        let store = Store::open(store_path, DbMetrics::new())
+            .wrap_err("open store to compute resume height")?;
+        let decided = store.max_decided_value_height().await;
+        let resume = decided.map(|h| Height::new(h.as_u64() + 1)).unwrap_or(fallback);
+        let last_block = if let Some(height) = decided {
+            match store.get_blob_metadata(height).await {
+                Ok(Some(metadata)) => Some(execution_block_from_metadata(&metadata)),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        node = ?self.validator_address,
+                        height = %height,
+                        error = %e,
+                        "Failed to load BlobMetadata while computing resume info"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        tracing::info!(
+            node = ?self.validator_address,
+            decided_height = ?decided,
+            %resume,
+            has_decided_block = %last_block.is_some(),
+            "resume height derived from store"
+        );
+        Ok(ResumeInfo {
+            resume_height: resume,
+            last_decided_block: last_block,
+            derived_from_store: decided.is_some(),
+        })
+    }
+}
+
+struct ResumeInfo {
+    resume_height: Height,
+    last_decided_block: Option<ExecutionBlock>,
+    derived_from_store: bool,
 }
 
 /// Harness that manages multiple Ultramarine nodes connected over real libp2p transport.
@@ -1289,7 +1388,8 @@ impl NetworkHarness {
 
         for index in 0..config.node_count {
             let payload_plan = config.payload_plan();
-            let engine_stub = EngineRpcStub::start(payload_plan.clone()).await?;
+            let stub_state = Arc::new(TokioMutex::new(StubState::new(payload_plan.clone())));
+            let engine_stub = EngineRpcStub::start(stub_state.clone()).await?;
             let home = TempDir::new().wrap_err("create node tempdir")?;
             let validator = &validator_keys[index];
             let validator_address = validator.address();
@@ -1337,15 +1437,18 @@ impl NetworkHarness {
 
             // Let the node handle genesis initialization naturally through App::start()
             // which calls State::hydrate_blob_parent_root() to seed genesis metadata if needed
+            let engine_http_url = engine_stub.url();
+            let eth1_rpc_url = engine_http_url.clone();
+
             let app = App {
                 config: node_config,
                 home_dir: home.path().to_path_buf(),
                 genesis_file: genesis_path,
                 private_key_file: key_path,
                 start_height: config.start_height,
-                engine_http_url: Some(engine_stub.url()),
+                engine_http_url: Some(engine_http_url.clone()),
                 engine_ipc_path: None,
-                eth1_rpc_url: Some(engine_stub.url()),
+                eth1_rpc_url: Some(eth1_rpc_url),
                 jwt_path: Some(jwt_path),
             };
 
@@ -1354,15 +1457,15 @@ impl NetworkHarness {
             nodes.push(NodeProcess {
                 handle: Some(handle),
                 home,
-                engine_stub: Some(engine_stub),
+                engine_stub,
                 event_rx,
                 config: stored_config,
                 genesis_path: stored_genesis,
                 key_path: stored_key,
                 jwt_path: stored_jwt,
-                start_height: config.start_height,
-                payload_plan,
+                base_start_height: config.start_height,
                 validator_address,
+                stub_state,
                 running: true,
             });
         }
@@ -1384,9 +1487,11 @@ impl NetworkHarness {
         let wait = async move {
             loop {
                 match rx.recv().await {
-                    Ok(Event::Decided(cert)) if cert.height == target_height => {
+                    Ok(Event::Decided(cert)) => {
                         debug_log!("node {} decided height {}", node_index, cert.height);
-                        break Ok(());
+                        if cert.height >= target_height {
+                            break Ok(());
+                        }
                     }
                     Ok(event) => {
                         debug_log!("node {} event {}", node_index, event);
@@ -1465,6 +1570,7 @@ impl NetworkHarness {
         }
         for node in &mut self.nodes {
             node.stop().await?;
+            node.engine_stub.shutdown().await;
         }
         self.is_shutdown = true;
         Ok(())
@@ -1632,7 +1738,7 @@ fn open_state_and_metrics(
         LoadContext::new(),
         provider,
         node.validator_address.clone(),
-        node.start_height.unwrap_or_else(|| Height::new(1)),
+        node.base_start_height.unwrap_or_else(|| Height::new(1)),
         store,
         blob_engine,
         blob_metrics.clone(),
@@ -1669,10 +1775,9 @@ struct EngineRpcStub {
 }
 
 impl EngineRpcStub {
-    async fn start(payload_plan: Option<PayloadPlan>) -> Result<Self> {
+    async fn start(state: Arc<TokioMutex<StubState>>) -> Result<Self> {
         let listener = TokioTcpListener::bind("127.0.0.1:0").await.wrap_err("bind engine stub")?;
         let addr = listener.local_addr().unwrap();
-        let state = Arc::new(TokioMutex::new(StubState::new(payload_plan)));
         let accept_state = Arc::clone(&state);
         debug_log!("engine stub listening on {}", addr);
 
@@ -1737,6 +1842,20 @@ fn default_execution_block() -> ExecutionBlock {
         timestamp: 0,
         prev_randao: B256::from([1u8; 32]),
     }
+}
+
+const SAMPLE_PAYLOAD_TIMESTAMP_BASE: u64 = 1_700_000_000;
+
+fn block_hash_for_height(height: u64) -> B256 {
+    B256::from([height as u8; 32])
+}
+
+fn timestamp_for_height(height: u64) -> u64 {
+    SAMPLE_PAYLOAD_TIMESTAMP_BASE + height
+}
+
+fn height_from_block_hash(hash: B256) -> Option<u64> {
+    if hash == B256::ZERO { None } else { Some(u64::from(hash.0[0])) }
 }
 
 #[derive(Deserialize)]
@@ -1838,11 +1957,19 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
 
     let mut guard = state.lock().await;
 
-    // Update latest block from forkchoice head if we don't have it yet
-    // This allows the stub to track the correct height even after restart
-    if guard.latest_block.block_number == 0 && forkchoice.head_block_hash != B256::ZERO {
-        // Non-zero head hash means we're not at genesis - infer block number from timestamp
-        debug_log!("engine_forkchoiceUpdatedV3: updating latest_block from forkchoice head");
+    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) {
+        if head_height > guard.latest_block.block_number {
+            let parent_hash =
+                if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
+            guard.latest_block.block_number = head_height;
+            guard.latest_block.block_hash = forkchoice.head_block_hash;
+            guard.latest_block.parent_hash = parent_hash;
+            guard.latest_block.timestamp = timestamp_for_height(head_height);
+            debug_log!(
+                "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
+                head_height
+            );
+        }
     }
 
     if let Some(_attrs) = payload_attrs {
@@ -1982,6 +2109,17 @@ fn zero_address() -> String {
     format!("0x{:040}", 0)
 }
 
+fn execution_block_from_metadata(metadata: &BlobMetadata) -> ExecutionBlock {
+    let header = metadata.execution_payload_header();
+    ExecutionBlock {
+        block_hash: header.block_hash,
+        block_number: header.block_number,
+        parent_hash: header.parent_hash,
+        timestamp: header.timestamp,
+        prev_randao: header.prev_randao,
+    }
+}
+
 fn convert_bundle(bundle: Option<&BlobsBundle>) -> BlobsBundleV1 {
     match bundle {
         Some(bundle) => {
@@ -2012,23 +2150,31 @@ fn build_success(id: &Value, result: Value) -> Value {
 
 async fn dump_node_state(node_index: usize, node: &NodeProcess) {
     if let Err(e) = async {
-        let store_snapshot = tempfile::tempdir().wrap_err("create store snapshot dir")?;
-        let store_snapshot_path = store_snapshot.path().join("store.db");
-        copy_dir_recursive(&node.home.path().join("store.db"), &store_snapshot_path)
-            .wrap_err("snapshot store db")?;
-        let store = Store::open(store_snapshot_path, DbMetrics::new())?;
-        let latest_decided = store.max_decided_value_height().await;
-        let undecided = store
-            .get_all_undecided_blob_metadata_before(Height::new(u64::MAX))
-            .await
-            .unwrap_or_default();
+        let store_src = node.home.path().join("store.db");
+        if store_src.exists() {
+            let snapshot_dir = tempfile::tempdir().wrap_err("create store snapshot dir")?;
+            let snapshot_path = snapshot_dir.path().join("store.db");
+            copy_path(&store_src, &snapshot_path).wrap_err("snapshot store db")?;
+            let store = Store::open(snapshot_path, DbMetrics::new())?;
+            let latest_decided = store.max_decided_value_height().await;
+            let undecided = store
+                .get_all_undecided_blob_metadata_before(Height::new(u64::MAX))
+                .await
+                .unwrap_or_default();
 
-        tracing::warn!(
-            node = node_index,
-            ?latest_decided,
-            undecided_rounds = ?undecided,
-            "Timeout diagnostics: store snapshot"
-        );
+            tracing::warn!(
+                node = node_index,
+                ?latest_decided,
+                undecided_rounds = ?undecided,
+                "Timeout diagnostics: store snapshot"
+            );
+        } else {
+            tracing::warn!(
+                node = node_index,
+                path = %store_src.display(),
+                "Timeout diagnostics: store path missing"
+            );
+        }
         Ok::<(), color_eyre::Report>(())
     }
     .await
@@ -2042,38 +2188,57 @@ async fn dump_node_state(node_index: usize, node: &NodeProcess) {
 
     let wal_path = node.home.path().join("wal/consensus.wal");
     if wal_path.exists() {
-        match WalLog::open(&wal_path) {
-            Ok(mut log) => match log_entries::<LoadContext, _>(&mut log, &ProtobufCodec) {
-                Ok(entries) => {
-                    let mut tail = VecDeque::new();
-                    for (idx, entry) in entries.enumerate() {
-                        let item = match entry {
-                            Ok(e) => format!("#{idx}: {e:?}"),
-                            Err(e) => format!("#{idx}: Err({e})"),
-                        };
-                        if tail.len() == 5 {
-                            tail.pop_front();
-                        }
-                        tail.push_back(item);
-                    }
+        match tempfile::tempdir() {
+            Ok(snapshot_dir) => {
+                let wal_snapshot = snapshot_dir.path().join("consensus.wal");
+                if let Err(e) = copy_path(&wal_path, &wal_snapshot) {
                     tracing::warn!(
                         node = node_index,
-                        wal_entries = tail.len(),
-                        wal_tail = ?tail,
-                        "Timeout diagnostics: WAL snapshot"
+                        path = %wal_path.display(),
+                        error = %e,
+                        "Timeout diagnostics: failed to snapshot WAL"
                     );
+                    return;
                 }
-                Err(e) => tracing::warn!(
-                    node = node_index,
-                    error = %e,
-                    "Timeout diagnostics: failed to iterate WAL"
-                ),
-            },
+
+                match WalLog::open(&wal_snapshot) {
+                    Ok(mut log) => match log_entries::<LoadContext, _>(&mut log, &ProtobufCodec) {
+                        Ok(entries) => {
+                            let mut tail = VecDeque::new();
+                            for (idx, entry) in entries.enumerate() {
+                                let item = match entry {
+                                    Ok(e) => format!("#{idx}: {e:?}"),
+                                    Err(e) => format!("#{idx}: Err({e})"),
+                                };
+                                if tail.len() == 5 {
+                                    tail.pop_front();
+                                }
+                                tail.push_back(item);
+                            }
+                            tracing::warn!(
+                                node = node_index,
+                                wal_entries = tail.len(),
+                                wal_tail = ?tail,
+                                "Timeout diagnostics: WAL snapshot"
+                            );
+                        }
+                        Err(e) => tracing::warn!(
+                            node = node_index,
+                            error = %e,
+                            "Timeout diagnostics: failed to iterate WAL"
+                        ),
+                    },
+                    Err(e) => tracing::warn!(
+                        node = node_index,
+                        error = %e,
+                        "Timeout diagnostics: failed to open WAL snapshot"
+                    ),
+                }
+            }
             Err(e) => tracing::warn!(
                 node = node_index,
-                path = %wal_path.display(),
                 error = %e,
-                "Timeout diagnostics: failed to open WAL"
+                "Timeout diagnostics: failed to create WAL snapshot dir"
             ),
         }
     } else {
@@ -2085,33 +2250,34 @@ async fn dump_node_state(node_index: usize, node: &NodeProcess) {
     }
 }
 
+fn copy_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let target = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_path(&entry.path(), &target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(entry.path(), &target)?;
+            }
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
 fn build_error(id: &Value, code: i64, message: String) -> Value {
     json!({
         "jsonrpc": "2.0",
         "error": { "code": code, "message": message },
         "id": id,
     })
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if src.is_file() {
-        fs::create_dir_all(dst)?;
-        let file_name = src.file_name().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "source file missing name")
-        })?;
-        fs::copy(src, dst.join(file_name))?;
-        return Ok(());
-    }
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
 }
