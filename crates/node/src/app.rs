@@ -137,17 +137,11 @@ pub async fn run(
             }
 
             AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
-                // CRITICAL: Only the original proposer should handle RestreamProposal.
-                // The Fin part is signed with self.signing_provider, which must match the proposer
-                // address stamped in the Init part. If we're not the original proposer, our
-                // signature will fail verification on all peers (they'll look up
-                // the Init proposer's public key and find our signature doesn't
-                // match).
                 if state.validator_address() != &address {
                     debug!(
                         %height, %round, %address,
                         our_address = %state.validator_address(),
-                        "Ignoring RestreamProposal: we are not the original proposer"
+                        "Ignoring RestreamProposal: validator mismatch"
                     );
                     continue;
                 }
@@ -161,18 +155,6 @@ pub async fn run(
 
                 match state.load_undecided_proposal(height, proposal_round).await {
                     Ok(Some(proposal)) => {
-                        // Sanity check: verify stored proposal is indeed ours
-                        // (Should always pass since we checked validator_address() == address
-                        // above)
-                        if proposal.proposer != address {
-                            error!(
-                                "Internal error: stored proposal proposer ({}) doesn't match our address ({})",
-                                proposal.proposer,
-                                state.validator_address()
-                            );
-                            continue;
-                        }
-
                         // Get the block data bytes
                         let proposal_bytes = match state
                             .get_block_data(height, proposal_round)
@@ -260,6 +242,7 @@ pub async fn run(
                         if round != proposal_round {
                             let mut restreamed_value = proposal.clone();
                             restreamed_value.round = round;
+                            restreamed_value.proposer = address.clone();
 
                             if let Err(e) = state.store_synced_proposal(restreamed_value).await {
                                 error!(
