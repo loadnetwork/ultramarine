@@ -208,7 +208,7 @@ The blob integration suite lives in the dedicated `crates/test` package so Cargo
 
   The suite currently contains:
   - `full_node_blob_quorum_roundtrip` – three validators finalize two blobbed blocks
-  - `full_node_validator_restart_recovers` – stop the proposer after height 1 and ensure it replays WAL + blobs for height 2
+  - `full_node_validator_restart_recovers` – 4-validator cluster where node 0 is stopped immediately at test start, forcing it to ValueSync heights 1 and 2 from peers when restarted, then verify it can participate in height 3
   - `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
   - `full_node_new_node_sync` – run a 4-validator cluster, take the fourth validator offline for the first two heights, then bring it back and ensure ValueSync fetches the missing blobs/metadata
   - `full_node_multi_height_valuesync_restart` – keep validator 3 offline through heights 1–3, let ValueSync import a 1/0/2 blob mix, then restart and inspect the on-disk metadata + parent-root cache.

@@ -720,6 +720,7 @@ where
         proposer: Address,
         package: SyncedValuePackage,
     ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
+        info!(height = %height, round = %round, "🔵 SYNC: process_synced_package called");
         match package {
             SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
                 info!(
@@ -727,7 +728,7 @@ where
                     round = %round,
                     payload_size = execution_payload_ssz.len(),
                     blob_count = blob_sidecars.len(),
-                    "Processing synced value package"
+                    "🔵 SYNC: Processing FULL synced value package"
                 );
 
                 let value_metadata = value.metadata.clone();
@@ -843,7 +844,15 @@ where
                 self.put_blob_metadata_undecided(height, round, &blob_metadata).await?;
                 self.store.mark_blob_metadata_decided(height, round).await?;
                 let header = blob_metadata.to_beacon_header();
-                self.last_blob_sidecar_root = header.hash_tree_root();
+                let new_root = header.hash_tree_root();
+                info!(
+                    height = %height,
+                    old_cache_height = %self.last_blob_sidecar_height,
+                    old_cache_root = ?self.last_blob_sidecar_root,
+                    new_cache_root = ?new_root,
+                    "✅ VALUESYNC: Updated blob parent root cache from synced value"
+                );
+                self.last_blob_sidecar_root = new_root;
                 self.last_blob_sidecar_height = height;
 
                 let proposed_value = ProposedValue {
