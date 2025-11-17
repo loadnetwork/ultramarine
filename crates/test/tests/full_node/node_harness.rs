@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, Once},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 macro_rules! debug_log {
@@ -288,24 +288,43 @@ async fn full_node_blob_quorum_roundtrip() -> Result<()> {
 async fn full_node_validator_restart_recovers() -> Result<()> {
     init_test_logging();
     FullNodeTestBuilder::new()
-        .node_count(3)
+        .node_count(4)
         .run(|network| {
             Box::pin(async move {
-                network.wait_all(Height::new(1)).await?;
-                sleep(Duration::from_millis(200)).await;
+                // Stop node 0 IMMEDIATELY before it can participate in any consensus.
+                // This ensures it has NO WAL entries for height 1 or 2, forcing pure ValueSync.
+                // Eliminates the race condition where node 0 might partially enter height 2.
+                network.stop_node(0).await?;
 
-                network.restart_node(0).await?;
-                network.wait_for_height(1, Height::new(2)).await?;
-                network.wait_for_height(2, Height::new(2)).await?;
-                network.wait_for_height(0, Height::new(2)).await?;
+                // Let nodes 1-3 decide height 1 and advance to height 2 (quorum = 3/4)
+                tokio::try_join!(
+                    network.wait_for_height(1, Height::new(2)),
+                    network.wait_for_height(2, Height::new(2)),
+                    network.wait_for_height(3, Height::new(2))
+                )?;
 
-                // Verify blob metadata for both heights survived the restart
-                network.assert_blobs(0, Height::new(1), 1).await?;
-                network.assert_blobs(1, Height::new(1), 1).await?;
-                network.assert_blobs(2, Height::new(1), 1).await?;
-                network.assert_blobs(0, Height::new(2), 1).await?;
-                network.assert_blobs(1, Height::new(2), 1).await?;
-                network.assert_blobs(2, Height::new(2), 1).await?;
+                // Bring node 0 back online - it MUST ValueSync heights 1 and 2 from peers.
+                // This exercises the actual ValueSync cache update path in
+                // process_synced_package (state.rs:844-856).
+                network.start_node(0).await?;
+
+                // Wait for all nodes to reach height 3.
+                // For node 0 to reach height 3, it must have successfully ValueSync'd heights 1 and 2,
+                // which means the blob parent root cache was properly updated.
+                // If the cache wasn't updated, validation of height 3 proposals would fail.
+                tokio::try_join!(
+                    network.wait_for_height(0, Height::new(3)),
+                    network.wait_for_height(1, Height::new(3)),
+                    network.wait_for_height(2, Height::new(3)),
+                    network.wait_for_height(3, Height::new(3))
+                )?;
+
+                // Verify blob metadata for all heights
+                for node in 0..4 {
+                    network.assert_blobs(node, Height::new(1), 1).await?;
+                    network.assert_blobs(node, Height::new(2), 1).await?;
+                    network.assert_blobs(node, Height::new(3), 1).await?;
+                }
                 Ok(())
             })
         })
@@ -330,9 +349,11 @@ async fn full_node_restart_mid_height() -> Result<()> {
                 network.restart_node(1).await?;
 
                 // All nodes should eventually reach height 3.
-                network.wait_for_height(0, Height::new(3)).await?;
-                network.wait_for_height(1, Height::new(3)).await?;
-                network.wait_for_height(2, Height::new(3)).await?;
+                tokio::try_join!(
+                    network.wait_for_height(0, Height::new(3)),
+                    network.wait_for_height(1, Height::new(3)),
+                    network.wait_for_height(2, Height::new(3))
+                )?;
 
                 for node in 0..3 {
                     network.assert_blobs(node, Height::new(1), 1).await?;
