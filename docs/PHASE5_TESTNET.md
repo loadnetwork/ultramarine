@@ -194,7 +194,7 @@ spammer()
 
 **Note**: Phase A.2 also fixed a critical issue where `blobs_per_block` gauge was defined but never updated. The encapsulation improvements ensure State owns its instrumentation surface, preventing metric implementation details from leaking across crate boundaries.
 
-### Phase B – In-Process Tests (6–8 hours)
+### Phase B – In-Process Tests (6–8 hours) — ✅ COMPLETE (2025-11-18 determinism refresh)
 - Implement inline helper structs inside `tests/` (and optionally `tests/common`) to:
   - Spin up Ultramarine nodes on Tokio runtimes with per-test `TempDir` storage.
   - Mock only the Execution client while reusing real blob engine/KZG verification.
@@ -228,6 +228,9 @@ spammer()
 - ✅ Refactored the Decided path into `State::process_decided_certificate` plus the `ExecutionNotifier` trait so the app handler and integration tests share identical logic.
 - ✅ Expanded the integration suite to 13 scenarios, adding proposer/follower commit assertions and execution-layer rejection coverage via `MockExecutionNotifier`.
 - ✅ Hardened sync coverage with commitment-mismatch regression tests; `make itest` now verifies both sync and Decided error paths.
+**Progress (2025-11-18)**  
+- ✅ Tier 1 harness de-flaked: `full_node_restart_mid_height` now gates on `StartedHeight`; `wait_for_nodes_at` helper replaces ad-hoc joins/sleeps.
+- ✅ Full Tier 1 suite passes via `cargo test -p ultramarine-test --test full_node -- --ignored --nocapture` (14/14, event-driven).
 
 - Wrap existing Docker workflow in an opt-in smoke target:
   - Boot stack (`make all` steps).
@@ -300,7 +303,12 @@ spammer()
 | `restart_hydrate` | ✅ | 4.03 s |
 | `blob_decided_el_rejection_blocks_commit` | ✅ | 2.68 s |
 
-**Harness Summary**: 13/13 scenarios passing via `cargo test -p ultramarine-test -- --nocapture` in ~49 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
+**Harness Summary**: 13/13 Tier 0 scenarios passing via `cargo test -p ultramarine-test -- --nocapture` in ~49 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
+
+**2025-11-18 Update**: Tier 1 harness de-flaked and aligned with docs.
+- `full_node_restart_mid_height` now waits on `Event::StartedHeight` before crashing a node, forcing a deterministic ValueSync replay (no sleeps/race).
+- Multi-node waits use a shared helper (`wait_for_nodes_at`) to avoid timing drifts; peer warm-up remains the only fixed delay.
+- Full Tier 1 suite passes via `cargo test -p ultramarine-test --test full_node -- --ignored --nocapture` (14/14 scenarios).
 
 ---
 
@@ -376,7 +384,7 @@ spammer()
 **Next Steps** (from Phase A.1):
 - ✅ **Phase A.2**: Wire metrics into `State` for consensus hooks — **COMPLETED same day**
   - See Phase A.2 section below for full details
-- ⏳ **Integration Testing**: Validate metrics endpoint once testnet runs
+- ✅ **Integration Testing**: Metrics endpoint validated during Tier 1 runs (event-driven harness, 2025-11-18)
 
 ---
 
