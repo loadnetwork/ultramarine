@@ -264,7 +264,12 @@ async fn full_node_blob_quorum_roundtrip() -> Result<()> {
         .node_count(3)
         .run(|network| {
             Box::pin(async move {
-                network.wait_for_nodes_at(&[0, 1, 2], Height::new(2)).await?;
+                // Advance one extra height to ensure blobs at height 1 and 2 are flushed to disk
+                network.wait_for_nodes_at(&[0, 1, 2], Height::new(3)).await?;
+
+                // Stop the cluster once; assertions below read disk state.
+                network.shutdown().await?;
+
                 network.assert_blobs(0, Height::new(1), 1).await?;
                 network.assert_blobs(1, Height::new(1), 1).await?;
                 network.assert_blobs(2, Height::new(1), 1).await?;

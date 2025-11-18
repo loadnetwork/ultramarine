@@ -21,6 +21,7 @@ use malachitebft_app_channel::app::{
     },
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use sha2::{Digest as Sha2Digest, Sha256 as Sha2Sha256};
 use sha3::Digest;
 use ssz::Decode;
 use tokio::time::Instant;
@@ -908,23 +909,16 @@ where
         let round = certificate.round;
         let round_i64 = round.as_i64();
 
-        let mut versioned_hashes: Vec<BlockHash> =
-            block.body.blob_versioned_hashes_iter().copied().collect();
+        let mut versioned_hashes: Vec<BlockHash> = block
+            .body
+            .blob_versioned_hashes_iter()
+            .copied()
+            .collect();
 
         if versioned_hashes.is_empty() {
             if let Some(proposal) = self.load_undecided_proposal(height, round).await? {
                 let commitments = proposal.value.metadata.blob_kzg_commitments.clone();
-                if !commitments.is_empty() {
-                    use sha2::{Digest as Sha2Digest, Sha256 as Sha2Sha256};
-                    versioned_hashes = commitments
-                        .iter()
-                        .map(|commitment| {
-                            let mut hash = Sha2Sha256::digest(commitment.as_bytes());
-                            hash[0] = 0x01;
-                            BlockHash::from_slice(&hash)
-                        })
-                        .collect();
-                }
+                versioned_hashes = versioned_hashes_from_commitments(&commitments);
             }
         }
 
@@ -968,15 +962,7 @@ where
             }
 
             // Step 3: Validate versioned hashes
-            use sha2::{Digest, Sha256};
-            let computed_hashes: Vec<BlockHash> = blobs
-                .iter()
-                .map(|sidecar| {
-                    let mut hash = Sha256::digest(sidecar.kzg_commitment.as_bytes());
-                    hash[0] = 0x01;
-                    BlockHash::from_slice(&hash)
-                })
-                .collect();
+            let computed_hashes = versioned_hashes_from_sidecars(&blobs);
 
             if computed_hashes != versioned_hashes {
                 return Err(eyre::eyre!(
@@ -2277,3 +2263,25 @@ pub fn decode_value(bytes: Bytes) -> Value {
 }
 
 pub const BLOB_RETENTION_WINDOW: u64 = 4_096;
+
+fn versioned_hashes_from_commitments(commitments: &[KzgCommitment]) -> Vec<BlockHash> {
+    commitments
+        .iter()
+        .map(|commitment| {
+            let mut hash = Sha2Sha256::digest(commitment.as_bytes());
+            hash[0] = 0x01; // EIP-4844 versioned hash prefix
+            BlockHash::from_slice(&hash)
+        })
+        .collect()
+}
+
+fn versioned_hashes_from_sidecars(sidecars: &[BlobSidecar]) -> Vec<BlockHash> {
+    sidecars
+        .iter()
+        .map(|sidecar| {
+            let mut hash = Sha2Sha256::digest(sidecar.kzg_commitment.as_bytes());
+            hash[0] = 0x01; // EIP-4844 versioned hash prefix
+            BlockHash::from_slice(&hash)
+        })
+        .collect()
+}

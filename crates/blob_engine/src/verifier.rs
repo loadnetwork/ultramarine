@@ -222,6 +222,7 @@ impl BlobVerifier {
     /// - The commitment or proof format is invalid
     /// - The KZG verification fails
     /// - The proof is mathematically invalid
+    #[allow(dead_code)]
     pub fn verify_blob_sidecar(&self, sidecar: &BlobSidecar) -> Result<(), BlobVerificationError> {
         // Convert blob data to c-kzg format
         let blob = CKzgBlob::from_bytes(sidecar.blob.data())
@@ -265,6 +266,7 @@ impl BlobVerifier {
     /// - Any commitment or proof format is invalid
     /// - The batch KZG verification fails
     /// - Any proof is mathematically invalid
+    #[allow(dead_code)]
     pub fn verify_blob_sidecars_batch(
         &self,
         sidecars: &[&BlobSidecar],

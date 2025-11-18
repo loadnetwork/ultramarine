@@ -780,14 +780,3 @@ async fn ensure_latest_block(
     state.latest_block = Some(block);
     Ok(block)
 }
-
-fn payload_to_execution_block(payload: &ExecutionPayloadV3) -> ExecutionBlock {
-    let inner = &payload.payload_inner.payload_inner;
-    ExecutionBlock {
-        block_hash: inner.block_hash,
-        block_number: inner.block_number,
-        parent_hash: inner.parent_hash,
-        timestamp: inner.timestamp,
-        prev_randao: inner.prev_randao,
-    }
-}
