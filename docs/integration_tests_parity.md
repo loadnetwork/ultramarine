@@ -1,15 +1,19 @@
 # Integration Test Parity Plan
 
-_Last updated: 2025-11-12_
+_Last updated: 2025-11-XX_
 
-Ultramarine currently ships fast, deterministic blob-focused integration tests that exercise
-`State<TestBlobEngine>` with real RocksDB stores and KZG verification. These scenarios caught
-multiple production bugs, but they terminate at the consensus state boundary: libp2p gossip,
-Malachite channel actors, WAL, timers, and the execution bridge are replaced with lightweight
-helpers or mocks.
+Ultramarine now ships two tiers of integration coverage:
 
-Both upstream projects we claim parity with already run multi-validator,
-networked harnesses exclusively:
+- **Tier 0 (component smokes)** — 3 fast tests in `crates/consensus/tests` (`blob_roundtrip`,
+  `blob_sync_commitment_mismatch`, `blob_pruning`) that exercise `State<TestBlobEngine>` with real
+  RocksDB stores and KZG verification. These run in the main `make test` sweep and are always in CI.
+- **Tier 1 (full-node harness)** — 14 end-to-end scenarios in `crates/test/tests/full_node` that boot
+  Malachite channel actors, libp2p, WAL, and the application loop. These run via `make itest-node`
+  and are wired into CI as a dedicated job (`itest-tier1`) after unit tests pass; `CARGO_NET_OFFLINE`
+  is overridable for cold runners.
+
+Both upstream projects we claim parity with already run multi-validator, networked harnesses
+exclusively:
 
 - **Malachite** always brings up at least three validators plus follower nodes inside the
   TestBuilder harness; even the “basic” scenario drives 3 validators and 2 followers to height 5
@@ -40,43 +44,36 @@ instead of calling `MockEngineApi` directly.
 
 | Layer / Component                    | Exercised Today? | Notes |
 |-------------------------------------|------------------|-------|
-| Consensus `State` + BlobEngine      | ✅               | All Tier 0 scenarios (now under `crates/test/tests/blob_state`) run against the real state/engine with RocksDB. |
-| Execution payload + blob verifier   | ✅               | Deterministic payloads, real KZG commitments/proofs via `c-kzg`. |
-| Engine API bridge (generate block)  | ⚠️ Mocked        | [`MockEngineApi`](../crates/test/tests/common/mocks.rs) returns canned payloads/bundles; no Engine API client or EL node. |
-| Execution notifier (FCU / payload)  | ⚠️ Mocked        | `MockExecutionNotifier` captures calls but does not touch the real ExecutionClient. |
-| Malachite channel actors            | ❌               | Tests bypass `AppMsg`/`NetworkMsg` and call state methods directly. |
-| libp2p gossip transport             | ❌               | No `/proposal_parts` streaming over the network stack. |
-| WAL / timers / crash recovery paths | ❌               | Not covered; restarts simulated via store reopen only. |
+| Consensus `State` + BlobEngine      | ✅ (Tier 0)      | 3 smokes with real RocksDB + KZG in `crates/consensus/tests`. |
+| Execution payload + blob verifier   | ✅ (Tier 0/1)    | Deterministic payloads, real KZG commitments/proofs via `c-kzg`. |
+| Engine API bridge (generate block)  | ⚠️ Stubbed       | Tier 0 mocks; Tier 1 uses Engine RPC stub (HTTP ExecutionClient wiring still pending). |
+| Execution notifier (FCU / payload)  | ⚠️ Stubbed       | Tier 0 uses `MockExecutionNotifier`; Tier 1 uses stubbed Execution client. |
+| Malachite channel actors            | ✅ (Tier 1)      | Full-node harness boots channel actors/WAL/libp2p. |
+| libp2p gossip transport             | ✅ (Tier 1)      | `/proposal_parts` streaming exercised end-to-end. |
+| WAL / timers / crash recovery paths | ✅ (Tier 1)      | Restart/ValueSync paths deterministic via `StartedHeight` gating + `wait_for_nodes_at`. |
+| CI signal                           | ✅               | Tier 0 in `make test`; Tier 1 runs in `itest-tier1` job after `test`, with failure artifacts. |
 
 ---
 
 ## 2. Target Parity Goals
 
-1. **Channel-Service Harness**  
-   Run at least one Ultramarine node (consensus channel actors + WAL + libp2p) in-process,
-   publish a blobbed proposal via `/proposal_parts`, and verify followers commit.
+1. **Channel-Service Harness** ✅  
+   Tier 1 boots Ultramarine nodes (consensus channel actors + WAL + libp2p) and drives `/proposal_parts` end-to-end.
 
-2. **Multi-Validator Scenario**  
-   Extend the harness to **three** validators (2f + 1) connected over loopback libp2p, plus optional
-   follower full nodes. Cover proposer/follower flow, sync recovery, and restart hydration under
-   real networking/timers. Single-node tests are explicitly out of scope and will be removed.
+2. **Multi-Validator Scenario** ✅  
+   Harness uses 3–4 validators (2f+1 quorum; 4 for ValueSync-only) with real networking/timers. Single-node paths removed.
 
-3. **Execution Bridge Coverage**  
-   Replace the current mock with the production ExecutionClient (pointed at an in-process or
-   recorded Engine API stub) so `generate_block_with_blobs` and `notify_new_block` paths exercise
-   the same code as a live node.
+3. **Execution Bridge Coverage** ⏳  
+   Still using Engine RPC stub; HTTP ExecutionClient wiring remains a follow-up.
 
-4. **Negative Paths Under Full Node**  
-   Port at least the commitment-mismatch and invalid-proof scenarios to the full-node harness to
-   ensure WAL cleanup + gossip error handling behave as expected.
+4. **Negative Paths Under Full Node** ✅  
+   Commitment mismatch, inclusion proof failure, and EL rejection covered in Tier 1 scenarios.
 
-5. **CI Integration**  
-   Decide on cadence (e.g., nightly or gated job) so the heavier harness does not slow down the
-   default developer loop but still catches regressions before release.
+5. **CI Integration** ✅  
+   Tier 0 in `make test`; Tier 1 runs in `itest-tier1` job (20m timeout, artifacts on failure).
 
 6. **(Optional) Ethereum Spec Compliance**  
-   Once full-node parity lands, consider adding Deneb/Cancun-specific coverage (blobless payload
-   fallback, `engine_getBlobsV1`, blob sidecar gossip APIs). Track as a future Phase P7 if needed.
+   Future: blobless payload fallback, `engine_getBlobsV1`, sidecar gossip APIs.
 
 ---
 
@@ -110,10 +107,10 @@ instead of calling `MockEngineApi` directly.
 | P0 | Finalize parity scope & infra decisions | This doc, shared understanding of Tier 0 (`blob_state/`) vs Tier 1 (`full_node/`), and action list. | @team | 0.5 d | — | ✅ |
 | P1 | Multi-validator harness baseline | `crates/test/tests/full_node/` boots **four** validators where needed (ValueSync-only paths) and three for quorum flows, mirroring Malachite’s TestBuilder with 2f+1 voting. `make itest-node` exercises proposer/follower votes, `/proposal_parts` gossip, and WAL checkpoints end-to-end using the Engine RPC stub. | @team | 3 d | P0 | ✅ |
 | P2 | Crash/sync flows on harness | Extend the multi-validator harness with follower nodes, restarts, and ValueSync enabled. At least one validator/full-node crash-and-recover path plus a late joiner must pass deterministically. *(Engine stub persistence + resume-height logging landed; restart scenario now stable with 100% pass rate using event-based waiting and immediate node-0 shutdown to force ValueSync.)* | @team | 2 d | P1 | ✅ |
-| P3 | Sync & restart cases | Port `blob_sync_across_restart_multiple_heights` and `blob_restart_hydrates_multiple_heights` into Tier 1. **Done when**: restart path exercises WAL/timers (not just store reopen) and passes deterministically. | TBA | 2 d | P2 | ✅ (covered by Tier 1 restart scenarios, deterministic as of 2025-11-18) |
-| P4 | Negative-path parity | Tier 1 versions of commitment mismatch, invalid proof, EL rejection. **Done when**: node logs/metrics show rejection, WAL cleanup verified. (Can run parallel w/ P3 once P2 is stable.) | TBA | 1–2 d | P2 | ✅ (commitment mismatch, proof failure, EL rejection present in Tier 1) |
-| P5 (optional) | Execution bridge wiring | Replace `MockEngineApi` with HTTP Engine stub so the real `ExecutionClient` path runs unmodified; later optional upgrade to real reth devnet. **Done when**: `generate_block_with_blobs`, `notify_new_block`, `forkchoice_updated` go over HTTP stub. | TBA | 2–3 d | P2 | ⏳ |
-| P6 (optional) | CI integration & docs | Update `DEV_WORKFLOW.md`, add `make itest-node`, decide CI cadence (manual/nightly/per-PR). **Done when**: documented instructions + optional CI job exist. | TBA | 1 d | P2–P5 | 🟠 (docs updated; CI cadence still pending) |
+| P3 | Sync & restart cases | Port `blob_sync_across_restart_multiple_heights` and `blob_restart_hydrates_multiple_heights` into Tier 1. **Done when**: restart path exercises WAL/timers (not just store reopen) and passes deterministically. | TBA | 2 d | P2 | ✅ (restart/ValueSync paths deterministic with `StartedHeight` gating) |
+| P4 | Negative-path parity | Tier 1 versions of commitment mismatch, invalid proof, EL rejection. **Done when**: node logs/metrics show rejection, WAL cleanup verified. (Can run parallel w/ P3 once P2 is stable.) | TBA | 1–2 d | P2 | ✅ (commitment mismatch, inclusion-proof failure, EL rejection present) |
+| P5 (optional) | Execution bridge wiring | Replace Engine stub with HTTP ExecutionClient so `generate_block_with_blobs`, `notify_new_block`, `forkchoice_updated` go over HTTP. | TBA | 2–3 d | P2 | ⏳ |
+| P6 (optional) | CI integration & docs | Update `DEV_WORKFLOW.md`, add `make itest-node`, decide CI cadence (manual/nightly/per-PR). **Done when**: documented instructions + optional CI job exist. | TBA | 1 d | P2–P5 | 🟠 (docs updated; CI cadence pending) |
 
 ---
 
@@ -123,9 +120,9 @@ instead of calling `MockEngineApi` directly.
 |------|-------------|-------|----------|--------|
 | Tier 0 reorg | Move existing state tests into `crates/test/tests/blob_state/`, update Makefile/docs references. | @team | High | ✅ |
 | Harness Skeleton (P1) | Build the **multi-validator** harness using real libp2p transport + WAL, modeled after Malachite’s TestBuilder (≥3 validators + optional full nodes). Current single-node helper must be replaced. | @team | High | ✅ |
-| Scenario Porting | Tier 1 must cover proposer/follower, crash/restart, and sync scenarios on the multi-node harness (no single-node shortcuts). | @team | High | ✅ (all Tier 0 scenarios have Tier 1 counterparts) |
-| Execution Bridge Stub | HTTP Engine stub that exercises the real `ExecutionClient` (replaces [`MockEngineApi`](../crates/test/tests/common/mocks.rs)). Landed via `EngineRpcStub` in the new harness. | @team | Medium | ✅ |
-| Docs & CI | Keep docs in sync (`DEV_WORKFLOW.md`, this plan) and decide when `make itest-node` runs in CI. Docs landed; CI cadence pending runtime metrics from P2. | @team | Medium | 🟠 (docs updated; CI cadence pending) |
+| Scenario Porting | Tier 1 must cover proposer/follower, crash/restart, and sync scenarios on the multi-node harness (no single-node shortcuts). | @team | High | ✅ (Tier 1 covers quorum, restart/ValueSync, negative paths) |
+| Execution Bridge Stub | HTTP Engine stub that exercises the real `ExecutionClient` (replaces [`MockEngineApi`](../crates/test/tests/common/mocks.rs)). Landed via `EngineRpcStub` in the new harness. | @team | Medium | ⏳ (pending P5 HTTP ExecutionClient wiring) |
+| Docs & CI | Keep docs in sync (`DEV_WORKFLOW.md`, this plan) and decide when `make itest-node` runs in CI. Docs landed; CI cadence pending runtime metrics. | @team | Medium | 🟠 (docs updated; CI cadence pending) |
 
 ---
 

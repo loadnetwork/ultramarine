@@ -1,10 +1,12 @@
 //! Pruning behavior integration test.
 //!
+//! **Tier 0 smoke test:** Retention logic
+//! Kept for fast feedback (~3s) during blob engine development.
+//!
 //! Commits eight consecutive blobbed heights and verifies that the blob store
 //! prunes blobs older than the configured retention window while keeping
 //! metrics consistent.
 
-#[path = "../common/mod.rs"]
 mod common;
 
 #[tokio::test]

@@ -1,10 +1,12 @@
 //! Negative test for commitment validation in sync path.
 //!
+//! **Tier 0 smoke test:** Negative path validation
+//! Kept for fast feedback (~3s) during blob engine development.
+//!
 //! Validates that ProcessSyncedValue rejects packages where the Value metadata
 //! contains commitments that don't match the actual blob sidecars, preventing
 //! malicious peers from injecting fake metadata alongside valid blobs.
 
-#[path = "../common/mod.rs"]
 mod common;
 
 use ultramarine_blob_engine::BlobEngine;

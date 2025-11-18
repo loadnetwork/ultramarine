@@ -30,8 +30,8 @@ Phases 1-4 delivered a complete blob sidecar implementation with 23/23 passing u
 - ✅ Spam tool with `--blobs` flag generates valid blob transactions with real KZG proofs
 - ✅ **12 blob-specific metrics** (verification time, storage size, lifecycle transitions)
 - ✅ **9 blob dashboard panels** added to Grafana for blob observability
-- ✅ **Integration harness delivered by Team Beta** (`make itest` runs all Phase 5B scenarios with real KZG blobs)
-- ✅ **Integration results**: 13/13 blob tests pass in ~28 s (see [Test Artifacts](#test-artifacts))
+- ✅ **Integration harness delivered by Team Beta** (Tier 0: 3 fast consensus smokes; Tier 1: 14 full-node scenarios with real KZG blobs)
+- ✅ **Integration results**: Tier 0 3/3 (default in `make test`); Tier 1 14/14 via `make itest-node` and CI’s `itest-tier1`
 
 ### Goals
 
@@ -199,38 +199,25 @@ spammer()
   - Spin up Ultramarine nodes on Tokio runtimes with per-test `TempDir` storage.
   - Mock only the Execution client while reusing real blob engine/KZG verification.
 - Provide helper functions (`wait_for_height`, `restart_node`, `scrape_metrics`).
-- Add `#[tokio::test] #[ignore]` cases:
-  1. `blob_roundtrip` – proposer stores blobs, receivers restream, commit promotes metadata, restream rebuild matches commitments and metrics.
-  2. `restart_hydrate` – commit a blobbed block, drop/restart node, run `hydrate_blob_parent_root`, assert cache + metadata alignment.
-  3. `sync_package_roundtrip` – ingest `SyncedValuePackage::Full`, verify immediate promotion/availability.
-  4. `blob_restream_multi_validator` – proposer streams blobs to a follower that commits and imports sidecars using the shared helper.
-  5. `blob_restream_multiple_rounds` – follower drops losing rounds while preserving winning blobs, metrics, and proposer commit via helper.
-  6. `blob_new_node_sync` – late-joining validator hydrates via synced package and confirms blobs/metrics post-commit.
-  7. `blob_blobless_sequence` – mixed blob/blobless heights preserve gauges and availability.
-  8. `blob_sync_failure_rejects_invalid_proof` – invalid sidecars are rejected and sync failure metrics increment.
-  9. `blob_sync_commitment_mismatch_rejected` – mismatched metadata commitments trigger rejection and cleanup.
-  10. `blob_sync_across_restart_multiple_heights` – sync multiple heights, restart, and validate metadata/sidecars remain consistent.
-  11. `blob_restart_hydrates_multiple_heights` – restream rebuild after restart stays consistent.
-  12. `blob_pruning_retains_recent_heights` – retention window prunes old blobs while keeping the latest ones.
-  13. `blob_decided_el_rejection_blocks_commit` – negative coverage for execution-layer rejections, verifying the helper aborts commit and records sync failures.
+- Cover two tiers:
+  - **Tier 0 (component)**: 3 fast consensus tests in `crates/consensus/tests` (`blob_roundtrip`, `blob_sync_commitment_mismatch`, `blob_pruning`) with real RocksDB + KZG; run in `make test` and CI by default.
+  - **Tier 1 (full node)**: 14 ignored tests in `crates/test/tests/full_node` spanning quorum blob roundtrip, restream (multi-validator/multi-round), multi-height restarts, ValueSync ingestion/failure, blobless sequences, pruning, sync package roundtrip, and EL rejection; run via `make itest-node` and CI job `itest-tier1` (RUST_TEST_THREADS=1, artifacts on failure).
 - Clarify restart behavior: spawn multiple `App` instances within one Tokio runtime, reusing the same on-disk store to simulate restarts.
 - Shared helpers `State::process_synced_package` and `State::process_decided_certificate` keep integration tests aligned with production handlers.
 - Use `serial_test` or per-test temp dirs to keep runs deterministic (2–5 s each).
 
 **Progress (2025-11-05)**  
-- ✅ Scaffolded `tests/` integration harness (`tests/common/mod.rs`) with deterministic state/engine builder utilities and shared metrics accessors.
-- ✅ Implemented proposer→commit lifecycle in `tests/blob_state/blob_roundtrip.rs` (verification, storage, commit, import) with metric assertions.
-- ✅ Added restart coverage in `tests/blob_state/restart_hydrate.rs` (commit, restart, hydrate parent root) validating metadata persistence.
-- ✅ Added `SyncedValuePackage::Full` ingestion test skeleton that encodes/decodes packages, stores synced proposals, and exercises blob promotion + metrics.
-- 🧪 Introduced `tests/common/mocks.rs` with an Engine API test double to unblock future execution-client interactions.
+- ✅ Scaffolded deterministic helpers and migrated component smokes into `crates/consensus/tests` (real RocksDB + KZG).
+- ✅ Implemented proposer→commit lifecycle and sync-package ingestion with shared mocks for the execution client.
 
 **Progress (2025-11-08)**  
 - ✅ Refactored the Decided path into `State::process_decided_certificate` plus the `ExecutionNotifier` trait so the app handler and integration tests share identical logic.
-- ✅ Expanded the integration suite to 13 scenarios, adding proposer/follower commit assertions and execution-layer rejection coverage via `MockExecutionNotifier`.
-- ✅ Hardened sync coverage with commitment-mismatch regression tests; `make itest` now verifies both sync and Decided error paths.
+- ✅ Expanded full-node coverage (14 scenarios) with proposer/follower commit assertions and execution-layer rejection coverage via `MockExecutionNotifier`.
+- ✅ Hardened sync coverage with commitment-mismatch and inclusion-proof regression tests.
+
 **Progress (2025-11-18)**  
 - ✅ Tier 1 harness de-flaked: `full_node_restart_mid_height` now gates on `StartedHeight`; `wait_for_nodes_at` helper replaces ad-hoc joins/sleeps.
-- ✅ Full Tier 1 suite passes via `cargo test -p ultramarine-test --test full_node -- --ignored --nocapture` (14/14, event-driven).
+- ✅ Full Tier 1 suite passes via `make itest-node` (14/14, event-driven).
 
 - Wrap existing Docker workflow in an opt-in smoke target:
   - Boot stack (`make all` steps).
@@ -248,33 +235,15 @@ spammer()
 
 ## Testing Strategy
 
-### Tier 0 – State-Level (default)
-- Run via `cargo test -p ultramarine-test` or `make itest`.
-- Uses inline helpers with a mocked Execution client (real blob engine/KZG) to exercise consensus and restream flows without Docker.
-- Covers:
-  1. `blob_roundtrip`
-  2. `restart_hydrate`
-  3. `sync_package_roundtrip`
-  4. `blob_restream_multi_validator`
-  5. `blob_restream_multiple_rounds`
-  6. `blob_new_node_sync`
-  7. `blob_blobless_sequence`
-  8. `blob_sync_failure_rejects_invalid_proof`
-  9. `blob_sync_commitment_mismatch_rejected`
-  10. `blob_sync_across_restart_multiple_heights`
-  11. `blob_restart_hydrates_multiple_heights`
-  12. `blob_pruning_retains_recent_heights`
-  13. `blob_decided_el_rejection_blocks_commit`
-- Each test completes in ~2–6 s and relies on `tempfile::TempDir` Drop for cleanup.
-- Assertions rely on store state, blob engine metrics, and deterministic logs.
+### Tier 0 – Component (default)
+- Run via `cargo test -p ultramarine-consensus --test blob_roundtrip --test blob_sync_commitment_mismatch --test blob_pruning` or `make itest`.
+- Uses inline helpers with a mocked Execution client (real blob engine/KZG) to exercise proposer→commit, commitment/sidecar validation, and retention/metrics without Docker.
+- Each test completes in ~2–4 s and relies on `tempfile::TempDir` Drop for cleanup. These run in `make test` and CI by default.
 
 ### Tier 1 – Full-Node (multi-validator)
 - Mirrors Malachite’s TestBuilder blueprint by spinning **three** validators (2f + 1) plus optional follower nodes under the real channel actors, WAL, and libp2p transport.
-- Exercises proposer/follower blob flow, crash/restart, and ValueSync with the production ExecutionClient talking to the Engine RPC stub. Single-node shortcuts are no longer supported.
-- Harness requirements are derived directly from Malachite’s full-node IT suite (`malachite/code/crates/test/tests/it/full_nodes.rs:11-175`) and Snapchain’s consensus tests (`snapchain/tests/consensus_test.rs:1-370`): deterministic port allocation, serialized execution (`serial_test`), and real gossip traffic.
-- `make itest-node` must boot validators at `Height::INITIAL` and keep `config.sync.enabled` true so we test the exact paths we run in production.
-- The Makefile target invokes each Tier 1 scenario via its own `cargo test ... -- --ignored` call so every harness run starts from a clean process (running the entire `full_node` suite in one `cargo test` invocation is still possible for local debugging).
-- Current Tier 1 coverage: quorum roundtrip, validator restart recovery, restart-mid-height, new-node sync (4-validator cluster, one validator offline for two heights, then catching up via ValueSync), and the multi-height ValueSync + restart scenario derived from `blob_sync_across_restart_multiple_heights`.
+- Exercises proposer/follower blob flow, crash/restart, ValueSync happy + failure paths, pruning, blobless sequences, and sync-package roundtrip with the production application loop talking to an Engine RPC stub (HTTP ExecutionClient wiring remains a follow-up).
+- `make itest-node` invokes each Tier 1 scenario via its own `cargo test ... -- --ignored` call so every harness run starts from a clean process; CI job `itest-tier1` runs all 14 with `RUST_TEST_THREADS=1`, `CARGO_NET_OFFLINE` overridable, 20m timeout, and artifacts on failure.
 - Named scenarios: `full_node_blob_quorum_roundtrip`, `full_node_validator_restart_recovers`, `full_node_restart_mid_height`, `full_node_new_node_sync`, `full_node_multi_height_valuesync_restart`, `full_node_restart_multi_height_rebuilds`, `full_node_restream_multiple_rounds_cleanup`, `full_node_restream_multi_validator`, `full_node_value_sync_commitment_mismatch`, `full_node_value_sync_inclusion_proof_failure`, `full_node_blob_blobless_sequence_behaves`, `full_node_blob_pruning_retains_recent_heights`, `full_node_sync_package_roundtrip`, and `full_node_value_sync_proof_failure`. Collectively these cover restart hydration, pruning, blobless sequences, restream permutations, and every ValueSync rejection path without touching the stores manually.
 
 - Run manually via `make all` + `make spam-blobs` (optionally gated by env vars such as `ULTRA_E2E=1`).
@@ -289,21 +258,11 @@ spammer()
 
 | Test | Result | Time |
 |------|--------|------|
-| `blob_roundtrip` | ✅ | 2.71 s |
-| `blob_restream_multi_validator` | ✅ | 4.00 s |
-| `blob_restream_multiple_rounds` | ✅ | 4.06 s |
-| `blob_blobless_sequence` | ✅ | 2.72 s |
-| `blob_new_node_sync` | ✅ | 5.37 s |
-| `sync_package_roundtrip` | ✅ | 2.70 s |
-| `blob_sync_failure_rejects_invalid_proof` | ✅ | 2.67 s |
-| `blob_sync_commitment_mismatch_rejected` | ✅ | 2.70 s |
-| `blob_sync_across_restart_multiple_heights` | ✅ | 5.41 s |
-| `blob_restart_hydrates_multiple_heights` | ✅ | 4.07 s |
-| `blob_pruning_retains_recent_heights` | ✅ | 2.98 s |
-| `restart_hydrate` | ✅ | 4.03 s |
-| `blob_decided_el_rejection_blocks_commit` | ✅ | 2.68 s |
+| `blob_roundtrip` | ✅ | ~3 s |
+| `blob_sync_commitment_mismatch` (incl. inclusion proof failure) | ✅ | ~3 s |
+| `blob_pruning` | ✅ | ~3 s |
 
-**Harness Summary**: 13/13 Tier 0 scenarios passing via `cargo test -p ultramarine-test -- --nocapture` in ~49 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
+**Harness Summary**: 3/3 Tier 0 smoke scenarios (now under `crates/consensus/tests/`) passing via `cargo test -p ultramarine-consensus --test <name> -- --nocapture` in ~8–10 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
 
 **2025-11-18 Update**: Tier 1 harness de-flaked and aligned with docs.
 - `full_node_restart_mid_height` now waits on `Event::StartedHeight` before crashing a node, forcing a deterministic ValueSync replay (no sleeps/race).

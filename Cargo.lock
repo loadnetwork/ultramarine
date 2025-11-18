@@ -6963,11 +6963,13 @@ name = "ultramarine-consensus"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "async-trait",
  "bytes",
+ "c-kzg",
  "color-eyre",
  "derive-where",
  "ethereum_hashing",
