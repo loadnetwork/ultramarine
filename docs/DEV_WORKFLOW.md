@@ -176,82 +176,99 @@ Expected behavior:
 
 ## Integration Test Harness (Phase 5B)
 
-The blob integration suite lives in the dedicated `crates/test` package so Cargo can discover and execute the scenarios without bringing up Docker or the full network.
+Ultramarine's blob integration tests are organized into two tiers: component tests in the consensus crate and full-stack integration tests in the dedicated test crate.
+
+### Test Architecture
+
+Ultramarine uses a two-tier test strategy for comprehensive blob integration coverage:
+
+**Tier 0: Fast Component Smoke Tests (3 scenarios, ~8-10 seconds)**
+
+Located in `crates/consensus/tests/`, these tests provide rapid feedback during consensus/blob engine development:
+- `blob_roundtrip` – Happy path baseline: verify blob storage, KZG verification, and promotion
+- `blob_sync_commitment_mismatch` – Negative path validation: reject tampered commitments (2 tests)
+- `blob_pruning` – Retention logic: verify pruning respects configured retention window
+
+**When to run:** After changes to blob engine, consensus state, or metrics
+**Command:** `make itest` or individual test via `cargo test -p ultramarine-consensus --test blob_roundtrip -- --nocapture`
+**Location:** `crates/consensus/tests/` (module-level integration tests)
+
+**Tier 1: Full Integration Tests (14 scenarios)**
+
+Located in `crates/test/tests/full_node.rs`, these tests provide comprehensive end-to-end coverage with real networking, WAL, and multi-node consensus. Each test boots real Ultramarine nodes (Malachite channel actors, WAL, libp2p) and drives blobbed proposals end-to-end using the Engine API stub.
+
+**When to run:** Before PR submission, in CI/CD
+**Command:** `make itest-node`
+**Location:** `crates/test/tests/` (full-stack integration tests)
+
+### Available Commands
 
 - **List available tests**
   ```bash
   make itest-list
   ```
 
-- **Run the deterministic in-process suite**
+- **Run Tier 0 (fast smoke tests)**
   ```bash
-  make itest        # verbose output (~15 s)
+  make itest        # 3 tests, ~8-10 seconds
   ```
-  This loops over each blob-state scenario and runs
-  `cargo test -p ultramarine-test --test <name> -- --nocapture` so Tier 0
-  stays isolated from the heavier full-node harness. Run the specific command
-  directly if you only need a single scenario (e.g.,
-  `cargo test -p ultramarine-test --test blob_roundtrip -- --nocapture`).
-  Calling `cargo test -p ultramarine-test` without filters executes the **entire**
-  suite (Tier 0 + Tier 1).
 
-- **Run the full-node (Tier 1) harness**
+- **Run Tier 1 (full integration)**
   ```bash
-  make itest-node   # spins Ultramarine + Engine stub (~1 min; runs each test in isolation)
+  make itest-node   # 14 tests, ~5-7 minutes total
   ```
-  This boots real Ultramarine nodes (Malachite channel actors, WAL, libp2p) and
-  drives blobbed proposals end-to-end using the Engine API stub. To avoid shared
-  process state between scenarios, the Makefile now invokes each Tier 1 test via
-  its own `cargo test -p ultramarine-test --test full_node <name> -- --ignored --nocapture`
-  invocation. Running `cargo test -p ultramarine-test --test full_node -- --ignored` directly
-  is still useful for local exploration, but the reproducible path is `make itest-node`.
 
-  The suite currently contains:
+- **Run entire suite**
+  ```bash
+  # Tier 0 + Tier 1
+  make itest && make itest-node
+  ```
+
+### Tier 1 Test Scenarios
+
+To avoid shared process state between scenarios, the Makefile invokes each Tier 1 test via its own `cargo test` invocation. Running `cargo test -p ultramarine-test --test full_node -- --ignored` directly is still useful for local exploration, but the reproducible path is `make itest-node`.
+
+The suite currently contains:
   - `full_node_blob_quorum_roundtrip` – three validators finalize two blobbed blocks
   - `full_node_validator_restart_recovers` – 4-validator cluster where node 0 is stopped immediately at test start, forcing it to ValueSync heights 1 and 2 from peers when restarted, then verify it can participate in height 3
-  - `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
+  - `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
   - `full_node_new_node_sync` – run a 4-validator cluster, take the fourth validator offline for the first two heights, then bring it back and ensure ValueSync fetches the missing blobs/metadata
-  - `full_node_multi_height_valuesync_restart` – keep validator 3 offline through heights 1–3, let ValueSync import a 1/0/2 blob mix, then restart and inspect the on-disk metadata + parent-root cache.
-  - `full_node_restart_multi_height_rebuilds` – drive a 1/0/2 blob mix to height 3, then restart a validator and assert it can rebuild blob sidecars + parent roots solely from disk.
-  - `full_node_restream_multiple_rounds_cleanup` – reproduce the multi-round proposer/follower flow with real stores and ensure losing-round blobs are dropped after commit.
-  - `full_node_value_sync_commitment_mismatch` – feed a tampered ValueSync package (mismatched commitments vs. blobs) through a full-node state and assert it is rejected with proper metrics/cleanup.
-  - `full_node_restream_multi_validator` – end-to-end restream between two real validators to ensure sidecar transmission, metrics, and commit bookkeeping match the state-level harness.
-  - `full_node_value_sync_inclusion_proof_failure` – corrupt a blob inclusion proof inside a ValueSync package and verify the full-node state rejects it, records the sync failure, and leaves no blobs behind.
-  - `full_node_blob_blobless_sequence_behaves` – commit a blobbed → blobless → blobbed sequence in the real state and assert metrics/blobs match expectations.
-  - `full_node_blob_pruning_retains_recent_heights` – override the retention window, commit eight blobbed heights, and ensure pruning + metrics reflect the configured window.
-  - `full_node_sync_package_roundtrip` – ingest a synthetic `SyncedValuePackage::Full` and confirm the node promotes blobs/metadata immediately before commit.
-  - `full_node_value_sync_proof_failure` – tamper with blob proofs (not commitments/inclusion proofs) to cover the remaining sync failure path.
+  - `full_node_multi_height_valuesync_restart` – keep validator 3 offline through heights 1–3, let ValueSync import a 1/0/2 blob mix, then restart and inspect the on-disk metadata + parent-root cache
+  - `full_node_restart_multi_height_rebuilds` – drive a 1/0/2 blob mix to height 3, then restart a validator and assert it can rebuild blob sidecars + parent roots solely from disk
+  - `full_node_restream_multiple_rounds_cleanup` – reproduce the multi-round proposer/follower flow with real stores and ensure losing-round blobs are dropped after commit
+  - `full_node_value_sync_commitment_mismatch` – feed a tampered ValueSync package (mismatched commitments vs. blobs) through a full-node state and assert it is rejected with proper metrics/cleanup
+  - `full_node_restream_multi_validator` – end-to-end restream between two real validators to ensure sidecar transmission, metrics, and commit bookkeeping match the state-level harness
+  - `full_node_value_sync_inclusion_proof_failure` – corrupt a blob inclusion proof inside a ValueSync package and verify the full-node state rejects it, records the sync failure, and leaves no blobs behind
+  - `full_node_blob_blobless_sequence_behaves` – commit a blobbed → blobless → blobbed sequence in the real state and assert metrics/blobs match expectations
+  - `full_node_blob_pruning_retains_recent_heights` – override the retention window, commit eight blobbed heights, and ensure pruning + metrics reflect the configured window
+  - `full_node_sync_package_roundtrip` – ingest a synthetic `SyncedValuePackage::Full` and confirm the node promotes blobs/metadata immediately before commit
+  - `full_node_value_sync_proof_failure` – tamper with blob proofs (not commitments/inclusion proofs) to cover the remaining sync failure path
 
-  Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are actionable, and they all share the new
-  builder harness (`FullNodeTestBuilder`) located in `crates/test/tests/full_node/node_harness.rs`.
-  - Determinism notes: mid-height restart now gates on the `StartedHeight` event (no sleeps); multi-node waits have a helper (`wait_for_nodes_at`) so timing is event-driven rather than delay-based; the harness still warms up peers for 500 ms at start to avoid libp2p races.
+Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are actionable, and they all share the new builder harness (`FullNodeTestBuilder`) located in `crates/test/tests/full_node/node_harness.rs`.
 
-### What the harness does
+**Determinism notes:** mid-height restart now gates on the `StartedHeight` event (no sleeps); multi-node waits have a helper (`wait_for_nodes_at`) so timing is event-driven rather than delay-based; the harness still warms up peers for 500 ms at start to avoid libp2p races.
 
-- Spins real consensus + blob engine components inside the current Tokio runtime (no Docker).
-- Loads the Ethereum mainnet trusted setup once and generates **real** KZG commitments/proofs with `c-kzg`.
-- Exercises the ten Phase 5B scenarios end-to-end:
-  - `blob_roundtrip`
-  - `blob_restream_multi_validator`
-  - `blob_restream_multiple_rounds`
-  - `blob_new_node_sync`
-  - `blob_blobless_sequence`
-  - `blob_sync_failure_rejects_invalid_proof`
-  - `blob_sync_commitment_mismatch_rejected`
-  - `blob_sync_across_restart_multiple_heights`
-  - `blob_restart_hydrates_multiple_heights`
-  - `blob_pruning_retains_recent_heights`
-  - `restart_hydrate`
-  - `sync_package_roundtrip`
-- Uses the shared helpers in `crates/test/tests/common` (deterministic payloads, payload IDs, mock Engine API).
+### What the test suites provide
 
-### When to run it
+**Tier 0 (consensus crate):**
+- Tests consensus state with integrated blob engine
+- Shared helpers in `crates/consensus/tests/common` (test setup, mocks, sample data)
+- Uses production RocksDB storage and real KZG verification
+- Isolated, fast execution (~3s per test)
 
-- After touching consensus/blob-engine/state code.
-- Before PRs that touch proposal streaming, restream, sync, or blob storage.
-- As a fast regression check prior to launching the Docker testnet.
+**Tier 1 (test crate):**
+- Spins real consensus + blob engine + networking inside the current Tokio runtime (no Docker)
+- Loads the Ethereum mainnet trusted setup once and generates **real** KZG commitments/proofs with `c-kzg`
+- Provides full-node test harness with WAL, libp2p, and Engine API stubs
+- Uses production-grade RocksDB storage, protobuf serialization, and metrics tracking
 
-> **Note:** The harness prints workspace warnings (e.g., missing docs) inherited from other crates; the important signal is that all ten tests pass.
+### When to run the test suite
+
+- **Tier 0:** After changes to blob engine, state, or metrics (fast feedback loop)
+- **Tier 1:** Before PRs that touch proposal streaming, restream, sync, or blob storage
+- **Both tiers:** As a regression check prior to launching the Docker testnet
+
+> **Note:** The harness prints workspace warnings (e.g., missing docs) inherited from other crates; the important signal is that all tests pass.
 
 ## Utils: Genesis & Spammer
 

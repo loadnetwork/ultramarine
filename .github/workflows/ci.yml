@@ -130,6 +130,46 @@ jobs:
         run: make test
 
   # ----------------------------------------------------------------------------
+  # Tier 1 Full-Node Integration Tests
+  # ----------------------------------------------------------------------------
+  itest-tier1:
+    name: Tier 1 - Full Node Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [test]
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    env:
+      RUST_TEST_THREADS: 1
+      CARGO_NET_OFFLINE: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Setup Rust 1.89
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies (protoc)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev pkg-config protobuf-compiler
+
+      - name: Tier 1 tests (full node)
+        run: make itest-node
+
+      - name: Upload Tier 1 logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier1-logs
+          path: |
+            target/debug/deps/full_node*
+            crates/test/test_output.log
+          retention-days: 7
+
+  # ----------------------------------------------------------------------------
   # Docs (build + upload)
   # ----------------------------------------------------------------------------
   docs:

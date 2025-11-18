@@ -17,7 +17,7 @@ Phase 5 delivered end-to-end blob sidecar support for Ultramarine while keeping 
 **Key Achievements**:
 - ✅ 12 Prometheus metrics tracking complete blob lifecycle
 - ✅ 9 Grafana dashboard panels for real-time observability
-- ✅ 13 integration tests with real KZG cryptography (including negative-path coverage)
+- ✅ 17 integration tests (3 Tier 0 + 14 Tier 1) with real KZG cryptography, including negative-path coverage
 - ✅ 1,158 blobs processed successfully on live testnet (100% verification rate)
 - ✅ Full blob storage lifecycle: undecided → decided → pruned
 
@@ -63,10 +63,9 @@ Phase 5 was organized into three sequential sub-phases:
 - **Load tooling** `crates/utils/src/tx.rs:72-200`  
   Spam utility now generates real blobs, commitments, proofs, and versioned hashes using the shared trusted setup.
 
-- **Integration harness** `crates/test`
-  - Deterministic TempDir stores, mock Engine API, real KZG fixtures (`tests/common/mod.rs`).
-  - Six Tokio tests cover proposer flow, restreaming, restarts, multi-round clean-up, sync packages, and late-join scenarios.
-  - `make itest` / `make itest-list` wrap the ignored suite (`Makefile:568-579`, `docs/DEV_WORKFLOW.md:177-205`).
+- **Integration harness**
+  - **Tier 0 (component smokes)** live in `crates/consensus/tests` and cover happy-path proposal/commit, commitment mismatch rejection, and retention logic with real RocksDB + KZG. They run in `make test` and CI by default.
+  - **Tier 1 (full-node)** lives in `crates/test/tests/full_node` and boots Malachite channel actors, WAL, libp2p, and the application loop for 14 scenarios (quorum blob roundtrip, restream, restarts, ValueSync failures, pruning, etc.). Run via `make itest-node`; wired into CI in `itest-tier1` with failure artifacts.
 
 **Key Design Decisions**:
 - Consensus messages contain only blob metadata (commitments/hashes), never full blob bytes
@@ -77,29 +76,14 @@ Phase 5 was organized into three sequential sub-phases:
 
 ## What We Validated
 
-| Scenario                               | Path(s) Exercised | Notes |
-|----------------------------------------|-------------------|-------|
-| `blob_roundtrip.rs`                    | Proposer → commit | Verifies `verify_and_store`, `mark_decided`, metrics snapshot. |
-| `blob_restream_multi_validator.rs`     | Multi-node restream| Follower reconstructs proposal, checks metrics/availability. |
-| `blob_restream_multi_round.rs`         | Round clean-up     | Loser round blobs are dropped; metrics distinguish promoted vs dropped. |
-| `restart_hydrate.rs`                   | Persistence        | Restart hydrates parent root from disk and re-imports blobs. |
-| `sync_package_roundtrip.rs`            | Sync ingestion     | `SyncedValuePackage::Full` encoding/decoding, blob promotion, metrics. |
-| `blob_new_node_sync.rs`                | Late join          | New validator hydrates via synced package, commits, and exposes decided blobs. |
-| `blob_blobless_sequence.rs`            | Blob mix           | Alternating blobbed/blobless heights keep gauges and imports aligned. |
-| `blob_sync_failure.rs`                 | Failure path       | Tampered sidecars are rejected and `sync_failures_total` increments. |
-| `blob_sync_commitment_mismatch.rs`     | Malicious metadata | Mismatched commitments are rejected and cleanup paths fire. |
-| `blob_sync_across_restart_multiple_heights.rs` | Sync restart (multi) | Sync multiple blobbed heights, restart, and rebuild metadata/sidecars. |
-| `blob_restart_multi_height.rs`         | Restart (multi)    | Restart hydrates metadata and sidecars across multiple heights. |
-| `blob_pruning.rs`                      | Pruning window     | Retention policy prunes old blobs while preserving recent ones. |
-| `blob_decided_el_rejection.rs`         | EL rejection       | Execution layer invalid payload halts commit and records a sync failure. |
-
-All thirteen tests pass via `make itest` in ~49 seconds on local hardware (see latest Phase 5B validation log).  
+- **Tier 0 (consensus crate)**: 3 smokes (`blob_roundtrip`, `blob_sync_commitment_mismatch`, `blob_pruning`) validate proposer→commit happy path, metadata/sidecar consistency checks, and retention metrics with real KZG + RocksDB. These run in the default `make test` and CI.
+- **Tier 1 (full-node harness)**: 14 scenarios cover quorum blob roundtrip, restream across validators/rounds, multi-height restarts, ValueSync (happy and failure: commitment mismatch, inclusion proof failure), blobless sequences, pruning, sync package roundtrip, and EL rejection. Run via `make itest-node` (process-isolated) and in CI’s `itest-tier1` lane with artifacts on failure.
 
 **Integration Test Results** (Phase 5B):
-- ✅ All 13 tests passing with real KZG verification (c-kzg library)
+- ✅ Tier 0: 3/3 passing with real KZG
+- ✅ Tier 1: 14/14 passing with real KZG, libp2p, WAL, channel actors
 - ✅ Metrics accurately track operations (verifications, storage, lifecycle)
 - ✅ Blob lifecycle works correctly (undecided → decided → pruned)
-- ✅ Multi-round cleanup drops losing rounds correctly
 - ✅ Persistence survives restarts (RocksDB hydration)
 - ✅ Sync packages include and process blobs correctly
 - ✅ Late-join validators can sync and access decided blobs
@@ -141,7 +125,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 
 - **Verification throughput** – Batch KZG verification (c-kzg) validated hundreds of blobs without failures; `blob_engine_verification_time` histogram shows <50 ms P99 during testnet spam.
 - **Storage footprint** – Metrics track undecided/decided bytes. With 6 blobs per block, storage gauges confirm 6 × 131,072 B promoted and zero undecided leftovers.
-- **Test harness runtime** – Complete Phase 5B suite runs in ~21 s (`blob_roundtrip` 2.7 s, `restart_hydrate` 3.9 s, etc.).
+- **Test harness runtime** – Tier 0 smokes now run in ~8–10 s (3 scenarios); Tier 1 full-node suite runs separately via `make itest-node` (14 scenarios).
 - **Spam campaign** – 60 s at 50 TPS (6 blobs/tx) exercised 1,158 blobs; the system maintained zero verification failures and matched versioned hashes against KZG commitments (see `docs/PHASE5_TESTNET.md:426-440`).
 
 ## Lessons Learned
@@ -302,8 +286,8 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 |------|--------|--------|--------|
 | Metrics instrumentation | 10+ metrics | 12 metrics | ✅ 120% |
 | Grafana panels | 6+ panels | 9 panels | ✅ 150% |
-| Integration tests | 3+ tests | 6 tests | ✅ 200% |
-| Test execution time | < 30s | ~21s | ✅ 70% of target |
+| Integration tests | 3+ tests | Tier 0: 3 smokes (`crates/consensus/tests`), Tier 1: 14 full-node | ✅ |
+| Test execution time | < 30s | Tier 0: ~8–10 s (current); Tier 1 runs separately | ✅ |
 | Testnet validation | 500+ blobs | 1,158 blobs | ✅ 232% |
 | KZG verification rate | > 95% | 100% | ✅ 105% |
 

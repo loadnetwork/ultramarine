@@ -1,11 +1,13 @@
 //! Blob round-trip integration test harness.
 //!
+//! **Tier 0 smoke test:** Happy path baseline
+//! Kept for fast feedback (~3s) during blob engine development.
+//!
 //! This test exercises the happy-path proposal flow:
 //! 1. Proposer streams execution payload + blob sidecars.
 //! 2. Validators verify, store, and commit the block.
 //! 3. Blob metadata is promoted and blobs become available for import.
 
-#[path = "../common/mod.rs"]
 mod common;
 
 #[tokio::test]
