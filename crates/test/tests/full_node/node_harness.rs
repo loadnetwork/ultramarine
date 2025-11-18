@@ -264,12 +264,7 @@ async fn full_node_blob_quorum_roundtrip() -> Result<()> {
         .node_count(3)
         .run(|network| {
             Box::pin(async move {
-                tokio::try_join!(
-                    network.wait_for_height(0, Height::new(2)),
-                    network.wait_for_height(1, Height::new(2)),
-                    network.wait_for_height(2, Height::new(2))
-                )?;
-                sleep(Duration::from_millis(200)).await;
+                network.wait_for_nodes_at(&[0, 1, 2], Height::new(2)).await?;
                 network.assert_blobs(0, Height::new(1), 1).await?;
                 network.assert_blobs(1, Height::new(1), 1).await?;
                 network.assert_blobs(2, Height::new(1), 1).await?;
@@ -297,11 +292,7 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
                 network.stop_node(0).await?;
 
                 // Let nodes 1-3 decide height 1 and advance to height 2 (quorum = 3/4)
-                tokio::try_join!(
-                    network.wait_for_height(1, Height::new(2)),
-                    network.wait_for_height(2, Height::new(2)),
-                    network.wait_for_height(3, Height::new(2))
-                )?;
+                network.wait_for_nodes_at(&[1, 2, 3], Height::new(2)).await?;
 
                 // Bring node 0 back online - it MUST ValueSync heights 1 and 2 from peers.
                 // This exercises the actual ValueSync cache update path in
@@ -312,12 +303,7 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
                 // For node 0 to reach height 3, it must have successfully ValueSync'd heights 1 and 2,
                 // which means the blob parent root cache was properly updated.
                 // If the cache wasn't updated, validation of height 3 proposals would fail.
-                tokio::try_join!(
-                    network.wait_for_height(0, Height::new(3)),
-                    network.wait_for_height(1, Height::new(3)),
-                    network.wait_for_height(2, Height::new(3)),
-                    network.wait_for_height(3, Height::new(3))
-                )?;
+                network.wait_for_nodes_at(&[0, 1, 2, 3], Height::new(3)).await?;
 
                 // Verify blob metadata for all heights
                 for node in 0..4 {
@@ -337,25 +323,27 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
 async fn full_node_restart_mid_height() -> Result<()> {
     init_test_logging();
     FullNodeTestBuilder::new()
-        .node_count(3)
+        .node_count(4)
         .run(|network| {
             Box::pin(async move {
-                // Drive height 1 to completion.
+                // Drive height 1 to completion with all nodes participating.
                 network.wait_all(Height::new(1)).await?;
 
-                // Let proposer for height 2 start streaming, then restart node 1 mid-round.
-                network.wait_for_height(0, Height::new(2)).await?;
-                sleep(Duration::from_millis(100)).await;
-                network.restart_node(1).await?;
+                // Wait for node 1 to begin height 2, then stop it immediately to ensure a mid-height crash.
+                network.wait_for_started_height(1, Height::new(2)).await?;
+                network.stop_node(1).await?;
+
+                // Nodes 0, 2, and 3 form quorum (3/4) and can advance while node 1 is offline.
+                network.wait_for_nodes_at(&[0, 2, 3], Height::new(3)).await?;
+
+                // Bring node 1 back online; it must ValueSync the missing heights to participate at height 3.
+                network.start_node(1).await?;
 
                 // All nodes should eventually reach height 3.
-                tokio::try_join!(
-                    network.wait_for_height(0, Height::new(3)),
-                    network.wait_for_height(1, Height::new(3)),
-                    network.wait_for_height(2, Height::new(3))
-                )?;
+                network.wait_for_nodes_at(&[0, 1, 2, 3], Height::new(3)).await?;
 
-                for node in 0..3 {
+                // Verify all nodes have consistent blobs for all heights.
+                for node in 0..4 {
                     network.assert_blobs(node, Height::new(1), 1).await?;
                     network.assert_blobs(node, Height::new(2), 1).await?;
                     network.assert_blobs(node, Height::new(3), 1).await?;
@@ -379,11 +367,7 @@ async fn full_node_new_node_sync() -> Result<()> {
                 // Take validator 3 offline before height 1 so it misses the first two heights.
                 network.stop_node(3).await?;
 
-                tokio::try_join!(
-                    network.wait_for_height(0, Height::new(2)),
-                    network.wait_for_height(1, Height::new(2)),
-                    network.wait_for_height(2, Height::new(2))
-                )?;
+                network.wait_for_nodes_at(&[0, 1, 2], Height::new(2)).await?;
 
                 // Bring the node back online and ensure ValueSync catches it up.
                 network.start_node(3).await?;
@@ -414,11 +398,7 @@ async fn full_node_multi_height_valuesync_restart() -> Result<()> {
             Box::pin(async move {
                 // Keep validator 3 offline so it misses the first three heights.
                 network.stop_node(3).await?;
-                tokio::try_join!(
-                    network.wait_for_height(0, Height::new(3)),
-                    network.wait_for_height(1, Height::new(3)),
-                    network.wait_for_height(2, Height::new(3))
-                )?;
+                network.wait_for_nodes_at(&[0, 1, 2], Height::new(3)).await?;
 
                 // Bring it back online and wait for ValueSync to replay the missing heights.
                 network.start_node(3).await?;
@@ -1502,12 +1482,92 @@ impl NetworkHarness {
         let node =
             self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
         let mut rx = node.event_rx.lock().await;
+        let stub_state = Arc::clone(&node.stub_state);
         let events_log = Arc::new(Mutex::new(Vec::new()));
         let log_clone = Arc::clone(&events_log);
         debug_log!("node {} waiting for height {}", node_index, target_height);
         let wait = async move {
             loop {
+                tokio::select! {
+                    res = rx.recv() => {
+                        match res {
+                            Ok(Event::Decided(cert)) => {
+                                debug_log!("node {} decided height {}", node_index, cert.height);
+                                if cert.height >= target_height {
+                                    break Ok(());
+                                }
+                            }
+                            Ok(Event::StartedHeight(height, _)) => {
+                                debug_log!("node {} started height {}", node_index, height);
+                                // Starting a height strictly greater than the target implies the target
+                                // was decided (consensus only advances after commit).
+                                if height > target_height {
+                                    break Ok(());
+                                }
+                            }
+                            Ok(Event::WalReplayDone(height)) => {
+                                debug_log!("node {} completed WAL replay {}", node_index, height);
+                                if height > target_height {
+                                    break Ok(());
+                                }
+                            }
+                            Ok(event) => {
+                                debug_log!("node {} event {}", node_index, event);
+                                record_event(&log_clone, format!("{event}"));
+                            }
+                            Err(e) => break Err(eyre::eyre!("event channel closed: {e}")),
+                        }
+                    }
+                    _ = sleep(Duration::from_millis(100)) => {
+                        let latest_block = {
+                            let guard = stub_state.lock().await;
+                            guard.latest_block.block_number
+                        };
+                        if latest_block >= target_height.as_u64() {
+                            debug_log!(
+                                "node {} stub head {} >= target {}",
+                                node_index,
+                                latest_block,
+                                target_height
+                            );
+                            break Ok(());
+                        }
+                    }
+                }
+            }
+        };
+        match timeout(TEST_TIMEOUT, wait).await {
+            Ok(res) => res,
+            Err(_) => {
+                let snapshot = {
+                    let log = events_log.lock().unwrap();
+                    log.join(" | ")
+                };
+                dump_node_state(node_index, node).await;
+                Err(eyre::eyre!(
+                    "node {node_index} timed out waiting for height {target_height}; last events: {}",
+                    snapshot
+                ))
+            }
+        }
+    }
+
+    async fn wait_for_started_height(&self, node_index: usize, target_height: Height) -> Result<()> {
+        let node =
+            self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        let mut rx = node.event_rx.lock().await;
+        let events_log = Arc::new(Mutex::new(Vec::new()));
+        let log_clone = Arc::clone(&events_log);
+        debug_log!("node {} waiting for started height {}", node_index, target_height);
+        let wait = async move {
+            loop {
                 match rx.recv().await {
+                    Ok(Event::StartedHeight(height, _)) => {
+                        debug_log!("node {} started height {}", node_index, height);
+                        if height >= target_height {
+                            break Ok(());
+                        }
+                    }
                     Ok(Event::Decided(cert)) => {
                         debug_log!("node {} decided height {}", node_index, cert.height);
                         if cert.height >= target_height {
@@ -1531,7 +1591,7 @@ impl NetworkHarness {
                 };
                 dump_node_state(node_index, node).await;
                 Err(eyre::eyre!(
-                    "node {node_index} timed out waiting for height {target_height}; last events: {}",
+                    "node {node_index} timed out waiting to start height {target_height}; last events: {}",
                     snapshot
                 ))
             }
@@ -1540,6 +1600,13 @@ impl NetworkHarness {
 
     async fn wait_all(&self, height: Height) -> Result<()> {
         for idx in 0..self.nodes.len() {
+            self.wait_for_height(idx, height).await?;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_nodes_at(&self, nodes: &[usize], height: Height) -> Result<()> {
+        for &idx in nodes {
             self.wait_for_height(idx, height).await?;
         }
         Ok(())
@@ -1567,6 +1634,38 @@ impl NetworkHarness {
             .get_mut(node_index)
             .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
         node.start().await
+    }
+
+    async fn wait_for_store_height(&self, node_index: usize, target_height: Height) -> Result<()> {
+        let node = self
+            .nodes
+            .get(node_index)
+            .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+
+        let start = Instant::now();
+        loop {
+            let snapshot_dir = tempfile::tempdir().wrap_err("create store snapshot dir")?;
+            let store_src = node.home.path().join("store.db");
+            let store_dst = snapshot_dir.path().join("store.db");
+            copy_path(&store_src, &store_dst)
+                .wrap_err("snapshot store for wait_for_store_height")?;
+            let store = Store::open(store_dst, DbMetrics::new())
+                .wrap_err("open store snapshot")?;
+            let decided = store.max_decided_value_height().await;
+            if let Some(height) = decided {
+                if height >= target_height {
+                    return Ok(());
+                }
+            }
+            if start.elapsed() > TEST_TIMEOUT {
+                return Err(eyre::eyre!(
+                    "node {node_index} store did not reach height {} (max_decided={:?})",
+                    target_height,
+                    decided
+                ));
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
     }
 
     fn node_ref(&self, node_index: usize) -> Result<&NodeProcess> {

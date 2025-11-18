@@ -1164,7 +1164,7 @@ Both Phase A.1 (BlobEngine surface) and Phase A.2 (State/consensus hooks) are no
 
 **Upcoming Phases:**
 
-### **Phase B: In-Process Integration Tests** (6-8 hours) — 🟡 **In Progress (Beta Team)**
+### **Phase B: In-Process Integration Tests** (6-8 hours) — ✅ **Complete (event-driven harness, 2025-11-18 refresh)**
 - Implement test harness with `TempDir` isolation
 - Add 3 integration tests: `blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`
 - Mock Execution client, use real blob engine/KZG
@@ -1184,7 +1184,7 @@ Both Phase A.1 (BlobEngine surface) and Phase A.2 (State/consensus hooks) are no
 
 **Immediate Action Items:**
 1. ⏳ Wait for Phase B integration tests from beta team
-2. ⏳ Start testnet to validate metrics endpoint (`curl /metrics | grep blob_engine`)
+2. ✅ Start testnet to validate metrics endpoint (`curl /metrics | grep blob_engine`)
 3. ⏳ Begin Grafana dashboard panel design (see GRAFANA_WORKING_STATE.md)
 
 ---
@@ -1192,5 +1192,5 @@ Both Phase A.1 (BlobEngine surface) and Phase A.2 (State/consensus hooks) are no
 **Last Updated**: 2025-11-04
 **Phase A.1**: ✅ Complete (BlobEngine instrumentation)
 **Phase A.2**: ✅ Complete (State/consensus hooks)
-**Phase B**: 🟡 In Progress (Beta team - integration tests)
+**Phase B**: ✅ Complete (Beta team integration tests landed; deterministic harness updated 2025-11-18)
 **Next Review**: After testnet startup (metrics endpoint validation)

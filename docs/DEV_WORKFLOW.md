@@ -224,6 +224,7 @@ The blob integration suite lives in the dedicated `crates/test` package so Cargo
 
   Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are actionable, and they all share the new
   builder harness (`FullNodeTestBuilder`) located in `crates/test/tests/full_node/node_harness.rs`.
+  - Determinism notes: mid-height restart now gates on the `StartedHeight` event (no sleeps); multi-node waits have a helper (`wait_for_nodes_at`) so timing is event-driven rather than delay-based; the harness still warms up peers for 500 ms at start to avoid libp2p races.
 
 ### What the harness does
 

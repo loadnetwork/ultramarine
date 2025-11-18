@@ -394,6 +394,33 @@ pub async fn run(
                 let height = certificate.height;
                 let round = certificate.round;
 
+                // Realign latest execution block from disk so parent-hash checks
+                // stay in sync after restarts/replays.
+                if let Some(prev_height) = height.decrement() {
+                    if let Ok(Some(prev_meta)) = state.get_blob_metadata(prev_height).await {
+                        let prev_header = prev_meta.execution_payload_header();
+                        let prev_block = ExecutionBlock {
+                            block_hash: prev_header.block_hash,
+                            block_number: prev_header.block_number,
+                            parent_hash: prev_header.parent_hash,
+                            timestamp: prev_header.timestamp,
+                            prev_randao: prev_header.prev_randao,
+                        };
+                        let needs_realignment = state
+                            .latest_block
+                            .map(|blk| blk.block_number != prev_block.block_number)
+                            .unwrap_or(true);
+                        if needs_realignment {
+                            debug!(
+                                "[DIAG] Realigning latest execution block to height {} ({:?})",
+                                prev_height,
+                                prev_block.block_hash
+                            );
+                            state.latest_block = Some(prev_block);
+                        }
+                    }
+                }
+
                 // DIAGNOSTIC: Log entry to Decided handler
                 debug!(
                     "[DIAG] Decided handler entry: height={}, round={}, address={}, value_id={}",
@@ -409,23 +436,15 @@ pub async fn run(
                 );
 
                 let Some(block_bytes) = state.get_block_data(height, round).await else {
-                    // DIAGNOSTIC: Enhanced error logging for missing block bytes
+                    // Keep the application loop alive: instruct consensus to replay this height.
                     error!(
-                        "[DIAG] ❌ CRITICAL: Missing block bytes for height {} round {} on node {}",
+                        "[DIAG] ❌ Missing block bytes for decided value at height {} round {} on node {}; requesting restart",
                         height,
                         round,
                         state.validator_address()
                     );
-                    error!(
-                        "[DIAG] This means either: (1) proposal was never received, (2) storage failed, or (3) key mismatch"
-                    );
-                    let e = eyre!(
-                        "Missing block bytes for decided value at height {} round {}",
-                        height,
-                        round
-                    );
-                    error!(%e, "Cannot decode decided value: block bytes not found");
-                    return Err(e);
+                    let _ = reply.send(Next::Restart(height, state.get_validator_set().clone()));
+                    continue;
                 };
 
                 // DIAGNOSTIC: Confirm block bytes found
@@ -437,13 +456,13 @@ pub async fn run(
                 );
 
                 if block_bytes.is_empty() {
-                    let e = eyre!(
-                        "Empty block bytes for decided value at height {} round {}",
+                    error!(
+                        "[DIAG] ❌ Empty block bytes for decided value at height {} round {}; requesting restart",
                         height,
                         round
                     );
-                    error!(%e, "Cannot decode decided value: empty bytes");
-                    return Err(e);
+                    let _ = reply.send(Next::Restart(height, state.get_validator_set().clone()));
+                    continue;
                 }
 
                 debug!("🎁 block size: {:?}, height: {}", block_bytes.len(), height);
@@ -469,11 +488,16 @@ pub async fn run(
                         );
                     }
                     Err(e) => {
-                        error!("[DIAG] ❌ process_decided_certificate failed: {}", e);
+                        error!(
+                            "[DIAG] ❌ process_decided_certificate failed for height {}: {}; requesting restart",
+                            height, e
+                        );
+                        let _ = reply.send(Next::Restart(height, state.get_validator_set().clone()));
+                        continue;
                     }
                 }
 
-                let outcome = outcome?;
+                let outcome = outcome.unwrap();
 
                 debug!(
                     height = %height,

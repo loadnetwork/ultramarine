@@ -601,18 +601,20 @@ itest-list: ## List Tier 0 integration tests.
 	done
 
 .PHONY: itest-node
-itest-node: ## Run full-node (Tier 1) integration tests (ignored + serialized).
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_quorum_roundtrip -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_validator_restart_recovers -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_mid_height -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_new_node_sync -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_multi_height_valuesync_restart -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_multi_height_rebuilds -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multiple_rounds_cleanup -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_commitment_mismatch -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multi_validator -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_inclusion_proof_failure -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_blobless_sequence_behaves -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_pruning_retains_recent_heights -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_sync_package_roundtrip -- --ignored
-	CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_proof_failure -- --ignored
+itest-node: ## Run full-node (Tier 1) integration tests (process-isolated for determinism).
+	@echo "$(GREEN)Running Tier 1 full-node integration tests (14 tests, process-isolated)...$(NC)"
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_quorum_roundtrip -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_validator_restart_recovers -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_mid_height -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_new_node_sync -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_multi_height_valuesync_restart -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_multi_height_rebuilds -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multiple_rounds_cleanup -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_commitment_mismatch -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multi_validator -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_inclusion_proof_failure -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_blobless_sequence_behaves -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_pruning_retains_recent_heights -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_sync_package_roundtrip -- --ignored
+	@CARGO_NET_OFFLINE=true cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_proof_failure -- --ignored
+	@echo "$(GREEN)✅ All 14 Tier 1 tests passed!$(NC)"

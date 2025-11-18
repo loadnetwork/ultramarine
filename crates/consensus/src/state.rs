@@ -1502,14 +1502,35 @@ where
 
             if let Some(metadata) = decided_metadata {
                 let header = metadata.to_beacon_header();
-                self.last_blob_sidecar_root = header.hash_tree_root();
-                self.last_blob_sidecar_height = certificate.height;
-                debug!(
+                let new_root = header.hash_tree_root();
+                info!(
                     height = %certificate.height,
                     round = %round,
-                    "Refreshed blob parent cache during WAL replay"
+                    old_cache_height = %self.last_blob_sidecar_height,
+                    old_cache_root = ?self.last_blob_sidecar_root,
+                    new_cache_height = %certificate.height,
+                    new_cache_root = ?new_root,
+                    "🔄 WAL REPLAY: Updated blob parent cache"
+                );
+                self.last_blob_sidecar_root = new_root;
+                self.last_blob_sidecar_height = certificate.height;
+            } else {
+                warn!(
+                    height = %certificate.height,
+                    round = %round,
+                    current_cache_height = %self.last_blob_sidecar_height,
+                    current_cache_root = ?self.last_blob_sidecar_root,
+                    "⚠️  WAL REPLAY: Could not update cache - no metadata found"
                 );
             }
+
+            // Log final cache state after WAL replay completes
+            info!(
+                height = %certificate.height,
+                cache_height = %self.last_blob_sidecar_height,
+                cache_root = ?self.last_blob_sidecar_root,
+                "✅ WAL REPLAY COMPLETE: Final cache state"
+            );
         }
 
         // Move to next height (always execute, even in idempotent replay)
@@ -1976,27 +1997,47 @@ where
             return Err("Beacon header body_root mismatch".to_string());
         }
 
+        info!(
+            height = %height,
+            current_cache_height = %self.last_blob_sidecar_height,
+            current_cache_root = ?self.last_blob_sidecar_root,
+            proposal_parent_root = ?signed_header.message.parent_root,
+            "🔍 VALIDATION: Checking proposal parent root - Current cache state"
+        );
+
         let expected_parent_root = if height.as_u64() == 0 {
             B256::ZERO
         } else {
             let prev_height = Height::new(height.as_u64() - 1);
             match self.store.get_blob_metadata(prev_height).await {
-                Ok(Some(prev_metadata)) => prev_metadata.to_beacon_header().hash_tree_root(),
+                Ok(Some(prev_metadata)) => {
+                    let parent_root = prev_metadata.to_beacon_header().hash_tree_root();
+                    info!(
+                        height = %height,
+                        parent_height = %prev_height,
+                        parent_root = ?parent_root,
+                        "✅ VALIDATION: Loaded parent metadata from store"
+                    );
+                    parent_root
+                }
                 Ok(None) => {
                     if prev_height == self.last_blob_sidecar_height {
                         warn!(
                             height = %height,
                             parent_height = %prev_height,
-                            "Missing decided BlobMetadata for parent height {}; using cached blob root",
+                            cached_root = ?self.last_blob_sidecar_root,
+                            "⚠️  VALIDATION: Missing decided BlobMetadata for parent height {}; using cached blob root",
                             prev_height.as_u64()
                         );
                         self.last_blob_sidecar_root
                     } else {
-                        warn!(
+                        error!(
                             height = %height,
                             parent_height = %prev_height,
                             cache_height = %self.last_blob_sidecar_height,
-                            "Missing decided BlobMetadata for parent height {}; cache points to different height",
+                            cache_root = ?self.last_blob_sidecar_root,
+                            "❌ VALIDATION: Cache mismatch - cache points to height {} but need height {}",
+                            self.last_blob_sidecar_height.as_u64(),
                             prev_height.as_u64()
                         );
                         return Err(format!(
@@ -2006,6 +2047,12 @@ where
                     }
                 }
                 Err(e) => {
+                    error!(
+                        height = %height,
+                        parent_height = %prev_height,
+                        error = %e,
+                        "❌ VALIDATION: Failed to load parent BlobMetadata"
+                    );
                     return Err(format!(
                         "Failed to load BlobMetadata for parent height {}: {}",
                         prev_height.as_u64(),
