@@ -84,10 +84,10 @@ This approach resolves the gap between purely manual testing and the need for au
 **Architecture** (as of 2025-10-28):
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Execution Layer (Reth v1.4.1)                              │
-│  ├─ reth0  (8545/8551)   metrics: 9100  ─┐                  │
-│  ├─ reth1  (18545/18551) metrics: 9101  ─┼─> Prometheus    │
-│  └─ reth2  (28545/28551) metrics: 9102  ─┘   (1s scrape)   │
+│  Execution Layer (load-reth)                               │
+│  ├─ load-reth0  (8545/8551)   metrics: 9100  ─┐            │
+│  ├─ load-reth1  (18545/18551) metrics: 9101  ─┼─> Prometheus│
+│  └─ load-reth2  (28545/28551) metrics: 9102  ─┘  (1s scrape)│
 └─────────────────────────────────────────────────────────────┘
                           ▲
                           │ Engine API v3 (HTTP/IPC)
@@ -126,7 +126,7 @@ This approach resolves the gap between purely manual testing and the need for au
 - `malachitebft_core_consensus_block_size_bytes` - Block size
 - `app_channel_db_*` - Database I/O (consensus store)
 
-**Reth (Execution)**:
+**load-reth (Execution — metrics still prefixed `reth_` upstream)**:
 - `reth_engine_rpc_get_payload_v3_count` - Engine API calls
 - `reth_engine_rpc_forkchoice_updated_messages` - FCU messages
 - `reth_transaction_pool_*` - Txpool metrics (pending/queued)
@@ -284,7 +284,7 @@ spammer()
 **Findings**:
 - Testnet infrastructure is production-ready (Docker, Prometheus, Grafana all working)
 - 🔴 **CRITICAL**: Spam tool `--blobs` flag creates incomplete transactions (fake versioned hashes, no blob data)
-- 18 existing dashboard panels (5 Malachite, 13 Reth) but 0 for blobs
+- 18 existing dashboard panels (5 Malachite, 13 load-reth) but 0 for blobs
 - BlobEngine has logging but zero Prometheus instrumentation
 
 **Critical Discovery** (Evening):
@@ -518,7 +518,7 @@ Phase 5 Testnet is complete when:
    - **Testing**: 193 transactions sent with 1,158 blobs (6 per tx), 100% verification success
    - **Implementation**: Uses c-kzg library with trusted setup for valid proofs
 
-2. **Blob RPC Submission Method** ✅ **RESOLVED**: Reth accepts blob transactions via standard RPC
+2. **Blob RPC Submission Method** ✅ **RESOLVED**: Load-reth accepts blob transactions via standard RPC
    - **Method**: Standard `eth_sendRawTransaction` with blob sidecars
    - **Status**: All blob transactions successfully included in blocks
    - **Verification**: Consensus and execution layers properly handle blob lifecycle
@@ -545,7 +545,7 @@ Phase 5 Testnet is complete when:
 | Risk | Impact | Mitigation | Status |
 |------|--------|------------|--------|
 | ~~Spam tool non-functional~~ | ~~CRITICAL~~ | ~~Implement Phase E~~ | ✅ **RESOLVED** - Tool works correctly |
-| ~~Blob RPC submission method unknown~~ | ~~HIGH~~ | ~~Research Reth APIs~~ | ✅ **RESOLVED** - Standard RPC works |
+| ~~Blob RPC submission method unknown~~ | ~~HIGH~~ | ~~Research load-reth/Reth APIs~~ | ✅ **RESOLVED** - Standard RPC works |
 | Blob spam causes consensus slowdown | MEDIUM | Load test at increasing rates, identify bottleneck | ⏳ Ongoing monitoring |
 | Storage grows unbounded without pruning | MEDIUM | Monitor `storage_size_bytes` metric, defer pruning to Phase 6 |
 | Integration tests flaky (timing-dependent) | LOW | Use retries, generous timeouts, deterministic test data |

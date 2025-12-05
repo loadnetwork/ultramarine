@@ -77,6 +77,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 │                    EXECUTION LAYER (EL Client)                   │
 │  Engine API v3: getPayloadV3() returns blobsBundle              │
 │  Execution layer generates blobs, we verify & propagate         │
+│  PayloadAttributes.prev_randao = 0x01 (constant, Arbitrum-style)│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -103,6 +104,33 @@ Proposer                           Validators
    │ 9. Publish CID in vote extension │
    └───────────────────────────────────┘
 ```
+
+### Engine API Contract (CL ↔ EL)
+
+**Payload Attributes**: When calling `engine_forkchoiceUpdatedV3`, Ultramarine supplies:
+
+| Field | Value | Rationale |
+|-------|-------|-----------|
+| `timestamp` | `latest_block.timestamp + 1` | Monotonically increasing block time |
+| **`prev_randao`** | **Constant `0x01`** | **Arbitrum pattern** - explicit signal that block-based randomness is unavailable. Forces dApps to use proper VRF oracles. |
+| `suggested_fee_recipient` | Placeholder `0x2a...2a` | TODO: Make validator-configurable |
+| `withdrawals` | Empty array `[]` | No withdrawals on Load Network |
+| `parent_beacon_block_root` | Previous `block_hash` | For EIP-4788 compatibility |
+
+**prevRandao Design Decision**:
+- ✅ **Constant `0x01`** chosen over derived values (timestamp hash, commit hash, etc.)
+- ✅ **Identity property**: `1 × x = x` means accidental use in multiplication is harmless
+- ✅ **Fail-fast**: Contracts expecting randomness break obviously in testing
+- ✅ **Battle-tested**: Arbitrum uses `1`, zkSync uses `250000000000000000` - both constants
+- ✅ **Non-manipulatable**: Unlike Ethereum's RANDAO (validators can bias ~1 bit)
+
+**Enforcement**:
+- **Generation**: `ultramarine/crates/execution/src/client.rs:190,359` - always sends constant
+- **Validation**: `ultramarine/crates/consensus/src/state.rs:1026-1034` - rejects mismatches
+- **Normalization**: `ultramarine/crates/execution/src/eth_rpc/alloy_impl.rs:95` - RPC client returns constant
+- **Testing**: `ultramarine/crates/test/tests/full_node/node_harness.rs:1803` - harness verifies all payloads
+
+**See also**: [load-reth-design.md](../../../../load-el-design/load-reth-design.md#2-functional-requirements) for EL perspective.
 
 ---
 
@@ -678,7 +706,7 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 ### Current State (2025-11-07)
 
 **Infrastructure** ✅:
-- 3-node testnet with Docker Compose (reth + ultramarine)
+- 3-node testnet with Docker Compose (load-reth + Ultramarine)
 - Prometheus scraping 6 targets (3 EL + 3 CL) every 1s
 - Grafana dashboard with 18 panels (5 Malachite, 13 Reth)
 - Spam tool with `--blobs` flag for EIP-4844 transactions

@@ -1,29 +1,29 @@
 global:
   scrape_interval: 1s
 scrape_configs:
-  - job_name: "reth0"
+  - job_name: "load-reth0"
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['reth0:9001']
+      - targets: ['load-reth0:9001']
         labels:
-          client_name: "reth"
+          client_name: "load-reth"
           client_type: "execution"
-  - job_name: "reth1"
+  - job_name: "load-reth1"
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['reth1:9001']
+      - targets: ['load-reth1:9001']
         labels:
-          client_name: "reth"
+          client_name: "load-reth"
           client_type: "execution"
-  - job_name: "reth2"
+  - job_name: "load-reth2"
     metrics_path: "/metrics"
     scrape_interval: 1s
     static_configs:
-      - targets: ['reth2:9001']
+      - targets: ['load-reth2:9001']
         labels:
-          client_name: "reth"
+          client_name: "load-reth"
           client_type: "execution"
 
   - job_name: "malachite0"

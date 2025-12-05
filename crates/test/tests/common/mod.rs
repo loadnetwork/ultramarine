@@ -36,6 +36,7 @@ use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
     context::LoadContext,
+    engine_api::load_prev_randao,
     genesis::Genesis,
     height::Height,
     proposal_part::BlobSidecar,
@@ -214,7 +215,7 @@ pub(crate) fn sample_execution_payload_v3_for_height(
                 state_root: B256::from([3u8; 32]),
                 receipts_root: B256::from([4u8; 32]),
                 logs_bloom: Bloom::ZERO,
-                prev_randao: B256::from([5u8; 32]),
+                prev_randao: load_prev_randao(),
                 block_number: height.as_u64(), // Fix: block_number should equal height
                 gas_limit: 30_000_000,
                 gas_used: 15_000_000,
@@ -239,6 +240,24 @@ pub(crate) fn sample_execution_payload_v3_for_height(
     }
 
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_payload_uses_constant_prev_randao() {
+        let height_one = Height::new(1);
+        let height_two = Height::new(2);
+
+        let payload_one = sample_execution_payload_v3_for_height(height_one, None);
+        let payload_two = sample_execution_payload_v3_for_height(height_two, None);
+
+        let expected = load_prev_randao();
+        assert_eq!(payload_one.payload_inner.payload_inner.prev_randao, expected);
+        assert_eq!(payload_two.payload_inner.payload_inner.prev_randao, expected);
+    }
 }
 
 /// Helper to construct deterministic [`PayloadId`] values.

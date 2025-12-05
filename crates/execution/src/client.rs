@@ -15,8 +15,8 @@ use tracing::{debug, info};
 use ultramarine_types::{
     address::Address,
     aliases::{B256, BlockHash},
-    // Phase 1: Import blob types for generate_block_with_blobs()
     blob::BlobsBundle,
+    engine_api::load_prev_randao,
 };
 
 use crate::{
@@ -185,17 +185,9 @@ impl ExecutionClient {
             // It should be greater than that of forkchoiceState.headBlockHash.
             timestamp: latest_block.timestamp + 1,
 
-            // TODO: This is a placeholder value. In a real consensus client, this value
-            // must be generated according to the consensus protocol's specifications.
-            //
-            // In Ethereum PoS, this is the RANDAO mix from the Beacon Chain state, used for
-            // proposer selection.
-            //
-            // In a Tendermint-based system (like Malachite), proposer selection is
-            // deterministic (round-robin). The Host application would be responsible for
-            // generating a deterministic value here, such as a hash of the previous
-            // block's signatures, to satisfy the EVM's block header format.
-            prev_randao: latest_block.prev_randao,
+            // Load fixes PREVRANDAO to the canonical constant (Arbitrum-style) so no
+            // application assumes entropy from it; the consensus doc captures this contract.
+            prev_randao: load_prev_randao(),
 
             // CRITICAL TODO: This is a placeholder address. In a production environment,
             // this MUST be replaced with a user-configurable address to ensure
@@ -362,17 +354,9 @@ impl ExecutionClient {
             // It should be greater than that of forkchoiceState.headBlockHash.
             timestamp: latest_block.timestamp + 1,
 
-            // TODO: This is a placeholder value. In a real consensus client, this value
-            // must be generated according to the consensus protocol's specifications.
-            //
-            // In Ethereum PoS, this is the RANDAO mix from the Beacon Chain state, used for
-            // proposer selection.
-            //
-            // In a Tendermint-based system (like Malachite), proposer selection is
-            // deterministic (round-robin). The Host application would be responsible for
-            // generating a deterministic value here, such as a hash of the previous
-            // block's signatures, to satisfy the EVM's block header format.
-            prev_randao: latest_block.prev_randao,
+            // Load fixes PREVRANDAO to the canonical constant (Arbitrum-style) so no
+            // application assumes entropy from it; the consensus doc captures this contract.
+            prev_randao: load_prev_randao(),
 
             // CRITICAL TODO: This is a placeholder address. In a production environment,
             // this MUST be replaced with a user-configurable address to ensure

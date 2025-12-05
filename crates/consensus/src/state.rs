@@ -39,7 +39,7 @@ use ultramarine_types::{
     codec::proto::ProtobufCodec,
     consensus_block_metadata::ConsensusBlockMetadata,
     context::LoadContext,
-    engine_api::{ExecutionBlock, ExecutionPayloadHeader},
+    engine_api::{ExecutionBlock, ExecutionPayloadHeader, load_prev_randao},
     ethereum_compat::{
         BeaconBlockBodyMinimal, BeaconBlockHeader, SignedBeaconBlockHeader,
         generate_kzg_commitment_inclusion_proof, verify_kzg_commitment_inclusion_proof,
@@ -909,11 +909,8 @@ where
         let round = certificate.round;
         let round_i64 = round.as_i64();
 
-        let mut versioned_hashes: Vec<BlockHash> = block
-            .body
-            .blob_versioned_hashes_iter()
-            .copied()
-            .collect();
+        let mut versioned_hashes: Vec<BlockHash> =
+            block.body.blob_versioned_hashes_iter().copied().collect();
 
         if versioned_hashes.is_empty() {
             if let Some(proposal) = self.load_undecided_proposal(height, round).await? {
@@ -1022,7 +1019,25 @@ where
         let block_hash = payload_inner.block_hash;
         let block_number = payload_inner.block_number;
         let parent_block_hash = payload_inner.parent_hash;
-        let prev_randao = payload_inner.prev_randao;
+
+        // Enforce Load Network's constant prev_randao contract (0x01, Arbitrum pattern).
+        // The CL always sends this constant in PayloadAttributes (client.rs:190,359),
+        // so any payload with a different value indicates either:
+        // 1. EL bug (not respecting the attribute we sent)
+        // 2. Network attack (malicious payload propagated)
+        // 3. Development error (test fixture inconsistency)
+        // In all cases, rejecting at consensus ensures network integrity.
+        // See: FINAL_PLAN.md "Engine API Contract" for rationale.
+        let expected_prev_randao = load_prev_randao();
+        if payload_inner.prev_randao != expected_prev_randao {
+            return Err(eyre::eyre!(
+                "prev_randao mismatch at height {} round {}: expected {:?}, got {:?}",
+                height,
+                round,
+                expected_prev_randao,
+                payload_inner.prev_randao
+            ));
+        }
         let tx_count = payload_inner.transactions.len();
 
         let expected_parent = self.latest_block.as_ref().map(|block| block.block_hash);
@@ -1074,7 +1089,7 @@ where
             block_number,
             parent_hash: parent_block_hash,
             timestamp: execution_payload.timestamp(),
-            prev_randao,
+            prev_randao: expected_prev_randao,
         };
         self.latest_block = Some(execution_block.clone());
 

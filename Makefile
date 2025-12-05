@@ -24,6 +24,11 @@ PROMETHEUS_CONFIG_DIR     := monitoring
 PROMETHEUS_ACTIVE_CONFIG  := $(PROMETHEUS_CONFIG_DIR)/prometheus.yml
 PROMETHEUS_HOST_CONFIG    := $(PROMETHEUS_CONFIG_DIR)/prometheus.host.yml
 PROMETHEUS_IPC_CONFIG     := $(PROMETHEUS_CONFIG_DIR)/prometheus.ipc.yml
+# LOAD_RETH_IMAGE          ?= docker.io/loadnetwork/load-reth:v0.1.2
+LOAD_RETH_IMAGE := load-reth:local
+EL_DATADIRS              := rethdata/0 rethdata/1 rethdata/2
+EL_IPC_SOCK_DIRS         := ipc/0 ipc/1 ipc/2
+export LOAD_RETH_IMAGE
 
 define sync_prometheus_config
 	@if [ ! -f $(PROMETHEUS_ACTIVE_CONFIG) ] || ! cmp -s $1 $(PROMETHEUS_ACTIVE_CONFIG); then \
@@ -439,6 +444,7 @@ all: ## Build, generate genesis, start EL stack, wire peers, generate testnet, s
 	$(call sync_prometheus_config,$(PROMETHEUS_HOST_CONFIG))
 	$(MAKE) build-debug
 	cargo run --bin ultramarine-utils -- genesis
+	$(MAKE) reset-el-state
 	@# Ensure JWT secret exists for Engine API auth; create a secure 32‑byte hex if missing
 	@if [ ! -f ./assets/jwtsecret ]; then \
 		mkdir -p ./assets; \
@@ -466,6 +472,7 @@ all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nod
 	$(call sync_prometheus_config,$(PROMETHEUS_IPC_CONFIG))
 	$(MAKE) build-debug
 	cargo run --bin ultramarine-utils -- genesis
+	$(MAKE) reset-el-state
 	@if [ ! -f ./assets/jwtsecret ]; then \
 		mkdir -p ./assets; \
 		if command -v openssl >/dev/null 2>&1; then \
@@ -478,7 +485,7 @@ all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nod
 	fi
 	# Generate distributed CL configs for Docker networking (service DNS names) over TCP.
 	cargo run --bin ultramarine -- distributed-testnet --nodes 3 --home nodes --machines 10.250.42.10,10.250.42.11,10.250.42.12 --transport tcp
-	# Build ultramarine image once and bring up EL (reth) and CL via Compose.
+	# Build ultramarine image once and bring up EL (load-reth) and CL via Compose.
 	docker build -t ultramarine:local .
 	LOCAL_UID=$(shell id -u) LOCAL_GID=$(shell id -g) docker compose -f compose.ipc.yaml up -d
 	./scripts/add_peers.sh
@@ -487,6 +494,12 @@ all-ipc: ## Build, genesis, start EL stack with IPC, generate testnet, spawn nod
 	@echo "Logs: docker logs -f ultramarine0|1|2"
 	# Note: In IPC mode, JWT is not required by Ultramarine (Engine IPC doesn’t use it).
 	# Eth JSON-RPC remains HTTP; Engine IPC is used only by Ultramarine.
+
+.PHONY: reset-el-state
+reset-el-state: ## Wipe and recreate EL datadirs/socket mounts to match the latest genesis.
+	@echo "$(YELLOW)Resetting load-reth data directories to match assets/genesis.json$(NC)"
+	rm -rf ./rethdata ./ipc
+	mkdir -p $(addprefix ./,$(EL_DATADIRS)) $(addprefix ./,$(EL_IPC_SOCK_DIRS))
 
 .PHONY: wait-ipc
 wait-ipc: ## Wait for Engine IPC sockets (./ipc/{0,1,2}/engine.ipc) to appear.
