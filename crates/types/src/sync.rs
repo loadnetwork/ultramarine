@@ -32,8 +32,10 @@
 //! **Server Side** (GetDecidedValue):
 //! ```rust,ignore
 //! let package = SyncedValuePackage::Full {
+//!     value: decided_value.clone(),
 //!     execution_payload_ssz: payload_bytes,
 //!     blob_sidecars: blobs,
+//!     execution_requests: vec![],
 //! };
 //! let value_bytes = package.encode()?;
 //! ```
@@ -42,7 +44,7 @@
 //! ```rust,ignore
 //! let package = SyncedValuePackage::decode(&value_bytes)?;
 //! match package {
-//!     SyncedValuePackage::Full { execution_payload_ssz, blob_sidecars } => {
+//!     SyncedValuePackage::Full { execution_payload_ssz, blob_sidecars, execution_requests } => {
 //!         // Store and verify
 //!     }
 //!     SyncedValuePackage::MetadataOnly { value } => {
@@ -62,7 +64,7 @@
 use bytes::Bytes;
 use malachitebft_proto::{Error as ProtoError, Protobuf};
 
-use crate::{proposal_part::BlobSidecar, proto, value::Value};
+use crate::{aliases::Bytes as AlloyBytes, proposal_part::BlobSidecar, proto, value::Value};
 
 /// Synced block data package for state synchronization
 ///
@@ -119,6 +121,11 @@ pub enum SyncedValuePackage {
         /// - KZG proof (48 bytes)
         /// - Blob index
         blob_sidecars: Vec<BlobSidecar>,
+
+        /// Execution requests (EIP-7685) required for Prague hashing
+        ///
+        /// Stored as opaque byte arrays with the request type prepended.
+        execution_requests: Vec<AlloyBytes>,
     },
 
     /// Metadata-only (blobs not available)
@@ -170,6 +177,14 @@ impl SyncedValuePackage {
     pub fn execution_payload(&self) -> Option<&Bytes> {
         match self {
             Self::Full { execution_payload_ssz, .. } => Some(execution_payload_ssz),
+            Self::MetadataOnly { .. } => None,
+        }
+    }
+
+    /// Get execution requests if available
+    pub fn execution_requests(&self) -> Option<&[AlloyBytes]> {
+        match self {
+            Self::Full { execution_requests, .. } => Some(execution_requests),
             Self::MetadataOnly { .. } => None,
         }
     }
@@ -244,9 +259,10 @@ impl SyncedValuePackage {
     /// - `MetadataOnly`: ~2KB
     pub fn estimated_size(&self) -> usize {
         match self {
-            Self::Full { value, execution_payload_ssz, blob_sidecars } => {
+            Self::Full { value, execution_payload_ssz, blob_sidecars, execution_requests } => {
                 value.size_bytes() +
                     execution_payload_ssz.len() +
+                    execution_requests.iter().map(|r| r.len()).sum::<usize>() +
                     blob_sidecars.iter().map(|b| b.size_bytes()).sum::<usize>() +
                     100 // Overhead for enum tag, lengths, etc.
             }
@@ -279,10 +295,14 @@ impl Protobuf for SyncedValuePackage {
                     .map(|proto_sidecar| BlobSidecar::from_proto(proto_sidecar))
                     .collect::<Result<Vec<_>, _>>()?;
 
+                let execution_requests =
+                    full.execution_requests.into_iter().map(AlloyBytes::from).collect();
+
                 Ok(SyncedValuePackage::Full {
                     value,
                     execution_payload_ssz: full.execution_payload_ssz,
                     blob_sidecars,
+                    execution_requests,
                 })
             }
             Some(proto::synced_value_package::Package::MetadataOnly(metadata)) => {
@@ -299,7 +319,12 @@ impl Protobuf for SyncedValuePackage {
 
     fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
         let package = match self {
-            SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
+            SyncedValuePackage::Full {
+                value,
+                execution_payload_ssz,
+                blob_sidecars,
+                execution_requests,
+            } => {
                 let proto_blob_sidecars = blob_sidecars
                     .iter()
                     .map(|sidecar| sidecar.to_proto())
@@ -309,6 +334,11 @@ impl Protobuf for SyncedValuePackage {
                     value: Some(value.to_proto()?),
                     execution_payload_ssz: execution_payload_ssz.clone(),
                     blob_sidecars: proto_blob_sidecars,
+                    execution_requests: execution_requests
+                        .iter()
+                        .cloned()
+                        .map(|req| req.0)
+                        .collect(),
                 })
             }
             SyncedValuePackage::MetadataOnly { value } => {
@@ -325,7 +355,10 @@ impl Protobuf for SyncedValuePackage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof};
+    use crate::{
+        aliases::Bytes as AlloyBytes,
+        blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof},
+    };
 
     #[test]
     fn test_synced_value_package_full_is_full() {
@@ -335,6 +368,7 @@ mod tests {
             value,
             execution_payload_ssz: Bytes::from(vec![1u8; 1024]),
             blob_sidecars: vec![],
+            execution_requests: Vec::new(),
         };
 
         assert!(package.is_full());
@@ -366,6 +400,7 @@ mod tests {
             value,
             execution_payload_ssz: payload.clone(),
             blob_sidecars: vec![sidecar],
+            execution_requests: Vec::new(),
         };
 
         // Encode
@@ -421,6 +456,7 @@ mod tests {
             value,
             execution_payload_ssz: payload,
             blob_sidecars: sidecars,
+            execution_requests: Vec::new(),
         };
 
         // Roundtrip
@@ -450,6 +486,7 @@ mod tests {
             value,
             execution_payload_ssz: payload,
             blob_sidecars: vec![sidecar],
+            execution_requests: Vec::new(),
         };
 
         let size = package.estimated_size();
@@ -522,6 +559,7 @@ mod tests {
             value,
             execution_payload_ssz: payload,
             blob_sidecars: vec![sidecar],
+            execution_requests: Vec::new(),
         };
 
         // Encode using protobuf

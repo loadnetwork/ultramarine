@@ -9,6 +9,7 @@ use alloy_rpc_types_engine::{
 };
 use alloy_rpc_types_eth::Withdrawal;
 use async_trait::async_trait;
+use bytes::Bytes;
 use malachitebft_app_channel::app::types::LocallyProposedValue;
 use ssz::Encode;
 use tempfile::{TempDir, tempdir};
@@ -77,6 +78,7 @@ pub fn sample_execution_payload_header() -> ExecutionPayloadHeader {
         extra_data: AlloyBytes::new(),
         transactions_root: B256::from([7u8; 32]),
         withdrawals_root: B256::from([8u8; 32]),
+        requests_hash: None,
     }
 }
 
@@ -124,7 +126,14 @@ pub async fn propose_blobbed_value(
     let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
 
     let proposed = state
-        .propose_value_with_blobs(height, round, payload_bytes.clone(), &payload, Some(&bundle))
+        .propose_value_with_blobs(
+            height,
+            round,
+            payload_bytes.clone(),
+            &payload,
+            &[],
+            Some(&bundle),
+        )
         .await
         .expect("propose value with blobs");
 
@@ -269,7 +278,7 @@ impl Default for MockExecutionNotifier {
 }
 
 struct MockExecutionNotifierState {
-    new_block_calls: Vec<(ExecutionPayloadV3, Vec<BlockHash>)>,
+    new_block_calls: Vec<(ExecutionPayloadV3, Vec<AlloyBytes>, Vec<BlockHash>)>,
     forkchoice_calls: Vec<BlockHash>,
     payload_status: PayloadStatus,
 }
@@ -295,10 +304,11 @@ impl ExecutionNotifier for MockExecutionNotifier {
     async fn notify_new_block(
         &mut self,
         payload: ExecutionPayloadV3,
+        execution_requests: Vec<Bytes>,
         versioned_hashes: Vec<BlockHash>,
     ) -> color_eyre::Result<PayloadStatus> {
         let mut inner = self.inner.lock().unwrap();
-        inner.new_block_calls.push((payload, versioned_hashes));
+        inner.new_block_calls.push((payload, execution_requests, versioned_hashes));
         Ok(inner.payload_status.clone())
     }
 

@@ -2,20 +2,20 @@
 use std::{fmt, sync::Arc};
 
 use alloy_rpc_types_engine::{
-    ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated,
-    PayloadAttributes, PayloadId, PayloadStatus,
+    ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4, ExecutionPayloadV3, ForkchoiceState,
+    ForkchoiceUpdated, PayloadAttributes, PayloadId, PayloadStatus,
 };
 use async_trait::async_trait;
 use color_eyre::eyre;
 use serde::{Serialize, de::DeserializeOwned};
 use ultramarine_types::{
-    aliases::{B256, BlockHash},
+    aliases::{B256, BlockHash, Bytes},
     // Phase 1b: Import BlobsBundle for get_payload_with_blobs()
     blob::BlobsBundle,
     engine_api::JsonExecutionPayloadV3,
 };
 
-use super::EngineApi;
+use super::{EngineApi, ExecutionPayloadResult};
 use crate::{
     engine_api::{EngineCapabilities, capabilities::*},
     transport::{JsonRpcRequest, Transport},
@@ -70,48 +70,43 @@ impl EngineApi for EngineApiClient {
         self.request(ENGINE_FORKCHOICE_UPDATED_V3, (state, payload_attributes)).await
     }
 
-    async fn get_payload(&self, payload_id: PayloadId) -> eyre::Result<ExecutionPayloadV3> {
-        // In V3 the response is an envelope; extract the execution payload.
-        let envelope: ExecutionPayloadEnvelopeV3 =
-            self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await?;
-        Ok(envelope.execution_payload)
+    async fn get_payload(&self, payload_id: PayloadId) -> eyre::Result<ExecutionPayloadResult> {
+        let ExecutionPayloadEnvelopeV4 { envelope_inner, execution_requests } =
+            self.request(ENGINE_GET_PAYLOAD_V4, (payload_id,)).await?;
+        let execution_requests: Vec<Bytes> = execution_requests.into_iter().collect();
+        Ok(ExecutionPayloadResult { payload: envelope_inner.execution_payload, execution_requests })
     }
 
     async fn get_payload_with_blobs(
         &self,
         payload_id: PayloadId,
-    ) -> eyre::Result<(ExecutionPayloadV3, Option<BlobsBundle>)> {
-        // Call getPayloadV3 and receive the full envelope with blob bundle
-        let envelope: ExecutionPayloadEnvelopeV3 =
-            self.request(ENGINE_GET_PAYLOAD_V3, (payload_id,)).await?;
+    ) -> eyre::Result<(ExecutionPayloadResult, Option<BlobsBundle>)> {
+        let ExecutionPayloadEnvelopeV4 { envelope_inner, execution_requests } =
+            self.request(ENGINE_GET_PAYLOAD_V4, (payload_id,)).await?;
 
-        // Extract execution payload
-        let payload = envelope.execution_payload;
+        let execution_requests: Vec<Bytes> = execution_requests.into_iter().collect();
+        let ExecutionPayloadEnvelopeV3 {
+            execution_payload,
+            block_value: _,
+            blobs_bundle,
+            should_override_builder: _,
+        } = envelope_inner;
 
-        // Convert Alloy's BlobsBundleV1 to our BlobsBundle type
-        //
-        // The blob bundle might be empty if:
-        // 1. No blob transactions were included in the block
-        // 2. The execution layer doesn't support blobs (pre-Deneb)
-        //
-        // We check if the bundle is empty and return None in that case.
-        let blob_bundle = if envelope.blobs_bundle.blobs.is_empty() {
+        let payload = execution_payload;
+
+        let blob_bundle = if blobs_bundle.blobs.is_empty() {
             None
         } else {
-            // Convert from Alloy's BlobsBundleV1 to our BlobsBundle
-            let bundle = BlobsBundle::try_from(envelope.blobs_bundle).map_err(|e| {
+            let bundle = BlobsBundle::try_from(blobs_bundle).map_err(|e| {
                 eyre::eyre!("Failed to convert blob bundle from Engine API response: {}", e)
             })?;
-
-            // Validate the bundle structure before returning
             bundle
                 .validate()
                 .map_err(|e| eyre::eyre!("Invalid blob bundle from execution layer: {}", e))?;
-
             Some(bundle)
         };
 
-        Ok((payload, blob_bundle))
+        Ok((ExecutionPayloadResult { payload, execution_requests }, blob_bundle))
     }
 
     async fn new_payload(
@@ -119,10 +114,12 @@ impl EngineApi for EngineApiClient {
         execution_payload: ExecutionPayloadV3,
         versioned_hashes: Vec<B256>,
         parent_block_hash: BlockHash,
+        execution_requests: Vec<Bytes>,
     ) -> eyre::Result<PayloadStatus> {
         let payload = JsonExecutionPayloadV3::from(execution_payload);
-        let params = serde_json::json!([payload, versioned_hashes, parent_block_hash]);
-        self.request(ENGINE_NEW_PAYLOAD_V3, params).await
+        let params =
+            serde_json::json!([payload, versioned_hashes, parent_block_hash, execution_requests]);
+        self.request(ENGINE_NEW_PAYLOAD_V4, params).await
     }
 
     async fn exchange_capabilities(&self) -> eyre::Result<EngineCapabilities> {

@@ -226,6 +226,9 @@ impl ValueMetadata {
         self.execution_payload_header.excess_blob_gas.hash(&mut hasher);
         self.execution_payload_header.prev_randao.0.hash(&mut hasher);
         self.execution_payload_header.fee_recipient.into_inner().hash(&mut hasher);
+        if let Some(requests_hash) = self.execution_payload_header.requests_hash {
+            requests_hash.0.hash(&mut hasher);
+        }
 
         // Hash all blob commitments
         for commitment in &self.blob_kzg_commitments {
@@ -390,6 +393,7 @@ mod tests {
             excess_blob_gas: 0,
             prev_randao: B256::from([5u8; 32]),
             fee_recipient: Address::new([6u8; 20]),
+            requests_hash: None,
         }
     }
 

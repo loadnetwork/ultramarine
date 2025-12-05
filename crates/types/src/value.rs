@@ -245,6 +245,7 @@ impl Value {
                     excess_blob_gas: 0,
                     prev_randao: Default::default(),
                     fee_recipient: crate::address::Address::repeat_byte(0),
+                    requests_hash: None,
                 },
                 vec![],
             ),
@@ -337,6 +338,7 @@ impl Protobuf for Value {
                     excess_blob_gas: 0,
                     prev_randao: Default::default(),
                     fee_recipient: crate::address::Address::repeat_byte(0),
+                    requests_hash: None,
                 },
                 vec![],
             )
@@ -384,6 +386,7 @@ mod tests {
             excess_blob_gas: 0,
             prev_randao: B256::from([6u8; 32]),
             fee_recipient: Address::new([7u8; 20]),
+            requests_hash: None,
         }
     }
 

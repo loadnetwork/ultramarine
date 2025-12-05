@@ -32,6 +32,7 @@ use ultramarine_blob_engine::{
     BlobEngineImpl, BlobEngineMetrics, store::rocksdb::RocksDbBlobStore,
 };
 use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
+pub(crate) use ultramarine_test_support::execution_requests::sample_execution_requests_for_height;
 use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
@@ -55,6 +56,7 @@ pub(crate) type TestState = State<TestBlobEngine>;
 /// simulated by reusing the same path while dropping and recreating runtime
 /// components.  The directory is removed automatically when the guard is
 /// dropped at the end of the test.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct TestDirs {
     /// Base temporary directory.
@@ -65,6 +67,7 @@ pub(crate) struct TestDirs {
     pub(crate) blob_store_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl TestDirs {
     /// Create a new set of directories under a unique temporary root.
     pub(crate) fn new() -> Self {
@@ -118,12 +121,14 @@ pub(crate) fn make_genesis(validator_count: usize) -> (Genesis, Vec<ValidatorKey
 }
 
 /// Convenience bundle containing state and metrics handles for a node.
+#[allow(dead_code)]
 pub(crate) struct StateHarness {
     pub state: TestState,
     pub blob_metrics: BlobEngineMetrics,
 }
 
 /// Open the consensus + blob stores for a validator and construct a [`State`].
+#[allow(dead_code)]
 pub(crate) fn build_state(
     dirs: &TestDirs,
     genesis: &Genesis,
@@ -157,6 +162,7 @@ pub(crate) fn build_state(
 ///
 /// Most integration tests need the state to be hydrated; this helper wraps [`build_state`]
 /// and performs the asynchronous initialization steps.
+#[allow(dead_code)]
 pub(crate) async fn build_seeded_state(
     dirs: &TestDirs,
     genesis: &Genesis,
@@ -182,7 +188,7 @@ pub(crate) async fn propose_with_optional_blobs(
 
     let bytes = Bytes::from(payload.as_ssz_bytes());
     let proposed =
-        state.propose_value_with_blobs(height, round, bytes.clone(), payload, bundle).await?;
+        state.propose_value_with_blobs(height, round, bytes.clone(), payload, &[], bundle).await?;
 
     let sidecars = if let Some(bundle) = bundle {
         let (_header, sidecars) = state.prepare_blob_sidecar_parts(&proposed, Some(bundle))?;

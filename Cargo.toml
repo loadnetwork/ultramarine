@@ -8,6 +8,7 @@ members = [
   "crates/consensus",
   "crates/execution",
   "crates/node",
+  "crates/test_support",
   "crates/test",
   "crates/types",
   "crates/utils",
@@ -47,6 +48,7 @@ ultramarine-consensus = { path = "crates/consensus" }
 ultramarine-execution = { path = "crates/execution" }
 ultramarine-node = { path = "crates/node" }
 ultramarine-types = { path = "crates/types" }
+ultramarine-test-support = { path = "crates/test_support" }
 # eth types
 
 alloy-consensus = { version = "1.0.23", default-features = false }

@@ -7008,6 +7008,7 @@ dependencies = [
  "ultramarine-blob-engine",
  "ultramarine-cli",
  "ultramarine-execution",
+ "ultramarine-test-support",
  "ultramarine-types",
  "url",
 ]
@@ -7117,8 +7118,18 @@ dependencies = [
  "ultramarine-consensus",
  "ultramarine-execution",
  "ultramarine-node",
+ "ultramarine-test-support",
  "ultramarine-types",
  "url",
+]
+
+[[package]]
+name = "ultramarine-test-support"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "ultramarine-types",
 ]
 
 [[package]]

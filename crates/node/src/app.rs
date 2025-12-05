@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-use alloy_rpc_types_engine::ExecutionPayloadV3;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
@@ -173,6 +172,11 @@ pub async fn run(
                             }
                         };
 
+                        let execution_requests = state
+                            .get_execution_requests(height, proposal_round)
+                            .await
+                            .unwrap_or_default();
+
                         // Fetch blob metadata so we can rebuild headers deterministically
                         let blob_metadata = match state
                             .load_blob_metadata_for_round(height, proposal_round)
@@ -262,6 +266,7 @@ pub async fn run(
                                     height,
                                     round,
                                     proposal_bytes.clone(),
+                                    execution_requests.clone(),
                                 )
                                 .await
                             {
@@ -319,6 +324,7 @@ pub async fn run(
                             locally_proposed_value,
                             proposal_bytes,
                             restream_blob_sidecars.as_deref(),
+                            &execution_requests,
                             Some(address), // Explicit proposer for restreaming
                         ) {
                             info!(%height, %round, "Restreaming proposal part: {stream_message:?}");
@@ -594,8 +600,10 @@ pub async fn run(
                         // Get round from certificate
                         let round = decided_value.certificate.round;
 
-                        // Attempt to retrieve execution payload bytes
+                        // Attempt to retrieve execution payload bytes and execution requests
                         let payload_bytes = state.get_block_data(height, round).await;
+                        let execution_requests =
+                            state.get_execution_requests(height, round).await.unwrap_or_default();
 
                         // Attempt to retrieve blob sidecars
                         let blob_sidecars_result = state.blob_engine().get_for_import(height).await;
@@ -614,6 +622,7 @@ pub async fn run(
                                     value: decided_value.value.clone(),
                                     execution_payload_ssz: payload,
                                     blob_sidecars: blobs,
+                                    execution_requests: execution_requests.clone(),
                                 }
                             }
                             (Some(payload), Ok(_blobs)) => {
@@ -628,6 +637,7 @@ pub async fn run(
                                     value: decided_value.value.clone(),
                                     execution_payload_ssz: payload,
                                     blob_sidecars: vec![],
+                                    execution_requests: execution_requests.clone(),
                                 }
                             }
                             _ => {
@@ -691,10 +701,12 @@ async fn handle_get_value(
     let (execution_payload, blobs_bundle) =
         execution_layer.generate_block_with_blobs(&latest_block).await?;
 
+    let execution_requests = execution_payload.execution_requests.clone();
+
     let blob_count = blobs_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
     debug!("🌈 Got execution payload with {} blobs", blob_count);
 
-    let bytes = Bytes::from(execution_payload.as_ssz_bytes());
+    let bytes = Bytes::from(execution_payload.payload.as_ssz_bytes());
     debug!("🎁 block size: {:?}, height: {}, blobs: {}", bytes.len(), height, blob_count);
 
     let proposal = state
@@ -702,11 +714,14 @@ async fn handle_get_value(
             height,
             round,
             bytes.clone(),
-            &execution_payload,
+            &execution_payload.payload,
+            &execution_requests,
             blobs_bundle.as_ref(),
         )
         .await?;
-    state.store_undecided_proposal_data(height, round, bytes.clone()).await?;
+    state
+        .store_undecided_proposal_data(height, round, bytes.clone(), execution_requests.clone())
+        .await?;
 
     // DIAGNOSTIC: Confirm proposer stored block data
     info!(
@@ -751,7 +766,9 @@ async fn handle_get_value(
     }
 
     let stream_sidecars = if sidecars.is_empty() { None } else { Some(sidecars.as_slice()) };
-    for stream_message in state.stream_proposal(proposal, bytes, stream_sidecars, None) {
+    for stream_message in
+        state.stream_proposal(proposal, bytes, stream_sidecars, &execution_requests, None)
+    {
         info!(%height, %round, "Streaming proposal part: {stream_message:?}");
         channels
             .network

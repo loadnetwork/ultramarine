@@ -26,6 +26,7 @@ message ExecutionPayloadHeader {
     bytes extra_data = 15;          // up to 32 bytes
     bytes transactions_root = 16;   // 32 bytes
     bytes withdrawals_root = 17;    // 32 bytes
+    bytes requests_hash = 18;       // 32 bytes (Prague EIP-7685)
 }
 
 // KZG commitment (48 bytes)
@@ -119,7 +120,13 @@ message ProposalInit {
 }
 
 message ProposalData {
-    bytes bytes = 1;
+  bytes bytes = 1;
+  repeated bytes execution_requests = 2;
+}
+
+message BlockPayloadRecord {
+  bytes execution_payload_ssz = 1;
+  repeated bytes execution_requests = 2;
 }
 
 // Phase 3: Blob sidecar for streaming blobs separately from execution payload

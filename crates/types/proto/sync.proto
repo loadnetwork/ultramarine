@@ -80,6 +80,7 @@ message FullPackage {
   Value value = 1;                        // Value metadata for consensus
   bytes execution_payload_ssz = 2;        // Raw execution payload bytes
   repeated BlobSidecar blob_sidecars = 3; // Blob sidecars (~131KB each)
+  repeated bytes execution_requests = 4;  // Execution layer requests (EIP-7685)
 }
 
 // Metadata-only fallback (for pruned data)

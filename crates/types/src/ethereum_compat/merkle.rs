@@ -338,6 +338,7 @@ mod tests {
             excess_blob_gas: 0,
             prev_randao: B256::ZERO,
             fee_recipient: Address::repeat_byte(0),
+            requests_hash: None,
         }
     }
 

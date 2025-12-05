@@ -22,7 +22,6 @@ use malachitebft_app_channel::app::{
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest as Sha2Digest, Sha256 as Sha2Sha256};
-use sha3::Digest;
 use ssz::Decode;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -32,7 +31,7 @@ use ultramarine_execution::notifier::ExecutionNotifier;
 use ultramarine_types::{
     address::Address,
     // Phase 3: Import blob types for streaming
-    aliases::{B256, Block, BlockHash},
+    aliases::{B256, Block, BlockHash, Bytes as AlloyBytes},
     blob::{BlobsBundle, KzgCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK},
     // Phase 4: Import three-layer metadata types
     blob_metadata::BlobMetadata,
@@ -58,6 +57,8 @@ use crate::{
     store::{DecidedValue, Store},
     streaming::{PartStreamsMap, ProposalParts},
 };
+
+const MAX_EXECUTION_REQUESTS: usize = 64;
 
 /// Size of randomly generated blocks in bytes
 #[allow(dead_code)]
@@ -367,9 +368,10 @@ where
         height: Height,
         round: Round,
         data: Bytes,
+        execution_requests: Vec<AlloyBytes>,
     ) -> eyre::Result<()> {
         self.store
-            .store_undecided_block_data(height, round, data)
+            .store_undecided_block_data(height, round, data, execution_requests)
             .await
             .map_err(|e| eyre::Report::new(e))
     }
@@ -635,8 +637,13 @@ where
         }
 
         // Re-assemble the proposal from its parts with KZG verification and storage
-        let (value, data, has_blobs) = match self.assemble_and_store_blobs(parts.clone()).await {
-            Ok((value, data, has_blobs)) => (value, data, has_blobs),
+        let (value, data, execution_requests, has_blobs) = match self
+            .assemble_and_store_blobs(parts.clone())
+            .await
+        {
+            Ok((value, data, execution_requests, has_blobs)) => {
+                (value, data, execution_requests, has_blobs)
+            }
             Err(e) => {
                 error!(
                     height = %self.current_height,
@@ -670,7 +677,13 @@ where
         // DIAGNOSTIC: Capture data length before move
         let data_len = data.len();
 
-        self.store_undecided_proposal_data(parts.height, parts.round, data).await?;
+        self.store_undecided_proposal_data(
+            parts.height,
+            parts.round,
+            data.clone(),
+            execution_requests.clone(),
+        )
+        .await?;
 
         // DIAGNOSTIC: Confirm follower stored block data
         info!(
@@ -689,9 +702,10 @@ where
         height: Height,
         round: Round,
         data: Bytes,
+        execution_requests: Vec<AlloyBytes>,
     ) -> eyre::Result<()> {
         self.store
-            .store_undecided_block_data(height, round, data)
+            .store_undecided_block_data(height, round, data, execution_requests)
             .await
             .map_err(|e| eyre::Report::new(e))
     }
@@ -705,8 +719,12 @@ where
         height: Height,
         round: Round,
         data: Bytes,
+        execution_requests: Vec<AlloyBytes>,
     ) -> eyre::Result<()> {
-        self.store_undecided_proposal_data(height, round, data).await
+        Self::validate_execution_requests(&execution_requests)
+            .map_err(|err| eyre::eyre!("Invalid execution requests: {}", err))?;
+
+        self.store_undecided_proposal_data(height, round, data, execution_requests).await
     }
 
     /// Process a [`SyncedValuePackage`] received during state sync.
@@ -723,7 +741,12 @@ where
     ) -> eyre::Result<Option<ProposedValue<LoadContext>>> {
         info!(height = %height, round = %round, "🔵 SYNC: process_synced_package called");
         match package {
-            SyncedValuePackage::Full { value, execution_payload_ssz, blob_sidecars } => {
+            SyncedValuePackage::Full {
+                value,
+                execution_payload_ssz,
+                blob_sidecars,
+                execution_requests,
+            } => {
                 info!(
                     height = %height,
                     round = %round,
@@ -734,7 +757,13 @@ where
 
                 let value_metadata = value.metadata.clone();
 
-                self.store_synced_block_data(height, round, execution_payload_ssz).await?;
+                self.store_synced_block_data(
+                    height,
+                    round,
+                    execution_payload_ssz,
+                    execution_requests,
+                )
+                .await?;
 
                 if !blob_sidecars.is_empty() {
                     let round_i64 = round.as_i64();
@@ -912,6 +941,9 @@ where
         let mut versioned_hashes: Vec<BlockHash> =
             block.body.blob_versioned_hashes_iter().copied().collect();
 
+        let execution_requests =
+            self.get_execution_requests(height, round).await.unwrap_or_default();
+
         if versioned_hashes.is_empty() {
             if let Some(proposal) = self.load_undecided_proposal(height, round).await? {
                 let commitments = proposal.value.metadata.blob_kzg_commitments.clone();
@@ -1008,7 +1040,11 @@ where
         }
 
         let payload_status = notifier
-            .notify_new_block(execution_payload.clone(), versioned_hashes.clone())
+            .notify_new_block(
+                execution_payload.clone(),
+                execution_requests.clone(),
+                versioned_hashes.clone(),
+            )
             .await
             .map_err(|e| eyre::eyre!("Execution layer new_payload failed: {}", e))?;
         if payload_status.is_invalid() {
@@ -1123,6 +1159,14 @@ where
     /// Retrieves a decided block data at the given height
     pub async fn get_block_data(&self, height: Height, round: Round) -> Option<Bytes> {
         self.store.get_block_data(height, round).await.ok().flatten()
+    }
+
+    pub async fn get_execution_requests(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Option<Vec<AlloyBytes>> {
+        self.store.get_execution_requests(height, round).await.ok().flatten()
     }
 
     /// Fetch blob metadata for a specific (height, round), falling back to decided metadata.
@@ -1344,6 +1388,8 @@ where
             // Store block data for decided value
             let block_data =
                 self.store.get_block_data(certificate.height, certificate.round).await?;
+            let execution_requests =
+                self.store.get_execution_requests(certificate.height, certificate.round).await?;
 
             // Log first 32 bytes of block data with JNT prefix
             if let Some(data) = &block_data &&
@@ -1352,8 +1398,8 @@ where
                 info!("Committed block_data[0..32]: {}", hex::encode(&data[..32]));
             }
 
-            if let Some(data) = block_data {
-                self.store.store_decided_block_data(certificate.height, data).await?;
+            if let (Some(data), Some(requests)) = (block_data, execution_requests) {
+                self.store.store_decided_block_data(certificate.height, data, requests).await?;
             }
 
             // Phase 4: Cache update moved above (after BlobMetadata promotion)
@@ -1599,13 +1645,18 @@ where
         round: Round,
         _data: Bytes, // Still stored separately for SSZ reconstruction
         execution_payload: &alloy_rpc_types_engine::ExecutionPayloadV3,
+        execution_requests: &[AlloyBytes],
         blobs_bundle: Option<&BlobsBundle>,
     ) -> eyre::Result<LocallyProposedValue<LoadContext>> {
         assert_eq!(height, self.current_height);
         assert_eq!(round, self.current_round);
 
+        Self::validate_execution_requests(execution_requests)
+            .map_err(|err| eyre::eyre!("Invalid execution requests: {}", err))?;
+
         // Phase 2: Extract lightweight header from execution payload
-        let header = ExecutionPayloadHeader::from_payload(execution_payload);
+        let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(execution_requests));
+        let header = ExecutionPayloadHeader::from_payload(execution_payload, requests_hash);
 
         // Phase 2: Extract KZG commitments from blobs bundle
         let commitments = blobs_bundle.map(|bundle| bundle.commitments.clone()).unwrap_or_default();
@@ -1695,6 +1746,7 @@ where
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
         blob_sidecars: Option<&[BlobSidecar]>,
+        execution_requests: &[AlloyBytes],
         proposer: Option<Address>, // For RestreamProposal support
     ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
         // Use provided proposer (for restreaming) or default to self.address (for our own
@@ -1702,7 +1754,13 @@ where
         let proposer_address = proposer.unwrap_or(self.address);
         let proposal_height = value.height;
         let proposal_round = value.round;
-        let parts = self.make_proposal_parts(value, data, blob_sidecars, proposer_address);
+        let parts = self.make_proposal_parts(
+            value,
+            data,
+            blob_sidecars,
+            execution_requests,
+            proposer_address,
+        );
 
         let stream_id = self.stream_id(proposal_height, proposal_round);
 
@@ -1725,6 +1783,7 @@ where
         value: LocallyProposedValue<LoadContext>,
         data: Bytes,
         blob_sidecars: Option<&[BlobSidecar]>,
+        execution_requests: &[AlloyBytes],
         proposer: Address, // Explicit proposer (for restreaming)
     ) -> Vec<ProposalPart> {
         let mut hasher = sha3::Keccak256::new();
@@ -1744,10 +1803,32 @@ where
 
         // Data (execution payload)
         {
+            let has_requests = !execution_requests.is_empty();
+            let mut attached_requests = !has_requests;
             for chunk in data.chunks(CHUNK_SIZE) {
-                let chunk_data = ProposalData::new(Bytes::copy_from_slice(chunk));
+                let chunk_bytes = Bytes::copy_from_slice(chunk);
+                let chunk_data = if !attached_requests {
+                    attached_requests = true;
+                    ProposalData::with_execution_requests(chunk_bytes, execution_requests.to_vec())
+                } else {
+                    ProposalData::new(chunk_bytes)
+                };
+                if !chunk_data.execution_requests.is_empty() {
+                    Self::hash_execution_requests(&mut hasher, &chunk_data.execution_requests);
+                }
+                hasher.update(chunk_data.bytes.as_ref());
                 parts.push(ProposalPart::Data(chunk_data));
-                hasher.update(chunk);
+            }
+            if !attached_requests {
+                let chunk_data = ProposalData::with_execution_requests(
+                    Bytes::new(),
+                    execution_requests.to_vec(),
+                );
+                if !chunk_data.execution_requests.is_empty() {
+                    Self::hash_execution_requests(&mut hasher, &chunk_data.execution_requests);
+                }
+                hasher.update(chunk_data.bytes.as_ref());
+                parts.push(ProposalPart::Data(chunk_data));
             }
         }
 
@@ -1795,10 +1876,24 @@ where
     async fn assemble_and_store_blobs(
         &self,
         parts: ProposalParts,
-    ) -> Result<(ProposedValue<LoadContext>, Bytes, bool), String> {
+    ) -> Result<(ProposedValue<LoadContext>, Bytes, Vec<AlloyBytes>, bool), String> {
         // Extract execution payload data
         let total_size: usize =
             parts.parts.iter().filter_map(|part| part.as_data()).map(|data| data.bytes.len()).sum();
+
+        let mut execution_requests: Vec<AlloyBytes> = Vec::new();
+        for part in parts.parts.iter().filter_map(|part| part.as_data()) {
+            if !part.execution_requests.is_empty() {
+                if execution_requests.is_empty() {
+                    execution_requests = part.execution_requests.clone();
+                } else if execution_requests != part.execution_requests {
+                    return Err("Mismatched execution requests across proposal chunks".into());
+                }
+            }
+        }
+
+        Self::validate_execution_requests(&execution_requests)
+            .map_err(|err| format!("Invalid execution requests: {}", err))?;
 
         let mut data = Vec::with_capacity(total_size);
         for part in parts.parts.iter().filter_map(|part| part.as_data()) {
@@ -1819,7 +1914,10 @@ where
         let value = if !data.is_empty() {
             match ExecutionPayloadV3::from_ssz_bytes(&data) {
                 Ok(execution_payload) => {
-                    let header = ExecutionPayloadHeader::from_payload(&execution_payload);
+                    let requests_hash =
+                        Some(ExecutionPayloadHeader::compute_requests_hash(&execution_requests));
+                    let header =
+                        ExecutionPayloadHeader::from_payload(&execution_payload, requests_hash);
                     let commitments = if has_blobs {
                         blob_sidecars.iter().map(|sidecar| sidecar.kzg_commitment).collect()
                     } else {
@@ -1930,7 +2028,7 @@ where
             value,
             validity: Validity::Valid,
         };
-        Ok((proposed_value, data, has_blobs))
+        Ok((proposed_value, data, execution_requests, has_blobs))
     }
 
     async fn verify_blob_sidecars(
@@ -2146,6 +2244,48 @@ where
         Ok(signed_header)
     }
 
+    fn hash_execution_requests(hasher: &mut sha3::Keccak256, execution_requests: &[AlloyBytes]) {
+        if execution_requests.is_empty() {
+            return;
+        }
+
+        hasher.update((execution_requests.len() as u32).to_be_bytes());
+        for request in execution_requests {
+            hasher.update((request.len() as u32).to_be_bytes());
+            hasher.update(request.as_ref());
+        }
+    }
+
+    fn validate_execution_requests(requests: &[AlloyBytes]) -> Result<(), String> {
+        if requests.len() > MAX_EXECUTION_REQUESTS {
+            return Err(format!(
+                "execution request count {} exceeds limit of {}",
+                requests.len(),
+                MAX_EXECUTION_REQUESTS
+            ));
+        }
+
+        let mut prev_type: Option<u8> = None;
+        for (idx, request) in requests.iter().enumerate() {
+            if request.len() <= 1 {
+                return Err(format!("execution request {} must include type byte and payload", idx));
+            }
+
+            let request_type = request[0];
+            if let Some(prev) = prev_type {
+                if request_type <= prev {
+                    return Err(format!(
+                        "execution requests must be strictly increasing by type (index {}, prev {}, current {})",
+                        idx, prev, request_type
+                    ));
+                }
+            }
+            prev_type = Some(request_type);
+        }
+
+        Ok(())
+    }
+
     /// Verifies the signature of the proposal.
     /// Returns `Ok(())` if the signature is valid, or an appropriate `SignatureVerificationError`.
     fn verify_proposal_signature(
@@ -2163,6 +2303,7 @@ where
                     hasher.update(init.round.as_i64().to_be_bytes());
                 }
                 ProposalPart::Data(data) => {
+                    Self::hash_execution_requests(&mut hasher, &data.execution_requests);
                     hasher.update(data.bytes.as_ref());
                 }
                 // Phase 3: Include blob sidecars in signature hash

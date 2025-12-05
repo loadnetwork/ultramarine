@@ -160,7 +160,7 @@ async fn store_undecided_proposal_data_uses_explicit_height_round() {
     let payload = NetworkBytes::from_static(b"payload-h1r0");
 
     state
-        .store_undecided_proposal_data(target_height, target_round, payload.clone())
+        .store_undecided_proposal_data(target_height, target_round, payload.clone(), Vec::new())
         .await
         .expect("store payload");
 
@@ -216,7 +216,7 @@ async fn propose_value_with_blobs_stores_blob_metadata() {
     let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
 
     let payload = sample_execution_payload_v3();
-    let expected_header = ExecutionPayloadHeader::from_payload(&payload);
+    let expected_header = ExecutionPayloadHeader::from_payload(&payload, None);
     let bundle = sample_blob_bundle(1);
     let metadata_before =
         state.store.get_blob_metadata_undecided(Height::new(1), Round::new(0)).await.expect("get");
@@ -229,6 +229,7 @@ async fn propose_value_with_blobs_stores_blob_metadata() {
             Round::new(0),
             NetworkBytes::new(),
             &payload,
+            &[],
             Some(&bundle),
         )
         .await
@@ -258,7 +259,7 @@ async fn propose_blobless_value_uses_parent_root_hint() {
     state.last_blob_sidecar_root = parent_root;
 
     let payload = sample_execution_payload_v3();
-    let expected_header = ExecutionPayloadHeader::from_payload(&payload);
+    let expected_header = ExecutionPayloadHeader::from_payload(&payload, None);
 
     state
         .propose_value_with_blobs(
@@ -266,6 +267,7 @@ async fn propose_blobless_value_uses_parent_root_hint() {
             Round::new(0),
             NetworkBytes::new(),
             &payload,
+            &[],
             None,
         )
         .await
@@ -306,7 +308,7 @@ async fn commit_promotes_metadata_and_updates_parent_root() {
 
     state
         .store
-        .store_undecided_block_data(height, round, payload_bytes.clone())
+        .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
         .await
         .expect("store block bytes");
 
@@ -390,7 +392,7 @@ async fn commit_promotes_blobless_metadata_updates_parent_root() {
     state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
     state
         .store
-        .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"))
+        .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"), Vec::new())
         .await
         .expect("store block bytes");
 
@@ -447,7 +449,7 @@ async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
     let height = Height::new(1);
     let round = Round::new(0);
     let payload = sample_execution_payload_v3();
-    let header = ExecutionPayloadHeader::from_payload(&payload);
+    let header = ExecutionPayloadHeader::from_payload(&payload, None);
     let bundle = sample_blob_bundle(1);
 
     let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
@@ -498,7 +500,7 @@ async fn process_decided_certificate_rejects_mismatched_prev_randao() {
     let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
 
     // Store corresponding proposal/metadata so commit() would succeed if prev_randao matched.
-    let header = ExecutionPayloadHeader::from_payload(&payload);
+    let header = ExecutionPayloadHeader::from_payload(&payload, None);
     let value_metadata = ValueMetadata::new(header.clone(), Vec::new());
     let value = Value::new(value_metadata.clone());
     let proposer = state.address.clone();
@@ -520,7 +522,7 @@ async fn process_decided_certificate_rejects_mismatched_prev_randao() {
     state.store.store_undecided_proposal(proposal).await.expect("store proposal");
     state
         .store
-        .store_undecided_block_data(height, round, payload_bytes.clone())
+        .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
         .await
         .expect("store payload bytes");
 
@@ -559,7 +561,12 @@ async fn commit_cleans_failed_round_blob_metadata() {
 
     state
         .store
-        .store_undecided_block_data(height, decided_round, NetworkBytes::from_static(b"block"))
+        .store_undecided_block_data(
+            height,
+            decided_round,
+            NetworkBytes::from_static(b"block"),
+            Vec::new(),
+        )
         .await
         .expect("store block bytes");
 
@@ -622,6 +629,7 @@ async fn multi_round_proposal_isolation_and_commit() {
             Round::new(0),
             NetworkBytes::new(),
             &payload_r0,
+            &[],
             Some(&bundle_r0),
         )
         .await
@@ -637,6 +645,7 @@ async fn multi_round_proposal_isolation_and_commit() {
             Round::new(1),
             NetworkBytes::new(),
             &payload_r1,
+            &[],
             Some(&bundle_r1),
         )
         .await
@@ -674,7 +683,12 @@ async fn multi_round_proposal_isolation_and_commit() {
     state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
     state
         .store
-        .store_undecided_block_data(height, Round::new(1), NetworkBytes::from_static(b"block"))
+        .store_undecided_block_data(
+            height,
+            Round::new(1),
+            NetworkBytes::from_static(b"block"),
+            Vec::new(),
+        )
         .await
         .expect("store block bytes");
 
@@ -744,6 +758,7 @@ async fn propose_at_height_zero_uses_zero_parent_blobbed() {
             Round::new(0),
             NetworkBytes::new(),
             &payload,
+            &[],
             Some(&bundle),
         )
         .await
@@ -776,6 +791,7 @@ async fn propose_at_height_zero_uses_zero_parent_blobless() {
             Round::new(0),
             NetworkBytes::new(),
             &payload,
+            &[],
             None, // blobless
         )
         .await
@@ -816,7 +832,7 @@ async fn commit_fails_fast_if_blob_metadata_missing() {
     state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
     state
         .store
-        .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"))
+        .store_undecided_block_data(height, round, NetworkBytes::from_static(b"block"), Vec::new())
         .await
         .expect("store block bytes");
 
@@ -859,6 +875,7 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
             Round::new(0),
             NetworkBytes::new(),
             &payload_h1,
+            &[],
             Some(&bundle_h1),
         )
         .await
@@ -886,7 +903,12 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
     state.store.store_undecided_proposal(proposal_h1.clone()).await.expect("store p1");
     state
         .store
-        .store_undecided_block_data(Height::new(1), Round::new(0), NetworkBytes::from_static(b"b1"))
+        .store_undecided_block_data(
+            Height::new(1),
+            Round::new(0),
+            NetworkBytes::from_static(b"b1"),
+            Vec::new(),
+        )
         .await
         .expect("store b1");
 
@@ -912,6 +934,7 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
             Round::new(0),
             NetworkBytes::new(),
             &payload_h2,
+            &[],
             None, // blobless
         )
         .await
@@ -929,7 +952,7 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
 
     // Commit height 2
     let value_meta_h2 =
-        ValueMetadata::new(ExecutionPayloadHeader::from_payload(&payload_h2), Vec::new());
+        ValueMetadata::new(ExecutionPayloadHeader::from_payload(&payload_h2, None), Vec::new());
     let value_h2 = Value::new(value_meta_h2.clone());
     let proposal_h2 = ProposedValue {
         height: Height::new(2),
@@ -943,7 +966,12 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
     state.store.store_undecided_proposal(proposal_h2.clone()).await.expect("store p2");
     state
         .store
-        .store_undecided_block_data(Height::new(2), Round::new(0), NetworkBytes::from_static(b"b2"))
+        .store_undecided_block_data(
+            Height::new(2),
+            Round::new(0),
+            NetworkBytes::from_static(b"b2"),
+            Vec::new(),
+        )
         .await
         .expect("store b2");
 
@@ -970,6 +998,7 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
             Round::new(0),
             NetworkBytes::new(),
             &payload_h3,
+            &[],
             Some(&bundle_h3),
         )
         .await
@@ -1045,7 +1074,7 @@ async fn proposer_rotation_updates_metadata_hint() {
         engine.verify_and_store(height, round.as_i64(), &sidecars).await.expect("store blobs");
         state
             .store
-            .store_undecided_block_data(height, round, payload_bytes.clone())
+            .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
             .await
             .expect("store payload");
 
@@ -1057,6 +1086,7 @@ async fn proposer_rotation_updates_metadata_hint() {
                     value: proposed.value.clone(),
                     execution_payload_ssz: payload_bytes.clone(),
                     blob_sidecars: sidecars.clone(),
+                    execution_requests: Vec::new(),
                 };
                 other_state
                     .process_synced_package(

@@ -14,6 +14,7 @@ ultramarine-execution.workspace = true
 ultramarine-types.workspace = true
 ultramarine-cli.workspace = true
 ultramarine-node.workspace = true
+ultramarine-test-support.workspace = true
 
 malachitebft-app-channel.workspace = true
 malachitebft-app.workspace = true
