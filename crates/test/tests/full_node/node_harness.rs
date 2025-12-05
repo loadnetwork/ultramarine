@@ -87,7 +87,9 @@ use ultramarine_types::{
     blob_metadata::BlobMetadata,
     codec::proto::ProtobufCodec,
     context::LoadContext,
-    engine_api::{ExecutionBlock, ExecutionPayloadHeader, JsonExecutionPayloadV3},
+    engine_api::{
+        ExecutionBlock, ExecutionPayloadHeader, JsonExecutionPayloadV3, load_prev_randao,
+    },
     genesis::Genesis,
     height::Height,
     signing::{Ed25519Provider, PrivateKey},
@@ -264,6 +266,7 @@ async fn full_node_blob_quorum_roundtrip() -> Result<()> {
         .node_count(3)
         .run(|network| {
             Box::pin(async move {
+                network.assert_prev_randao_constant().await?;
                 // Advance one extra height to ensure blobs at height 1 and 2 are flushed to disk
                 network.wait_for_nodes_at(&[0, 1, 2], Height::new(3)).await?;
 
@@ -291,6 +294,7 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
         .node_count(4)
         .run(|network| {
             Box::pin(async move {
+                network.assert_prev_randao_constant().await?;
                 // Stop node 0 IMMEDIATELY before it can participate in any consensus.
                 // This ensures it has NO WAL entries for height 1 or 2, forcing pure ValueSync.
                 // Eliminates the race condition where node 0 might partially enter height 2.
@@ -305,8 +309,8 @@ async fn full_node_validator_restart_recovers() -> Result<()> {
                 network.start_node(0).await?;
 
                 // Wait for all nodes to reach height 3.
-                // For node 0 to reach height 3, it must have successfully ValueSync'd heights 1 and 2,
-                // which means the blob parent root cache was properly updated.
+                // For node 0 to reach height 3, it must have successfully ValueSync'd heights 1 and
+                // 2, which means the blob parent root cache was properly updated.
                 // If the cache wasn't updated, validation of height 3 proposals would fail.
                 network.wait_for_nodes_at(&[0, 1, 2, 3], Height::new(3)).await?;
 
@@ -331,17 +335,20 @@ async fn full_node_restart_mid_height() -> Result<()> {
         .node_count(4)
         .run(|network| {
             Box::pin(async move {
+                network.assert_prev_randao_constant().await?;
                 // Drive height 1 to completion with all nodes participating.
                 network.wait_all(Height::new(1)).await?;
 
-                // Wait for node 1 to begin height 2, then stop it immediately to ensure a mid-height crash.
+                // Wait for node 1 to begin height 2, then stop it immediately to ensure a
+                // mid-height crash.
                 network.wait_for_started_height(1, Height::new(2)).await?;
                 network.stop_node(1).await?;
 
                 // Nodes 0, 2, and 3 form quorum (3/4) and can advance while node 1 is offline.
                 network.wait_for_nodes_at(&[0, 2, 3], Height::new(3)).await?;
 
-                // Bring node 1 back online; it must ValueSync the missing heights to participate at height 3.
+                // Bring node 1 back online; it must ValueSync the missing heights to participate at
+                // height 3.
                 network.start_node(1).await?;
 
                 // All nodes should eventually reach height 3.
@@ -1557,7 +1564,11 @@ impl NetworkHarness {
         }
     }
 
-    async fn wait_for_started_height(&self, node_index: usize, target_height: Height) -> Result<()> {
+    async fn wait_for_started_height(
+        &self,
+        node_index: usize,
+        target_height: Height,
+    ) -> Result<()> {
         let node =
             self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
         let mut rx = node.event_rx.lock().await;
@@ -1642,10 +1653,8 @@ impl NetworkHarness {
     }
 
     async fn wait_for_store_height(&self, node_index: usize, target_height: Height) -> Result<()> {
-        let node = self
-            .nodes
-            .get(node_index)
-            .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
+        let node =
+            self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
 
         let start = Instant::now();
         loop {
@@ -1654,8 +1663,7 @@ impl NetworkHarness {
             let store_dst = snapshot_dir.path().join("store.db");
             copy_path(&store_src, &store_dst)
                 .wrap_err("snapshot store for wait_for_store_height")?;
-            let store = Store::open(store_dst, DbMetrics::new())
-                .wrap_err("open store snapshot")?;
+            let store = Store::open(store_dst, DbMetrics::new()).wrap_err("open store snapshot")?;
             let decided = store.max_decided_value_height().await;
             if let Some(height) = decided {
                 if height >= target_height {
@@ -1792,6 +1800,43 @@ impl NetworkHarness {
             "node {node_index} expected {expected_blobs} rebuilt sidecars at height {height}, found {}",
             rebuilt.len()
         );
+        Ok(())
+    }
+
+    /// Verifies that all execution blocks and payloads use Load Network's constant prev_randao
+    /// (0x01).
+    ///
+    /// This end-to-end check ensures the entire FCU → getPayload → newPayload flow maintains
+    /// the constant contract throughout:
+    /// 1. Stub's latest block has the constant (received via newPayloadV3)
+    /// 2. All pending payloads have the constant (generated via getPayloadV3)
+    ///
+    /// Called by integration tests to catch any regression where prev_randao drifts from the
+    /// constant value due to EL bugs, test fixture inconsistencies, or network attacks.
+    ///
+    /// See: FINAL_PLAN.md "Engine API Contract" for the architectural rationale.
+    async fn assert_prev_randao_constant(&self) -> Result<()> {
+        for (idx, node) in self.nodes.iter().enumerate() {
+            let guard = node.stub_state.lock().await;
+            let latest = guard.latest_block.prev_randao;
+            eyre::ensure!(
+                latest == load_prev_randao(),
+                "node {idx} stub latest prev_randao mismatch: expected {:?}, got {:?}",
+                load_prev_randao(),
+                latest
+            );
+
+            // Also verify any pending payloads in the stub honor the constant.
+            for (_pid_bytes, (payload, _bundle)) in guard.pending.iter() {
+                let actual = payload.payload_inner.payload_inner.prev_randao;
+                eyre::ensure!(
+                    actual == load_prev_randao(),
+                    "node {idx} pending payload prev_randao mismatch: expected {:?}, got {:?}",
+                    load_prev_randao(),
+                    actual
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -1965,7 +2010,7 @@ fn default_execution_block() -> ExecutionBlock {
         block_number: 0,
         parent_hash: B256::ZERO,
         timestamp: 0,
-        prev_randao: B256::from([1u8; 32]),
+        prev_randao: load_prev_randao(),
     }
 }
 
@@ -2161,7 +2206,7 @@ async fn handle_new_payload(req: &RpcRequest, state: Arc<TokioMutex<StubState>>)
         block_number: payload.block_number,
         parent_hash: payload.parent_hash,
         timestamp: payload.timestamp,
-        prev_randao: payload.prev_randao,
+        prev_randao: load_prev_randao(),
     };
 
     Ok(json!({
@@ -2241,7 +2286,7 @@ fn execution_block_from_metadata(metadata: &BlobMetadata) -> ExecutionBlock {
         block_number: header.block_number,
         parent_hash: header.parent_hash,
         timestamp: header.timestamp,
-        prev_randao: header.prev_randao,
+        prev_randao: load_prev_randao(),
     }
 }
 

@@ -203,6 +203,21 @@ jobs:
           retention-days: 7
 
   # ----------------------------------------------------------------------------
+  # EL Smoke (load-reth image pull + basic run)
+  # ----------------------------------------------------------------------------
+  el-smoke:
+    name: EL Smoke (load-reth image)
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    steps:
+      - name: Pull load-reth image
+        run: docker pull docker.io/loadnetwork/load-reth:v0.1.2
+
+      - name: Run load-reth --help (smoke)
+        run: docker run --rm docker.io/loadnetwork/load-reth:v0.1.2 --help
+
+  # ----------------------------------------------------------------------------
   # Coverage (main or PRs with [coverage] in title)
   # ----------------------------------------------------------------------------
   coverage:

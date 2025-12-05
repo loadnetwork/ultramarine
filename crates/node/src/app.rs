@@ -18,7 +18,10 @@ use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::State;
 use ultramarine_execution::client::ExecutionClient;
 use ultramarine_types::{
-    context::LoadContext, engine_api::ExecutionBlock, height::Height, sync::SyncedValuePackage,
+    context::LoadContext,
+    engine_api::{ExecutionBlock, load_prev_randao},
+    height::Height,
+    sync::SyncedValuePackage,
 };
 
 pub async fn run(
@@ -404,7 +407,7 @@ pub async fn run(
                             block_number: prev_header.block_number,
                             parent_hash: prev_header.parent_hash,
                             timestamp: prev_header.timestamp,
-                            prev_randao: prev_header.prev_randao,
+                            prev_randao: load_prev_randao(),
                         };
                         let needs_realignment = state
                             .latest_block
@@ -413,8 +416,7 @@ pub async fn run(
                         if needs_realignment {
                             debug!(
                                 "[DIAG] Realigning latest execution block to height {} ({:?})",
-                                prev_height,
-                                prev_block.block_hash
+                                prev_height, prev_block.block_hash
                             );
                             state.latest_block = Some(prev_block);
                         }
@@ -458,8 +460,7 @@ pub async fn run(
                 if block_bytes.is_empty() {
                     error!(
                         "[DIAG] ❌ Empty block bytes for decided value at height {} round {}; requesting restart",
-                        height,
-                        round
+                        height, round
                     );
                     let _ = reply.send(Next::Restart(height, state.get_validator_set().clone()));
                     continue;
@@ -492,7 +493,8 @@ pub async fn run(
                             "[DIAG] ❌ process_decided_certificate failed for height {}: {}; requesting restart",
                             height, e
                         );
-                        let _ = reply.send(Next::Restart(height, state.get_validator_set().clone()));
+                        let _ =
+                            reply.send(Next::Restart(height, state.get_validator_set().clone()));
                         continue;
                     }
                 }

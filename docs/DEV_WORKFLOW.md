@@ -78,6 +78,12 @@ Notes:
 - “nil” in Tendermint is a vote target, not a proposal. The app must not fabricate an “empty” proposal; silence on timeout is correct.
 - For sync, values should be stored before replying; this is being hardened.
 
+### Genesis and EL State
+
+- `cargo run --bin ultramarine-utils -- genesis` writes `assets/genesis.json`. This file is the **only** genesis the EL should use when running alongside Ultramarine. The `etc/load-dev-genesis.json` inside `load-reth/` is only for standalone EL testing.
+- `make all` / `make all-ipc` automatically call the new `reset-el-state` helper, which wipes `rethdata/*` and `ipc/*` before bringing up Docker. This ensures load-reth starts from the freshly generated genesis and prevents block-hash mismatches.
+- If you regenerate the genesis manually, rerun `make reset-el-state` (or `make clean-net`/`clean-net-ipc`) before restarting the stack so every EL node rebuilds its database from the updated file.
+
 ## Observability & Dashboards
 
 - Grafana: http://localhost:3000
@@ -362,7 +368,7 @@ Recommended cadence:
 ## Troubleshooting
 
 - Engine capabilities check fails:
-  - Ensure reth is running and JWT secret is readable at `./assets/jwtsecret`.
+  - Ensure load-reth is running and JWT secret is readable at `./assets/jwtsecret`.
 
 - Missing or empty block bytes on `Decided`:
   - Indicates undecided proposal bytes weren’t stored (e.g., sync path). The app now avoids panics and returns a clear error; restart node or re‑run the round.

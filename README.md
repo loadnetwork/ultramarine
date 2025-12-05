@@ -75,6 +75,11 @@ make stop
 # Clean the testnet data (use clean-net-ipc for the IPC variant)
 make clean-net
 ```
+
+The EL defaults to the published Load image `docker.io/loadnetwork/load-reth:v0.1.2`. Override with `LOAD_RETH_IMAGE=<ref>` if you need a different tag.
+
+> **Genesis alignment:** every `make all` / `make all-ipc` regenerates `assets/genesis.json` and automatically wipes the EL datadirs (`rethdata/*`, `ipc/*`) via `make reset-el-state`. This keeps load-reth and Ultramarine on the exact same genesis. Do not point the EL at `etc/load-dev-genesis.json` when running with Ultramarine—the `assets/` file is the single source of truth. If you update the genesis manually, run `make reset-el-state` before restarting the stack so the EL database is rebuilt from the new config.
+
 For more details on the testnet setup, see `docs/DEV_WORKFLOW.md`.
 
 ### Blob Testing (EIP-4844)

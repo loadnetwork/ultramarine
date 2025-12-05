@@ -1,9 +1,9 @@
 services:
-  reth0:
-    image: ghcr.io/paradigmxyz/reth:v1.4.1
-    container_name: reth0
+  load-reth0:
+    image: ${LOAD_RETH_IMAGE:-docker.io/loadnetwork/load-reth:v0.1.2}
+    container_name: load-reth0
     volumes:
-      - ./rethdata/0:/data/reth/execution-data
+      - ./rethdata/0:/data/load-reth
       - ./assets:/assets
     ports:
       - "8545:8545"
@@ -19,7 +19,7 @@ services:
       - "node"
       - "-vvvvv"
       - "-d"
-      - "--datadir=/data/reth/execution-data"
+      - "--datadir=/data/load-reth"
       - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
@@ -40,11 +40,11 @@ services:
       # - "--blobpool.pricebump=1"
       # - "--txpool.pending-max-count=50000" # default=10000
       # - "--txpool.queued-max-count=50000" # default=10000
-  reth1:
-    image: ghcr.io/paradigmxyz/reth:v1.4.1
-    container_name: reth1
+  load-reth1:
+    image: ${LOAD_RETH_IMAGE:-docker.io/loadnetwork/load-reth:v0.1.2}
+    container_name: load-reth1
     volumes:
-      - ./rethdata/1:/data/reth/execution-data
+      - ./rethdata/1:/data/load-reth
       - ./assets:/assets
     ports:
       - "18545:8545"
@@ -60,7 +60,7 @@ services:
       - "node"
       - "-vvvvv"
       - "-d"
-      - "--datadir=/data/reth/execution-data"
+      - "--datadir=/data/load-reth"
       - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"
@@ -81,11 +81,11 @@ services:
       # - "--blobpool.pricebump=1"
       # - "--txpool.pending-max-count=50000" # default=10000
       # - "--txpool.queued-max-count=50000" # default=10000
-  reth2:
-    image: ghcr.io/paradigmxyz/reth:v1.4.1
-    container_name: reth2
+  load-reth2:
+    image: ${LOAD_RETH_IMAGE:-docker.io/loadnetwork/load-reth:v0.1.2}
+    container_name: load-reth2
     volumes:
-      - ./rethdata/2:/data/reth/execution-data
+      - ./rethdata/2:/data/load-reth
       - ./assets:/assets
     ports:
       - "28545:8545"
@@ -101,7 +101,7 @@ services:
       - "node"
       - "-vvvvv"
       - "-d"
-      - "--datadir=/data/reth/execution-data"
+      - "--datadir=/data/load-reth"
       - "--chain=/assets/genesis.json"
       - "--http"
       - "--http.port=8545"

@@ -8,6 +8,7 @@ use malachitebft_app_channel::app::types::{
     LocallyProposedValue,
     core::{CommitCertificate, Round, Validity},
 };
+use ssz::Encode;
 use support::*;
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_types::{
@@ -483,6 +484,54 @@ async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
             "inclusion proof should be populated"
         );
     }
+}
+
+#[tokio::test]
+async fn process_decided_certificate_rejects_mismatched_prev_randao() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    let height = Height::new(1);
+    let round = Round::new(0);
+
+    let mut payload = sample_execution_payload_v3();
+    payload.payload_inner.payload_inner.prev_randao = B256::from([9u8; 32]);
+    let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
+
+    // Store corresponding proposal/metadata so commit() would succeed if prev_randao matched.
+    let header = ExecutionPayloadHeader::from_payload(&payload);
+    let value_metadata = ValueMetadata::new(header.clone(), Vec::new());
+    let value = Value::new(value_metadata.clone());
+    let proposer = state.address.clone();
+    let proposal = ProposedValue {
+        height,
+        round,
+        valid_round: Round::Nil,
+        proposer,
+        value: value.clone(),
+        validity: Validity::Valid,
+    };
+
+    let blobless_metadata = BlobMetadata::blobless(height, B256::ZERO, &header, Some(0));
+    state
+        .store
+        .put_blob_metadata_undecided(height, round, &blobless_metadata)
+        .await
+        .expect("store metadata");
+    state.store.store_undecided_proposal(proposal).await.expect("store proposal");
+    state
+        .store
+        .store_undecided_block_data(height, round, payload_bytes.clone())
+        .await
+        .expect("store payload bytes");
+
+    let certificate =
+        CommitCertificate { height, round, value_id: value.id(), commit_signatures: Vec::new() };
+    let mut notifier = MockExecutionNotifier::new();
+    let err = state
+        .process_decided_certificate(&certificate, payload_bytes, &mut notifier)
+        .await
+        .expect_err("prev_randao mismatch must be rejected");
+    assert!(err.to_string().contains("prev_randao mismatch"), "unexpected error: {err}");
 }
 
 #[tokio::test]

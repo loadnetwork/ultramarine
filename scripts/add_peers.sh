@@ -33,34 +33,34 @@ wait_http() {
 }
 
 # Resolve container IPs for enode substitution
-RETH0_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' reth0)
-RETH1_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' reth1)
-RETH2_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' reth2)
+LOAD_RETH0_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' load-reth0)
+LOAD_RETH1_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' load-reth1)
+LOAD_RETH2_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' load-reth2)
 
 # Wait for HTTP RPC to accept connections (IPC mode still exposes HTTP for admin namespace)
-wait_http http://127.0.0.1:8545 reth0
-wait_http http://127.0.0.1:18545 reth1
-wait_http http://127.0.0.1:28545 reth2
+wait_http http://127.0.0.1:8545 load-reth0
+wait_http http://127.0.0.1:18545 load-reth1
+wait_http http://127.0.0.1:28545 load-reth2
 
 # Fetch enodes and rewrite 127.0.0.1 to container IPs
-RETH0_ENODE=$(cast rpc --rpc-url http://127.0.0.1:8545 admin_nodeInfo | jq -r .enode | sed "s/127\.0\.0\.1/${RETH0_IP}/")
-RETH1_ENODE=$(cast rpc --rpc-url http://127.0.0.1:18545 admin_nodeInfo | jq -r .enode | sed "s/127\.0\.0\.1/${RETH1_IP}/" )
-RETH2_ENODE=$(cast rpc --rpc-url http://127.0.0.1:28545 admin_nodeInfo | jq -r .enode | sed "s/127\.0\.0\.1/${RETH2_IP}/" )
+LOAD_RETH0_ENODE=$(cast rpc --rpc-url http://127.0.0.1:8545 admin_nodeInfo | jq -r .enode | sed "s/127\.0\.0\.1/${LOAD_RETH0_IP}/")
+LOAD_RETH1_ENODE=$(cast rpc --rpc-url http://127.0.0.1:18545 admin_nodeInfo | jq -r .enode | sed "s/127\.0\.0\.1/${LOAD_RETH1_IP}/" )
+LOAD_RETH2_ENODE=$(cast rpc --rpc-url http://127.0.0.1:28545 admin_nodeInfo | jq -r .enode | sed "s/127\.0\.0\.1/${LOAD_RETH2_IP}/" )
 
-echo "RETH0_ENODE: ${RETH0_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:8545 admin_addTrustedPeer "${RETH1_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:8545 admin_addTrustedPeer "${RETH2_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:8545 admin_addPeer "${RETH1_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:8545 admin_addPeer "${RETH2_ENODE}"
+echo "LOAD_RETH0_ENODE: ${LOAD_RETH0_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:8545 admin_addTrustedPeer "${LOAD_RETH1_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:8545 admin_addTrustedPeer "${LOAD_RETH2_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:8545 admin_addPeer "${LOAD_RETH1_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:8545 admin_addPeer "${LOAD_RETH2_ENODE}"
 
-echo "RETH1_ENODE: ${RETH1_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:18545 admin_addTrustedPeer "${RETH0_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:18545 admin_addTrustedPeer "${RETH2_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:18545 admin_addPeer "${RETH0_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:18545 admin_addPeer "${RETH2_ENODE}"
+echo "LOAD_RETH1_ENODE: ${LOAD_RETH1_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:18545 admin_addTrustedPeer "${LOAD_RETH0_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:18545 admin_addTrustedPeer "${LOAD_RETH2_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:18545 admin_addPeer "${LOAD_RETH0_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:18545 admin_addPeer "${LOAD_RETH2_ENODE}"
 
-echo "RETH2_ENODE: ${RETH2_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:28545 admin_addTrustedPeer "${RETH0_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:28545 admin_addTrustedPeer "${RETH1_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:28545 admin_addPeer "${RETH0_ENODE}"
-cast rpc --rpc-url http://127.0.0.1:28545 admin_addPeer "${RETH1_ENODE}"
+echo "LOAD_RETH2_ENODE: ${LOAD_RETH2_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:28545 admin_addTrustedPeer "${LOAD_RETH0_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:28545 admin_addTrustedPeer "${LOAD_RETH1_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:28545 admin_addPeer "${LOAD_RETH0_ENODE}"
+cast rpc --rpc-url http://127.0.0.1:28545 admin_addPeer "${LOAD_RETH1_ENODE}"

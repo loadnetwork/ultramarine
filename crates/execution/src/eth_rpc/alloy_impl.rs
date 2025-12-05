@@ -14,7 +14,7 @@ use alloy_rpc_types_txpool::{TxpoolInspect, TxpoolStatus};
 use alloy_transport_http::Http;
 use async_trait::async_trait;
 use color_eyre::eyre;
-use ultramarine_types::engine_api::ExecutionBlock;
+use ultramarine_types::engine_api::{ExecutionBlock, load_prev_randao};
 use url::Url;
 
 use super::EthRpc;
@@ -72,7 +72,9 @@ impl EthRpc for AlloyEthRpc {
     }
 
     /// Fetches a block by its number or tag (e.g., "latest").
-    /// Corresponds to the `eth_getBlockByNumber` RPC method.
+    ///
+    /// For the Load chain we intentionally normalize `prev_randao` to the
+    /// canonical constant so applications never assume entropy.
     async fn get_block_by_number(
         &self,
         block_number: BlockNumberOrTag,
@@ -88,7 +90,12 @@ impl EthRpc for AlloyEthRpc {
             block_number: block.header.number,
             block_hash: block.header.hash,
             parent_hash: block.header.parent_hash,
-            prev_randao: block.header.mix_hash,
+            // Normalize prev_randao to Load Network's constant (0x01).
+            // The EL should already have this value (we sent it in PayloadAttributes),
+            // but we normalize here for defensive consistency. This ensures that even
+            // if the EL returns a different value (e.g., due to a bug), our consensus
+            // state remains consistent with the constant contract.
+            prev_randao: load_prev_randao(),
             timestamp: block.header.timestamp,
         });
         Ok(execution_block)

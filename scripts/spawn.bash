@@ -99,7 +99,7 @@ for NODE in $(seq 0 $((NODES_COUNT - 1))); do
         done
         if [[ ! -S "$ENGINE_IPC_PATH" ]]; then
             echo "[Node $NODE] ERROR: Engine IPC socket not found after ${ENGINE_IPC_TIMEOUT}s: $ENGINE_IPC_PATH"
-            echo "[Node $NODE] Hint: ensure Docker stack (compose.ipc.yaml) is running and reth has started."
+            echo "[Node $NODE] Hint: ensure Docker stack (compose.ipc.yaml) is running and load-reth has started."
             exit 1
         fi
         echo "[Node $NODE] Found Engine IPC socket. Launching node..."

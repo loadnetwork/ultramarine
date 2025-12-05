@@ -14,6 +14,61 @@ use crate::{
     // blob::KzgCommitment,
 };
 
+/// Returns the canonical `prev_randao` value for Load Network blocks.
+///
+/// Load Network uses a **constant value of `0x01`** (Arbitrum pattern) for all blocks
+/// to explicitly signal that block-based randomness is unavailable.
+///
+/// ## Design Rationale
+///
+/// - **Identity property**: `1 × x = x` means accidental use in multiplication is harmless
+/// - **Fail-fast**: Smart contracts expecting randomness break obviously in testing
+/// - **Battle-tested**: Arbitrum uses `1`, zkSync Era uses `250000000000000000` (both constants)
+/// - **Non-manipulatable**: Unlike Ethereum's RANDAO where validators can bias ~1 bit
+/// - **BFT compatible**: BFT consensus (Tendermint) makes interactive RANDAO impossible
+///
+/// ## Enforcement
+///
+/// This constant is enforced at multiple layers:
+/// - **Generation**: CL always sends this constant in `PayloadAttributes`
+///   ([`client.rs:190,359`](../../execution/src/client.rs))
+/// - **Validation**: CL consensus rejects payloads with mismatched `prev_randao`
+///   ([`state.rs:1026`](../../consensus/src/state.rs))
+/// - **Normalization**: CL's RPC client returns this constant when fetching blocks
+///   ([`alloy_impl.rs:95`](../../execution/src/eth_rpc/alloy_impl.rs))
+/// - **Testing**: Integration tests verify all payloads use this constant
+///   ([`node_harness.rs:1803`](../../test/tests/full_node/node_harness.rs))
+///
+/// ## For Smart Contract Developers
+///
+/// ⚠️ **Do not use `block.prevrandao` for security-critical randomness on ANY chain**
+/// (including Ethereum - validators can manipulate it). Use proper randomness sources:
+/// - Chainlink VRF
+/// - API3 QRNG
+/// - Commit-reveal schemes
+/// - drand (distributed randomness beacon)
+///
+/// ## See Also
+///
+/// - [FINAL_PLAN.md Engine API Contract](../../../docs/FINAL_PLAN.md#engine-api-contract-cl--el)
+/// - [load-reth-design.md Section
+///   2](../../../../load-el-design/load-reth-design.md#2-functional-requirements)
+pub fn load_prev_randao() -> B256 {
+    B256::from(U256::from(1u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_prev_randao;
+    use crate::aliases::{B256, U256};
+
+    #[test]
+    fn load_prev_randao_is_constant_one() {
+        let expected = B256::from(U256::from(1u64));
+        assert_eq!(load_prev_randao(), expected);
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonRequestBody<'a> {

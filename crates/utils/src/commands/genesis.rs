@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use alloy_genesis::{ChainConfig, Genesis, GenesisAccount};
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use chrono::NaiveDate;
 use clap::Parser;
@@ -20,7 +20,7 @@ pub struct GenesisCmd {
     #[clap(long, default_value = "./assets/genesis.json")]
     output: String,
     /// Chain ID for the genesis configuration
-    #[clap(long, default_value = "1")]
+    #[clap(long, default_value = "16383")]
     chain_id: u64,
 }
 
@@ -83,6 +83,8 @@ pub(crate) fn generate_genesis(genesis_file: &str, chain_id: u64) -> Result<()> 
             london_block: Some(0),
             shanghai_time: Some(0),
             cancun_time: Some(0),
+            prague_time: Some(99999999999), // to test that it affects the chain
+            merge_netsplit_block: Some(0),
             terminal_total_difficulty: Some(U256::ZERO),
             terminal_total_difficulty_passed: true,
             ..Default::default()
@@ -91,7 +93,17 @@ pub(crate) fn generate_genesis(genesis_file: &str, chain_id: u64) -> Result<()> 
         ..Default::default()
     }
     .with_gas_limit(30_000_000)
-    .with_timestamp(valid_cancun_timestamp);
+    .with_timestamp(0)
+    .with_extra_data(Bytes::from_static(b"Load Network Dev"))
+    .with_difficulty(U256::ZERO)
+    .with_mix_hash(B256::ZERO)
+    .with_coinbase(Address::ZERO)
+    .with_base_fee(Some(7));
+
+    // Align optional header fields with a clean genesis
+    let mut genesis = genesis;
+    genesis.parent_hash = Some(B256::ZERO);
+    genesis.number = Some(0);
 
     // Create parent directories if they don't exist
     if let Some(parent) = std::path::Path::new(genesis_file).parent() {
