@@ -14,6 +14,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use thiserror::Error;
 use tracing::error;
 use ultramarine_types::{
+    aliases::Bytes as AlloyBytes,
     blob_metadata::BlobMetadata,
     codec::{proto as codec, proto::ProtobufCodec},
     consensus_block_metadata::ConsensusBlockMetadata,
@@ -22,6 +23,43 @@ use ultramarine_types::{
     proto,
     value::Value,
 };
+
+#[derive(Clone, Debug)]
+struct BlockPayloadRecord {
+    execution_payload_ssz: Bytes,
+    execution_requests: Vec<AlloyBytes>,
+}
+
+impl BlockPayloadRecord {
+    fn new(execution_payload_ssz: Bytes, execution_requests: Vec<AlloyBytes>) -> Self {
+        Self { execution_payload_ssz, execution_requests }
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        let proto_record = proto::BlockPayloadRecord {
+            execution_payload_ssz: self.execution_payload_ssz.clone(),
+            execution_requests: self.execution_requests.iter().cloned().map(|req| req.0).collect(),
+        };
+        Ok(proto_record.encode_to_vec())
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
+        match proto::BlockPayloadRecord::decode(bytes) {
+            Ok(record) => Ok(Self {
+                execution_payload_ssz: record.execution_payload_ssz,
+                execution_requests: record
+                    .execution_requests
+                    .into_iter()
+                    .map(AlloyBytes::from)
+                    .collect(),
+            }),
+            Err(_) => Ok(Self {
+                execution_payload_ssz: Bytes::copy_from_slice(bytes),
+                execution_requests: Vec::new(),
+            }),
+        }
+    }
+}
 
 mod keys;
 use keys::{HeightKey, UndecidedValueKey};
@@ -351,7 +389,11 @@ impl Db {
         Ok(())
     }
 
-    fn get_block_data(&self, height: Height, round: Round) -> Result<Option<Bytes>, StoreError> {
+    fn load_block_payload_record(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<Option<BlockPayloadRecord>, StoreError> {
         let start = Instant::now();
 
         let tx = self.db.begin_read()?;
@@ -361,10 +403,11 @@ impl Db {
         if let Some(data) = undecided_table.get(&(height, round))? {
             let bytes = data.value();
             let read_bytes = bytes.len() as u64;
+            let record = BlockPayloadRecord::decode(&bytes)?;
             self.metrics.observe_read_time(start.elapsed());
             self.metrics.add_read_bytes(read_bytes);
             self.metrics.add_key_read_bytes((size_of::<Height>() + size_of::<Round>()) as u64);
-            return Ok(Some(Bytes::copy_from_slice(&bytes)));
+            return Ok(Some(record));
         }
 
         // Then try decided block data
@@ -372,32 +415,47 @@ impl Db {
         if let Some(data) = decided_table.get(&height)? {
             let bytes = data.value();
             let read_bytes = bytes.len() as u64;
+            let record = BlockPayloadRecord::decode(&bytes)?;
             self.metrics.observe_read_time(start.elapsed());
             self.metrics.add_read_bytes(read_bytes);
             self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
-            return Ok(Some(Bytes::copy_from_slice(&bytes)));
+            return Ok(Some(record));
         }
 
         self.metrics.observe_read_time(start.elapsed());
         Ok(None)
     }
 
+    fn get_block_data(&self, height: Height, round: Round) -> Result<Option<Bytes>, StoreError> {
+        self.load_block_payload_record(height, round)
+            .map(|opt| opt.map(|record| record.execution_payload_ssz))
+    }
+
+    fn get_execution_requests(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<Option<Vec<AlloyBytes>>, StoreError> {
+        self.load_block_payload_record(height, round)
+            .map(|opt| opt.map(|record| record.execution_requests))
+    }
+
     fn insert_undecided_block_data(
         &self,
         height: Height,
         round: Round,
-        data: Bytes,
+        record: BlockPayloadRecord,
     ) -> Result<(), StoreError> {
         let start = Instant::now();
-        let write_bytes = data.len() as u64;
+        let encoded = record.encode().map_err(StoreError::Protobuf)?;
+        let write_bytes = encoded.len() as u64;
 
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(UNDECIDED_BLOCK_DATA_TABLE)?;
             let key = (height, round);
-            // Only insert if no value exists at this key
             if table.get(&key)?.is_none() {
-                table.insert(key, data.to_vec())?;
+                table.insert(key, encoded)?;
             }
         }
         tx.commit()?;
@@ -408,16 +466,20 @@ impl Db {
         Ok(())
     }
 
-    fn insert_decided_block_data(&self, height: Height, data: Bytes) -> Result<(), StoreError> {
+    fn insert_decided_block_data(
+        &self,
+        height: Height,
+        record: BlockPayloadRecord,
+    ) -> Result<(), StoreError> {
         let start = Instant::now();
-        let write_bytes = data.len() as u64;
+        let encoded = record.encode().map_err(StoreError::Protobuf)?;
+        let write_bytes = encoded.len() as u64;
 
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(DECIDED_BLOCK_DATA_TABLE)?;
-            // Only insert if no value exists at this key
             if table.get(&height)?.is_none() {
-                table.insert(height, data.to_vec())?;
+                table.insert(height, encoded)?;
             }
         }
         tx.commit()?;
@@ -881,24 +943,44 @@ impl Store {
         tokio::task::spawn_blocking(move || db.get_block_data(height, round)).await?
     }
 
+    pub async fn get_execution_requests(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<Option<Vec<AlloyBytes>>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.get_execution_requests(height, round)).await?
+    }
+
     pub async fn store_undecided_block_data(
         &self,
         height: Height,
         round: Round,
         data: Bytes,
+        execution_requests: Vec<AlloyBytes>,
     ) -> Result<(), StoreError> {
         let db = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || db.insert_undecided_block_data(height, round, data))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            db.insert_undecided_block_data(
+                height,
+                round,
+                BlockPayloadRecord::new(data, execution_requests),
+            )
+        })
+        .await?
     }
 
     pub async fn store_decided_block_data(
         &self,
         height: Height,
         data: Bytes,
+        execution_requests: Vec<AlloyBytes>,
     ) -> Result<(), StoreError> {
         let db = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || db.insert_decided_block_data(height, data)).await?
+        tokio::task::spawn_blocking(move || {
+            db.insert_decided_block_data(height, BlockPayloadRecord::new(data, execution_requests))
+        })
+        .await?
     }
 
     // ========================================================================
@@ -1068,6 +1150,7 @@ mod tests {
             extra_data: AlloyBytes::new(),
             transactions_root: B256::from([7u8; 32]),
             withdrawals_root: B256::from([8u8; 32]),
+            requests_hash: None,
         }
     }
 

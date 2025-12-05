@@ -285,9 +285,20 @@ pub struct ExecutionPayloadHeader {
 
     /// Address receiving transaction fees
     pub fee_recipient: Address,
+
+    /// Hash of execution-layer requests (EIP-7685). `None` pre-Prague.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_hash: Option<B256>,
 }
 
 impl ExecutionPayloadHeader {
+    /// Compute the execution requests hash (EIP-7685) from opaque request payloads.
+    pub fn compute_requests_hash(requests: &[Bytes]) -> B256 {
+        use alloy_eips::eip7685::{Requests, RequestsOrHash};
+        let reqs = Requests::new(requests.to_vec());
+        RequestsOrHash::Requests(reqs).requests_hash()
+    }
+
     /// Extract a header from a full `ExecutionPayloadV3`
     ///
     /// This creates the lightweight header that will be included in `ValueMetadata`
@@ -304,7 +315,7 @@ impl ExecutionPayloadHeader {
     /// // Create metadata for consensus voting
     /// let metadata = ValueMetadata::new(header, blobs_bundle.commitments);
     /// ```
-    pub fn from_payload(payload: &ExecutionPayloadV3) -> Self {
+    pub fn from_payload(payload: &ExecutionPayloadV3, requests_hash: Option<B256>) -> Self {
         let inner = &payload.payload_inner.payload_inner;
 
         let extra_data = inner.extra_data.clone();
@@ -330,6 +341,7 @@ impl ExecutionPayloadHeader {
             excess_blob_gas: payload.excess_blob_gas,
             prev_randao: inner.prev_randao,
             fee_recipient: inner.fee_recipient.into(),
+            requests_hash,
         }
     }
 
@@ -353,7 +365,8 @@ impl ExecutionPayloadHeader {
         8 + // blob_gas_used
         8 + // excess_blob_gas
         32 + // prev_randao
-        20 // fee_recipient
+        20 + // fee_recipient
+        self.requests_hash.map(|_| 32).unwrap_or(0)
     }
 }
 
@@ -417,6 +430,11 @@ impl Protobuf for ExecutionPayloadHeader {
             excess_blob_gas: proto.excess_blob_gas,
             prev_randao: bytes_to_b256(&proto.prev_randao)?,
             fee_recipient: Address::from_proto(proto::Address { value: proto.fee_recipient })?,
+            requests_hash: if proto.requests_hash.is_empty() {
+                None
+            } else {
+                Some(bytes_to_b256(&proto.requests_hash)?)
+            },
         })
     }
 
@@ -439,6 +457,10 @@ impl Protobuf for ExecutionPayloadHeader {
             excess_blob_gas: self.excess_blob_gas,
             prev_randao: self.prev_randao.0.to_vec().into(),
             fee_recipient: self.fee_recipient.to_proto()?.value,
+            requests_hash: self
+                .requests_hash
+                .map(|hash| hash.0.to_vec().into())
+                .unwrap_or_default(),
         })
     }
 }

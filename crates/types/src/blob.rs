@@ -243,8 +243,6 @@ impl Blob {
 /// // Used in ValueMetadata to keep consensus messages small
 /// let commitments = vec![commitment];
 /// ```
-use tree_hash_derive::TreeHash;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KzgCommitment(
     /// The 48-byte commitment data (compressed BLS12-381 G1 point).

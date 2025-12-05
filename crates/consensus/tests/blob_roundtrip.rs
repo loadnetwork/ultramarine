@@ -57,7 +57,7 @@ async fn blob_roundtrip() -> color_eyre::Result<()> {
     assert_eq!(stored.len(), sidecars.len(), "undecided blob count");
 
     // Store block bytes for commit flow.
-    node.state.store_undecided_block_data(height, round, payload_bytes.clone()).await?;
+    node.state.store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new()).await?;
 
     // Commit the block and promote blobs.
     let certificate = CommitCertificate {

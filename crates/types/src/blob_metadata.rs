@@ -209,6 +209,7 @@ impl BlobMetadata {
             excess_blob_gas: 0,
             prev_randao: B256::ZERO,
             fee_recipient: Address::repeat_byte(0),
+            requests_hash: None,
         };
 
         Self::blobless(Height::new(0), B256::ZERO, &genesis_header, Some(0))
@@ -389,6 +390,7 @@ mod tests {
             extra_data: Bytes::new(),
             transactions_root: B256::from([6u8; 32]),
             withdrawals_root: B256::from([7u8; 32]),
+            requests_hash: None,
         }
     }
 

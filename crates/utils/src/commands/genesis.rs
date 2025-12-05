@@ -83,7 +83,7 @@ pub(crate) fn generate_genesis(genesis_file: &str, chain_id: u64) -> Result<()> 
             london_block: Some(0),
             shanghai_time: Some(0),
             cancun_time: Some(0),
-            prague_time: Some(99999999999), // to test that it affects the chain
+            prague_time: Some(0),
             merge_netsplit_block: Some(0),
             terminal_total_difficulty: Some(U256::ZERO),
             terminal_total_difficulty_passed: true,

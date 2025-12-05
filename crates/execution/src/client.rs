@@ -14,14 +14,14 @@ use color_eyre::eyre;
 use tracing::{debug, info};
 use ultramarine_types::{
     address::Address,
-    aliases::{B256, BlockHash},
+    aliases::{B256, BlockHash, Bytes},
     blob::BlobsBundle,
     engine_api::load_prev_randao,
 };
 
 use crate::{
     config::{EngineApiEndpoint, ExecutionConfig},
-    engine_api::{EngineApi, client::EngineApiClient},
+    engine_api::{EngineApi, ExecutionPayloadResult, client::EngineApiClient},
     eth_rpc::{EthRpc, alloy_impl::AlloyEthRpc},
     transport::{http::HttpTransport, ipc::IpcTransport},
 };
@@ -96,12 +96,12 @@ impl ExecutionClient {
     pub async fn check_capabilities(&self) -> eyre::Result<()> {
         match self.engine.exchange_capabilities().await {
             Ok(cap) => {
-                if !cap.forkchoice_updated_v3 || !cap.get_payload_v3 || !cap.new_payload_v3 {
+                if !cap.forkchoice_updated_v3 || !cap.get_payload_v4 || !cap.new_payload_v4 {
                     tracing::error!(
                         ?cap,
                         "Execution client missing required Engine API capabilities"
                     );
-                    return Err(eyre::eyre!("Engine does not required methods!"));
+                    return Err(eyre::eyre!("Execution client lacks required Engine API methods"));
                 }
                 tracing::info!("Execution client capabilities verified: OK");
                 Ok(())
@@ -177,7 +177,7 @@ impl ExecutionClient {
     pub async fn generate_block(
         &self,
         latest_block: &ultramarine_types::engine_api::ExecutionBlock,
-    ) -> eyre::Result<ExecutionPayloadV3> {
+    ) -> eyre::Result<ExecutionPayloadResult> {
         debug!("🟠 generate_block on top of {:?}", latest_block);
         let block_hash = latest_block.block_hash;
         let payload_attributes = PayloadAttributes {
@@ -240,15 +240,17 @@ impl ExecutionClient {
                     ));
                 };
                 // See how payload is constructed: https://github.com/ethereum/consensus-specs/blob/v1.1.5/specs/merge/validator.md#block-proposal
-                let payload = self.engine.get_payload(payload_id).await?;
+                let payload_result = self.engine.get_payload(payload_id).await?;
+                let payload_inner = &payload_result.payload.payload_inner.payload_inner;
                 tracing::info!(
-                    block_hash = ?payload.payload_inner.payload_inner.block_hash,
-                    parent_hash = ?payload.payload_inner.payload_inner.parent_hash,
-                    block_number = payload.payload_inner.payload_inner.block_number,
-                    txs = payload.payload_inner.payload_inner.transactions.len(),
+                    block_hash = ?payload_inner.block_hash,
+                    parent_hash = ?payload_inner.parent_hash,
+                    block_number = payload_inner.block_number,
+                    txs = payload_inner.transactions.len(),
+                    execution_requests = payload_result.execution_requests.len(),
                     "Received execution payload from EL"
                 );
-                Ok(payload)
+                Ok(payload_result)
             }
             // TODO: A production-ready client must handle all possible statuses gracefully.
             // This is critical for node stability and to prevent incorrect block proposals.
@@ -345,7 +347,7 @@ impl ExecutionClient {
     pub async fn generate_block_with_blobs(
         &self,
         latest_block: &ultramarine_types::engine_api::ExecutionBlock,
-    ) -> eyre::Result<(ExecutionPayloadV3, Option<BlobsBundle>)> {
+    ) -> eyre::Result<(ExecutionPayloadResult, Option<BlobsBundle>)> {
         debug!("🟠 generate_block_with_blobs on top of {:?}", latest_block);
 
         let block_hash = latest_block.block_hash;
@@ -417,22 +419,24 @@ impl ExecutionClient {
                 // 2. Parses the full ExecutionPayloadEnvelopeV3 including blobs_bundle
                 // 3. Converts Alloy's BlobsBundleV1 to our BlobsBundle type
                 // 4. Validates the bundle structure
-                let (payload, blob_bundle) = self.engine.get_payload_with_blobs(payload_id).await?;
+                let (payload_result, blob_bundle) =
+                    self.engine.get_payload_with_blobs(payload_id).await?;
 
-                // Log block details including blob information
                 let blob_count = blob_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
+                let payload_inner = &payload_result.payload.payload_inner.payload_inner;
                 tracing::info!(
-                    block_hash = ?payload.payload_inner.payload_inner.block_hash,
-                    parent_hash = ?payload.payload_inner.payload_inner.parent_hash,
-                    block_number = payload.payload_inner.payload_inner.block_number,
-                    txs = payload.payload_inner.payload_inner.transactions.len(),
-                    blob_gas_used = payload.blob_gas_used,
-                    excess_blob_gas = payload.excess_blob_gas,
+                    block_hash = ?payload_inner.block_hash,
+                    parent_hash = ?payload_inner.parent_hash,
+                    block_number = payload_inner.block_number,
+                    txs = payload_inner.transactions.len(),
+                    blob_gas_used = payload_result.payload.blob_gas_used,
+                    excess_blob_gas = payload_result.payload.excess_blob_gas,
                     blob_count = blob_count,
+                    execution_requests = payload_result.execution_requests.len(),
                     "Received execution payload with blobs from EL"
                 );
 
-                Ok((payload, blob_bundle))
+                Ok((payload_result, blob_bundle))
             }
             // TODO: A production-ready client must handle all possible statuses gracefully.
             // See comments in generate_block() for full status handling requirements.
@@ -449,6 +453,7 @@ impl ExecutionClient {
     pub async fn notify_new_block(
         &self,
         execution_payload: ExecutionPayloadV3,
+        execution_requests: Vec<Bytes>,
         versioned_hashes: Vec<B256>,
     ) -> eyre::Result<PayloadStatus> {
         let parent_block_hash = execution_payload.payload_inner.payload_inner.parent_hash;
@@ -458,7 +463,9 @@ impl ExecutionClient {
             number = execution_payload.payload_inner.payload_inner.block_number,
             "Submitting new payload to EL"
         );
-        self.engine.new_payload(execution_payload, versioned_hashes, parent_block_hash).await
+        self.engine
+            .new_payload(execution_payload, versioned_hashes, parent_block_hash, execution_requests)
+            .await
     }
 
     /// Returns the duration since the unix epoch.
@@ -480,9 +487,10 @@ impl<'a> crate::notifier::ExecutionNotifier for ExecutionClientNotifier<'a> {
     async fn notify_new_block(
         &mut self,
         payload: ExecutionPayloadV3,
+        execution_requests: Vec<Bytes>,
         versioned_hashes: Vec<BlockHash>,
     ) -> color_eyre::Result<PayloadStatus> {
-        self.client.notify_new_block(payload, versioned_hashes).await
+        self.client.notify_new_block(payload, execution_requests, versioned_hashes).await
     }
 
     async fn set_latest_forkchoice_state(

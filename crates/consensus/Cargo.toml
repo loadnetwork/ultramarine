@@ -45,6 +45,7 @@ tree_hash.workspace = true
 
 [dev-dependencies]
 ultramarine-execution.workspace = true
+ultramarine-test-support.workspace = true
 
 malachitebft-app-channel.workspace = true
 

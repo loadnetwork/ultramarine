@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, Once},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 macro_rules! debug_log {
@@ -34,11 +34,11 @@ fn record_event(log: &Arc<Mutex<Vec<String>>>, entry: String) {
 }
 
 use alloy_consensus::Blob as AlloyBlob;
-use alloy_eips::eip4844::Bytes48;
+use alloy_eips::{eip4844::Bytes48, eip7685::Requests};
 use alloy_primitives::{B256, U256, hex};
 use alloy_rpc_types_engine::{
-    BlobsBundleV1, ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState,
-    PayloadAttributes,
+    BlobsBundleV1, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4, ExecutionPayloadV3,
+    ForkchoiceState, PayloadAttributes,
 };
 use bytes::Bytes;
 use color_eyre::{
@@ -52,7 +52,7 @@ use malachitebft_app::{
 };
 use malachitebft_app_channel::app::{
     events::RxEvent,
-    streaming::StreamMessage,
+    streaming::{StreamContent, StreamMessage},
     types::{
         LocallyProposedValue,
         core::{CommitCertificate, Round},
@@ -83,6 +83,7 @@ use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
 use ultramarine_node::node::{App, Handle};
 use ultramarine_types::{
     address::Address,
+    aliases::Bytes as AlloyBytes,
     blob::{BYTES_PER_BLOB, BlobsBundle, KzgCommitment},
     blob_metadata::BlobMetadata,
     codec::proto::ProtobufCodec,
@@ -92,6 +93,7 @@ use ultramarine_types::{
     },
     genesis::Genesis,
     height::Height,
+    proposal_part::ProposalPart,
     signing::{Ed25519Provider, PrivateKey},
     sync::SyncedValuePackage,
     value::Value as StateValue,
@@ -105,7 +107,7 @@ use blob_common::{
     make_genesis,
     mocks::{MockEngineApi, MockExecutionNotifier},
     payload_id, propose_with_optional_blobs, sample_blob_bundle,
-    sample_execution_payload_v3_for_height, test_peer_id,
+    sample_execution_payload_v3_for_height, sample_execution_requests_for_height, test_peer_id,
 };
 use tracing_subscriber::{EnvFilter, filter::Directive};
 use ultramarine_execution::EngineApi;
@@ -471,7 +473,12 @@ async fn full_node_restart_multi_height_rebuilds() -> Result<()> {
                     }
 
                     node_state
-                        .store_undecided_block_data(height, Round::new(0), bytes.clone())
+                        .store_undecided_block_data(
+                            height,
+                            Round::new(0),
+                            bytes.clone(),
+                            Vec::new(),
+                        )
                         .await?;
 
                     let certificate = CommitCertificate {
@@ -530,7 +537,7 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
                     sample_execution_payload_v3_for_height(height, Some(&raw_bundles[1])),
                 ];
 
-                let mut mock_engine = MockEngineApi::default();
+                let mut mock_engine = MockEngineApi::default().with_default_execution_requests();
                 for ((payload_id, payload), bundle) in
                     payload_ids.iter().zip(raw_payloads.iter()).zip(raw_bundles.iter())
                 {
@@ -549,8 +556,9 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
 
                 for (idx, round) in rounds.iter().enumerate() {
                     let payload_id = payload_ids[idx];
-                    let (payload, maybe_bundle) =
+                    let (payload_result, maybe_bundle) =
                         mock_engine.get_payload_with_blobs(payload_id).await?;
+                    let payload = payload_result.payload;
                     let bundle = maybe_bundle.expect("bundle should exist");
                     let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
                         &mut proposer,
@@ -569,7 +577,12 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
                             .await?;
                     }
                     proposer
-                        .store_undecided_block_data(height, *round, payload_bytes.clone())
+                        .store_undecided_block_data(
+                            height,
+                            *round,
+                            payload_bytes.clone(),
+                            Vec::new(),
+                        )
                         .await?;
 
                     total_success += sidecars.len();
@@ -584,6 +597,7 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
                             proposed,
                             payload_bytes.clone(),
                             Some(sidecars.as_slice()),
+                            &[],
                             None,
                         )
                         .collect();
@@ -712,14 +726,13 @@ async fn full_node_restream_multi_validator() -> Result<()> {
                 let bundle = sample_blob_bundle(1);
                 let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
                 let payload_id = payload_id(3);
-                let mock_engine = MockEngineApi::default().with_payload(
-                    payload_id,
-                    payload.clone(),
-                    Some(bundle.clone()),
-                );
+                let mock_engine = MockEngineApi::default()
+                    .with_default_execution_requests()
+                    .with_payload(payload_id, payload.clone(), Some(bundle.clone()));
 
-                let (payload, maybe_bundle) =
+                let (payload_result, maybe_bundle) =
                     mock_engine.get_payload_with_blobs(payload_id).await?;
+                let payload = payload_result.payload;
                 let bundle = maybe_bundle.expect("bundle");
 
                 let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
@@ -737,10 +750,18 @@ async fn full_node_restream_multi_validator() -> Result<()> {
                         .verify_and_store(height, round.as_i64(), &sidecars)
                         .await?;
                 }
-                proposer.store_undecided_block_data(height, round, payload_bytes.clone()).await?;
+                proposer
+                    .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
+                    .await?;
 
                 let stream_messages: Vec<StreamMessage<_>> = proposer
-                    .stream_proposal(proposed.clone(), payload_bytes.clone(), Some(&sidecars), None)
+                    .stream_proposal(
+                        proposed.clone(),
+                        payload_bytes.clone(),
+                        Some(&sidecars),
+                        &[],
+                        None,
+                    )
                     .collect();
 
                 let mut received = None;
@@ -843,7 +864,7 @@ async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
                 fake_commitment_bytes[0] ^= 0xFF;
                 let fake_commitment = KzgCommitment(fake_commitment_bytes);
 
-                let header = ExecutionPayloadHeader::from_payload(&payload);
+                let header = ExecutionPayloadHeader::from_payload(&payload, None);
                 let fake_metadata = ValueMetadata::new(header, vec![fake_commitment]);
                 let fake_value = StateValue::new(fake_metadata);
 
@@ -851,6 +872,7 @@ async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
                     value: fake_value,
                     execution_payload_ssz: payload_bytes.clone(),
                     blob_sidecars: sidecars.clone(),
+                    execution_requests: Vec::new(),
                 };
 
                 let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
@@ -919,7 +941,7 @@ async fn full_node_value_sync_inclusion_proof_failure() -> Result<()> {
                 let mut sidecars = maybe_sidecars.expect("sidecars expected");
                 sidecars[0].kzg_commitment_inclusion_proof.clear();
 
-                let header = ExecutionPayloadHeader::from_payload(&payload);
+                let header = ExecutionPayloadHeader::from_payload(&payload, None);
                 let metadata = ValueMetadata::new(header, bundle.commitments.clone());
                 let value = StateValue::new(metadata);
 
@@ -927,6 +949,7 @@ async fn full_node_value_sync_inclusion_proof_failure() -> Result<()> {
                     value,
                     execution_payload_ssz: payload_bytes.clone(),
                     blob_sidecars: sidecars.clone(),
+                    execution_requests: Vec::new(),
                 };
 
                 let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
@@ -1013,7 +1036,7 @@ async fn commit_block_for_sequence(
     if let Some(sidecars) = maybe_sidecars.as_ref() {
         state.blob_engine().verify_and_store(height, round.as_i64(), sidecars).await?;
     }
-    state.store_undecided_block_data(height, round, bytes.clone()).await?;
+    state.store_undecided_block_data(height, round, bytes.clone(), Vec::new()).await?;
     let certificate = CommitCertificate {
         height,
         round,
@@ -1023,6 +1046,216 @@ async fn commit_block_for_sequence(
     let mut notifier = MockExecutionNotifier::default();
     state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_execution_requests_roundtrip() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                network.stop_node(1).await?;
+
+                let (mut proposer, _) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+                let (mut follower, follower_metrics) = {
+                    let node = network.node_ref(1)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let payload = sample_execution_payload_v3_for_height(height, None);
+                let payload_bytes = Bytes::from(payload.as_ssz_bytes());
+                let execution_requests = sample_execution_requests_for_height(height);
+
+                let proposed = proposer
+                    .propose_value_with_blobs(
+                        height,
+                        round,
+                        payload_bytes.clone(),
+                        &payload,
+                        &execution_requests,
+                        None,
+                    )
+                    .await?;
+                proposer
+                    .store_undecided_block_data(
+                        height,
+                        round,
+                        payload_bytes.clone(),
+                        execution_requests.clone(),
+                    )
+                    .await?;
+
+                let stream_messages: Vec<_> = proposer
+                    .stream_proposal(
+                        proposed.clone(),
+                        payload_bytes.clone(),
+                        None,
+                        &execution_requests,
+                        None,
+                    )
+                    .collect();
+
+                let mut received_value = None;
+                for msg in stream_messages {
+                    if let Some(value) =
+                        follower.received_proposal_part(test_peer_id(1), msg).await?
+                    {
+                        received_value = Some(value);
+                    }
+                }
+                let received_value = received_value.expect("follower reconstructed proposal");
+
+                let certificate = CommitCertificate {
+                    height,
+                    round,
+                    value_id: received_value.value.id(),
+                    commit_signatures: Vec::new(),
+                };
+
+                let follower_payload = follower
+                    .get_block_data(height, round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut follower_notifier = MockExecutionNotifier::default();
+                follower
+                    .process_decided_certificate(
+                        &certificate,
+                        follower_payload,
+                        &mut follower_notifier,
+                    )
+                    .await?;
+
+                assert_eq!(
+                    follower.get_execution_requests(height, round).await,
+                    Some(execution_requests.clone())
+                );
+                let calls = follower_notifier.new_block_calls.lock().unwrap().clone();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].1, execution_requests);
+
+                let proposer_payload = proposer
+                    .get_block_data(height, round)
+                    .await
+                    .unwrap_or_else(|| payload_bytes.clone());
+                let mut proposer_notifier = MockExecutionNotifier::default();
+                proposer
+                    .process_decided_certificate(
+                        &certificate,
+                        proposer_payload,
+                        &mut proposer_notifier,
+                    )
+                    .await?;
+                let proposer_calls = proposer_notifier.new_block_calls.lock().unwrap().clone();
+                assert_eq!(proposer_calls.len(), 1);
+                assert_eq!(proposer_calls[0].1, execution_requests);
+
+                let metrics = follower_metrics.snapshot();
+                assert_eq!(metrics.verifications_failure, 0);
+
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_execution_requests_signature_protection() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                network.stop_node(1).await?;
+
+                let (mut proposer, _) = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+                let (mut follower, _) = {
+                    let node = network.node_ref(1)?;
+                    open_state_ready_with_metrics(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let payload = sample_execution_payload_v3_for_height(height, None);
+                let payload_bytes = Bytes::from(payload.as_ssz_bytes());
+                let execution_requests = sample_execution_requests_for_height(height);
+
+                let proposed = proposer
+                    .propose_value_with_blobs(
+                        height,
+                        round,
+                        payload_bytes.clone(),
+                        &payload,
+                        &execution_requests,
+                        None,
+                    )
+                    .await?;
+                proposer
+                    .store_undecided_block_data(
+                        height,
+                        round,
+                        payload_bytes.clone(),
+                        execution_requests.clone(),
+                    )
+                    .await?;
+
+                let mut stream_messages: Vec<_> = proposer
+                    .stream_proposal(
+                        proposed.clone(),
+                        payload_bytes.clone(),
+                        None,
+                        &execution_requests,
+                        None,
+                    )
+                    .collect();
+
+                let mut tampered = false;
+                for msg in &mut stream_messages {
+                    if let StreamContent::Data(ProposalPart::Data(data)) = &mut msg.content {
+                        if data.has_execution_requests() {
+                            data.execution_requests =
+                                vec![AlloyBytes::copy_from_slice(&[0x02, 0xFF, 0xEE])];
+                            tampered = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(tampered, "expected to tamper with execution requests");
+
+                for msg in stream_messages {
+                    let result = follower.received_proposal_part(test_peer_id(1), msg).await?;
+                    assert!(result.is_none(), "tampered proposal should be rejected");
+                }
+
+                assert!(
+                    follower.get_block_data(height, round).await.is_none(),
+                    "tampered proposal should not be stored"
+                );
+                assert!(
+                    follower.get_execution_requests(height, round).await.is_none(),
+                    "tampered proposal should not persist execution requests"
+                );
+
+                Ok(())
+            })
+        })
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1060,7 +1293,9 @@ async fn full_node_blob_pruning_retains_recent_heights() -> Result<()> {
                     .await?;
                     let sidecars = sidecars.expect("sidecars expected");
                     state.blob_engine().verify_and_store(height, round.as_i64(), &sidecars).await?;
-                    state.store_undecided_block_data(height, round, bytes.clone()).await?;
+                    state
+                        .store_undecided_block_data(height, round, bytes.clone(), Vec::new())
+                        .await?;
                     let certificate = CommitCertificate {
                         height,
                         round,
@@ -1124,7 +1359,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                 let bundle = sample_blob_bundle(1);
                 let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
                 let payload_bytes = Bytes::from(payload.as_ssz_bytes());
-                let header = ExecutionPayloadHeader::from_payload(&payload);
+                let header = ExecutionPayloadHeader::from_payload(&payload, None);
                 let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
                 let value = StateValue::new(value_metadata.clone());
 
@@ -1136,6 +1371,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                     value: value.clone(),
                     execution_payload_ssz: payload_bytes.clone(),
                     blob_sidecars: sidecars.clone(),
+                    execution_requests: Vec::new(),
                 };
                 let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
                 let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
@@ -1210,11 +1446,12 @@ async fn full_node_value_sync_proof_failure() -> Result<()> {
 
                 let package = SyncedValuePackage::Full {
                     value: StateValue::new(ValueMetadata::new(
-                        ExecutionPayloadHeader::from_payload(&payload),
+                        ExecutionPayloadHeader::from_payload(&payload, None),
                         bundle.commitments.clone(),
                     )),
                     execution_payload_ssz: payload_bytes.clone(),
                     blob_sidecars: sidecars.clone(),
+                    execution_requests: Vec::new(),
                 };
                 let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
                 let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
@@ -1308,11 +1545,6 @@ impl NodeProcess {
         sleep(Duration::from_millis(200)).await;
         self.running = false;
         Ok(())
-    }
-
-    async fn restart(&mut self) -> Result<()> {
-        self.stop().await?;
-        self.start().await
     }
 
     async fn align_stub_head(&self, latest_block: ExecutionBlock) {
@@ -1628,14 +1860,6 @@ impl NetworkHarness {
         Ok(())
     }
 
-    async fn restart_node(&mut self, node_index: usize) -> Result<()> {
-        let node = self
-            .nodes
-            .get_mut(node_index)
-            .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
-        node.restart().await
-    }
-
     async fn stop_node(&mut self, node_index: usize) -> Result<()> {
         let node = self
             .nodes
@@ -1650,35 +1874,6 @@ impl NetworkHarness {
             .get_mut(node_index)
             .ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
         node.start().await
-    }
-
-    async fn wait_for_store_height(&self, node_index: usize, target_height: Height) -> Result<()> {
-        let node =
-            self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
-
-        let start = Instant::now();
-        loop {
-            let snapshot_dir = tempfile::tempdir().wrap_err("create store snapshot dir")?;
-            let store_src = node.home.path().join("store.db");
-            let store_dst = snapshot_dir.path().join("store.db");
-            copy_path(&store_src, &store_dst)
-                .wrap_err("snapshot store for wait_for_store_height")?;
-            let store = Store::open(store_dst, DbMetrics::new()).wrap_err("open store snapshot")?;
-            let decided = store.max_decided_value_height().await;
-            if let Some(height) = decided {
-                if height >= target_height {
-                    return Ok(());
-                }
-            }
-            if start.elapsed() > TEST_TIMEOUT {
-                return Err(eyre::eyre!(
-                    "node {node_index} store did not reach height {} (max_decided={:?})",
-                    target_height,
-                    decided
-                ));
-            }
-            sleep(Duration::from_millis(200)).await;
-        }
     }
 
     fn node_ref(&self, node_index: usize) -> Result<&NodeProcess> {
@@ -1827,7 +2022,7 @@ impl NetworkHarness {
             );
 
             // Also verify any pending payloads in the stub honor the constant.
-            for (_pid_bytes, (payload, _bundle)) in guard.pending.iter() {
+            for (_pid_bytes, (payload, _bundle, _requests)) in guard.pending.iter() {
                 let actual = payload.payload_inner.payload_inner.prev_randao;
                 eyre::ensure!(
                     actual == load_prev_randao(),
@@ -1940,7 +2135,6 @@ async fn open_state_ready_with_metrics(
 /// Minimal Engine + Eth RPC stub that satisfies the calls Ultramarine makes during tests.
 struct EngineRpcStub {
     addr: SocketAddr,
-    state: Arc<TokioMutex<StubState>>,
     handle: JoinHandle<()>,
 }
 
@@ -1970,7 +2164,7 @@ impl EngineRpcStub {
             }
         });
 
-        Ok(Self { addr, state, handle })
+        Ok(Self { addr, handle })
     }
 
     fn url(&self) -> url::Url {
@@ -1985,7 +2179,7 @@ impl EngineRpcStub {
 struct StubState {
     latest_block: ExecutionBlock,
     next_payload_id: u64,
-    pending: HashMap<[u8; 8], (ExecutionPayloadV3, Option<BlobsBundle>)>,
+    pending: HashMap<[u8; 8], (ExecutionPayloadV3, Option<BlobsBundle>, Vec<AlloyBytes>)>,
     payload_plan: Option<PayloadPlan>,
 }
 
@@ -2030,7 +2224,8 @@ fn height_from_block_hash(hash: B256) -> Option<u64> {
 
 #[derive(Deserialize)]
 struct RpcRequest {
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     method: String,
     #[serde(default)]
     params: Value,
@@ -2101,12 +2296,20 @@ fn parse_content_length(headers: &[u8]) -> Result<usize> {
 async fn handle_rpc(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) -> Result<Value> {
     debug_log!("rpc {}", req.method);
     match req.method.as_str() {
-        "engine_exchangeCapabilities" => {
-            Ok(json!(["engine_newPayloadV3", "engine_forkchoiceUpdatedV3", "engine_getPayloadV3"]))
-        }
-        "engine_forkchoiceUpdatedV3" => handle_forkchoice(req, state).await,
-        "engine_getPayloadV3" => handle_get_payload(req, state).await,
-        "engine_newPayloadV3" => handle_new_payload(req, state).await,
+        "engine_exchangeCapabilities" => Ok(json!([
+            "engine_newPayloadV3",
+            "engine_newPayloadV4",
+            "engine_forkchoiceUpdatedV3",
+            "engine_forkchoiceUpdatedV4",
+            "engine_getPayloadV3",
+            "engine_getPayloadV4"
+        ])),
+        "engine_forkchoiceUpdatedV3" => handle_forkchoice(req, state.clone()).await,
+        "engine_forkchoiceUpdatedV4" => handle_forkchoice(req, state.clone()).await,
+        "engine_getPayloadV3" => handle_get_payload(req, state.clone(), false).await,
+        "engine_getPayloadV4" => handle_get_payload(req, state.clone(), true).await,
+        "engine_newPayloadV3" => handle_new_payload(req, state.clone(), false).await,
+        "engine_newPayloadV4" => handle_new_payload(req, state.clone(), true).await,
         "eth_getBlockByNumber" => handle_get_block(state).await,
         "eth_blockNumber" => {
             let state = state.lock().await;
@@ -2151,9 +2354,13 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
         let blob_count = guard.blob_count_for_height(next_height);
         let bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
         let payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
+        let execution_requests = sample_execution_requests_for_height(next_height);
         let payload_id = guard.next_payload_id;
         guard.next_payload_id += 1;
-        guard.pending.insert(payload_id.to_be_bytes(), (payload.clone(), bundle.clone()));
+        guard.pending.insert(
+            payload_id.to_be_bytes(),
+            (payload.clone(), bundle.clone(), execution_requests),
+        );
 
         Ok(json!({
             "payloadStatus": {
@@ -2175,30 +2382,49 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
     }
 }
 
-async fn handle_get_payload(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) -> Result<Value> {
+async fn handle_get_payload(
+    req: &RpcRequest,
+    state: Arc<TokioMutex<StubState>>,
+    is_v4: bool,
+) -> Result<Value> {
     let params = expect_params_array(&req.params)?;
     let payload_id_hex =
         params.get(0).and_then(Value::as_str).ok_or_else(|| eyre::eyre!("missing payload id"))?;
     let id_bytes = parse_payload_id(payload_id_hex)?;
 
     let mut guard = state.lock().await;
-    let (payload, bundle) =
+    let (payload, bundle, execution_requests) =
         guard.pending.remove(&id_bytes).ok_or_else(|| eyre::eyre!("unknown payload id"))?;
 
-    let envelope = ExecutionPayloadEnvelopeV3 {
+    let envelope_v3 = ExecutionPayloadEnvelopeV3 {
         execution_payload: payload,
         block_value: U256::ZERO,
         blobs_bundle: convert_bundle(bundle.as_ref()),
         should_override_builder: false,
     };
 
-    Ok(serde_json::to_value(&envelope)?)
+    if is_v4 {
+        let envelope = ExecutionPayloadEnvelopeV4 {
+            envelope_inner: envelope_v3,
+            execution_requests: Requests::new(execution_requests),
+        };
+        Ok(serde_json::to_value(&envelope)?)
+    } else {
+        Ok(serde_json::to_value(&envelope_v3)?)
+    }
 }
 
-async fn handle_new_payload(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) -> Result<Value> {
+async fn handle_new_payload(
+    req: &RpcRequest,
+    state: Arc<TokioMutex<StubState>>,
+    is_v4: bool,
+) -> Result<Value> {
     let params = expect_params_array(&req.params)?;
     let payload: JsonExecutionPayloadV3 =
         serde_json::from_value(params[0].clone()).wrap_err("decode payload")?;
+    if is_v4 && params.len() < 4 {
+        return Err(eyre::eyre!("engine_newPayloadV4 missing execution requests parameter"));
+    }
 
     let mut guard = state.lock().await;
     guard.latest_block = ExecutionBlock {

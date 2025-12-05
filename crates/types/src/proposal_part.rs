@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     address::Address,
     // Phase 3: Import blob types for BlobSidecar
+    aliases::Bytes as AlloyBytes,
     blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof},
     codec::proto::{decode_signature, encode_signature},
     context::LoadContext,
@@ -19,15 +20,25 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposalData {
     pub bytes: Bytes,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_requests: Vec<AlloyBytes>,
 }
 
 impl ProposalData {
     pub fn new(bytes: Bytes) -> Self {
-        Self { bytes }
+        Self { bytes, execution_requests: Vec::new() }
+    }
+
+    pub fn with_execution_requests(bytes: Bytes, execution_requests: Vec<AlloyBytes>) -> Self {
+        Self { bytes, execution_requests }
+    }
+
+    pub fn has_execution_requests(&self) -> bool {
+        !self.execution_requests.is_empty()
     }
 
     pub fn size_bytes(&self) -> usize {
-        std::mem::size_of::<u64>()
+        std::mem::size_of::<u64>() + self.execution_requests.iter().map(|r| r.len()).sum::<usize>()
     }
 }
 
@@ -36,6 +47,7 @@ impl fmt::Debug for ProposalData {
         f.debug_struct("ProposalData")
             .field("bytes", &"<...>")
             .field("len", &self.bytes.len())
+            .field("execution_requests", &self.execution_requests.len())
             .finish()
     }
 }
@@ -283,8 +295,6 @@ impl malachitebft_proto::Protobuf for BlobSidecar {
     }
 
     fn to_proto(&self) -> Result<Self::Proto, malachitebft_proto::Error> {
-        use malachitebft_proto::Error as ProtoError;
-
         // Convert SignedBeaconBlockHeader to proto
         let signed_block_header = crate::proto::SignedBeaconBlockHeader {
             message: Some(crate::proto::BeaconBlockHeader {
@@ -444,7 +454,11 @@ impl Protobuf for ProposalPart {
                     .ok_or_else(|| ProtoError::missing_field::<Self::Proto>("proposer"))
                     .and_then(Address::from_proto)?,
             })),
-            Part::Data(data) => Ok(Self::Data(ProposalData::new(data.bytes))),
+            Part::Data(data) => {
+                let execution_requests =
+                    data.execution_requests.into_iter().map(AlloyBytes::from).collect();
+                Ok(Self::Data(ProposalData { bytes: data.bytes, execution_requests }))
+            }
 
             // Phase 3/4: Deserialize BlobSidecar from protobuf
             Part::BlobSidecar(sidecar) => {
@@ -533,7 +547,15 @@ impl Protobuf for ProposalPart {
                 })),
             }),
             Self::Data(data) => Ok(Self::Proto {
-                part: Some(Part::Data(proto::ProposalData { bytes: data.bytes.clone() })),
+                part: Some(Part::Data(proto::ProposalData {
+                    bytes: data.bytes.clone(),
+                    execution_requests: data
+                        .execution_requests
+                        .iter()
+                        .cloned()
+                        .map(|req| req.0)
+                        .collect(),
+                })),
             }),
 
             // Phase 3/4: Serialize BlobSidecar to protobuf

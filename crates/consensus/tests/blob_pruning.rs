@@ -42,7 +42,7 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
         let sidecars = maybe_sidecars.expect("blobbed proposal should yield sidecars");
 
         node.state.blob_engine().verify_and_store(height, round.as_i64(), &sidecars).await?;
-        node.state.store_undecided_block_data(height, round, bytes.clone()).await?;
+        node.state.store_undecided_block_data(height, round, bytes.clone(), Vec::new()).await?;
 
         let certificate = CommitCertificate {
             height,

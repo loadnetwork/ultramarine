@@ -570,6 +570,7 @@ mod tests {
                 extra_data: Bytes::from(vec![]),
                 transactions_root: B256::ZERO,
                 withdrawals_root: B256::ZERO,
+                requests_hash: None,
             },
         );
 
