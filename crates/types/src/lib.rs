@@ -4,6 +4,7 @@
 #![allow(missing_docs)]
 
 pub mod address;
+pub mod constants;
 pub mod context;
 pub mod genesis;
 pub mod height;

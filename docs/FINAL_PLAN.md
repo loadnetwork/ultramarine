@@ -4,10 +4,10 @@
 **Timeline**: 10-15 days (2-3 weeks with focused effort)
 **Architecture**: Channel-based approach using existing Malachite patterns
 **Status**: 🟢 **Phase 5 Complete – Preparing Pruning Policy (Phase 6)**
-**Progress**: **Phases 1-5C delivered + Comprehensive review completed** (blob integration, metrics, harness, testnet validation, critical bug fix)
-**Implementation**: Live consensus + state sync fully operational with blob transfer, metadata-only storage, production metrics, and verified cleanup symmetry
+**Progress**: **Phases 1-5C delivered + Prague/V4 rollout validated** (blob integration, metrics, harness, testnet validation, critical bug fix, Engine API v4 migration)
+**Implementation**: Live consensus + state sync fully operational with blob transfer, metadata-only storage, production metrics, validated Prague execution-requests, and verified cleanup symmetry
 **Current Focus**: Define Phase 6 pruning policy + negative-path harness coverage (see [PHASE5_PROGRESS.md](../PHASE5_PROGRESS.md) for the full log)
-**Last Updated**: 2025-11-08 (evening)
+**Last Updated**: 2025-12-05 (afternoon)
 **Review Status**: ✅ Comprehensive code review completed, all critical bugs resolved
 **Malachite Version**: b205f4252f3064d9a74716056f63834ff33f2de9 (upgraded ✅)
 
@@ -26,7 +26,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 ### Current Status (2025-11-07)
 
 **Completed** ✅:
-- **Phase 1 – Execution Bridge** *(2025-10-27)*: Engine API v3 wired end-to-end with blob bundle retrieval; execution payload header extraction added to `ValueMetadata`.
+- **Phase 1 – Execution Bridge** *(2025-10-27)*: Engine API v3 wired end-to-end with blob bundle retrieval (upgraded to v4 in Dec 2025); execution payload header extraction added to `ValueMetadata`.
 - **Phase 2 – Three-Layer Metadata Architecture** *(2025-10-27)*: Introduced `ConsensusBlockMetadata`, `BlobMetadata`, and blob-engine persistence (Layer 1/2/3) with redb tables and protobuf encoding.
 - **Phase 3 – Proposal Streaming** *(2025-10-28)*: Extended `ProposalPart` with `BlobSidecar`, enabled streaming of blobs via `/proposal_parts` with commitment/proof payloads.
 - **Phase 4 – Cleanup & Storage Finalisation** *(2025-10-28)*: Removed legacy header tables/APIs, made `BlobMetadata` the single source of truth, updated parent-root validation and restream rebuilds. See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for full log.
@@ -34,6 +34,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 - **Phase 5A – Metrics Instrumentation** *(2025-11-04)*: Added 12 blob metrics, wired through node startup/state helpers, updated dashboards and docs.
 - **Phase 5B – Integration Harness** *(2025-11-08)*: Thirteen deterministic blob scenarios now pass via `make itest`, covering proposer/follower commit, sync ingestion, restart hydration, pruning retention, and execution-layer rejection (see [Testing Strategy](./PHASE5_TESTNET.md#testing-strategy) for the full matrix).
 - **Phase 5C – Testnet Validation** *(2025-11-07)*: Docker harness exercised 1,158 real blobs; metrics and dashboards verified against live runs.
+- **Prague / Engine API v4 upgrade** *(2025-12-05)*: Consensus/execution bridge now uses `forkchoiceUpdated/getPayload/newPayload V4`, deterministic execution-request helpers are shared across harnesses, and the load-reth genesis enforces Prague at timestamp 0 so EL and CL compute the same `requests_hash`.
 - **Quality Gates**: 23/23 consensus unit tests plus 13/13 integration tests (`cargo test -p ultramarine-test -- --nocapture`); `cargo fmt --all` and `cargo clippy -p ultramarine-consensus` run clean for the consensus crate.
 
 **Up Next** 🟡:
@@ -75,7 +76,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    EXECUTION LAYER (EL Client)                   │
-│  Engine API v3: getPayloadV3() returns blobsBundle              │
+│  Engine API v4: getPayloadV4() returns blobs + executionRequests│
 │  Execution layer generates blobs, we verify & propagate         │
 │  PayloadAttributes.prev_randao = 0x01 (constant, Arbitrum-style)│
 └─────────────────────────────────────────────────────────────────┘
@@ -86,7 +87,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 Proposer                           Validators
    │                                   │
    │ 1. GetValue trigger               │
-   │ 2. Call EL getPayloadV3()        │
+   │ 2. Call EL getPayloadV4()        │
    │ 3. Receive blobs + commitments   │
    │                                   │
    │ 4. Stream on /proposal_parts:    │
@@ -107,7 +108,7 @@ Proposer                           Validators
 
 ### Engine API Contract (CL ↔ EL)
 
-**Payload Attributes**: When calling `engine_forkchoiceUpdatedV3`, Ultramarine supplies:
+**Payload Attributes**: When calling `engine_forkchoiceUpdatedV4`, Ultramarine supplies:
 
 | Field | Value | Rationale |
 |-------|-------|-----------|
@@ -116,6 +117,7 @@ Proposer                           Validators
 | `suggested_fee_recipient` | Placeholder `0x2a...2a` | TODO: Make validator-configurable |
 | `withdrawals` | Empty array `[]` | No withdrawals on Load Network |
 | `parent_beacon_block_root` | Previous `block_hash` | For EIP-4788 compatibility |
+| `execution_requests` | Deterministic helper derived from payload height | Required since Prague so EL/CL agree on `requests_hash` |
 
 **prevRandao Design Decision**:
 - ✅ **Constant `0x01`** chosen over derived values (timestamp hash, commit hash, etc.)
@@ -125,19 +127,19 @@ Proposer                           Validators
 - ✅ **Non-manipulatable**: Unlike Ethereum's RANDAO (validators can bias ~1 bit)
 
 **Enforcement**:
-- **Generation**: `ultramarine/crates/execution/src/client.rs:190,359` - always sends constant
-- **Validation**: `ultramarine/crates/consensus/src/state.rs:1026-1034` - rejects mismatches
+- **Generation**: `ultramarine/crates/execution/src/client.rs:190,359` - always sends constant and emits Prague execution requests via shared helpers
+- **Validation**: `ultramarine/crates/consensus/src/state.rs:1026-1034,1859` - rejects mismatches and enforces EIP-7685 ordering/uniqueness before persisting requests
 - **Normalization**: `ultramarine/crates/execution/src/eth_rpc/alloy_impl.rs:95` - RPC client returns constant
-- **Testing**: `ultramarine/crates/test/tests/full_node/node_harness.rs:1803` - harness verifies all payloads
+- **Testing**: `ultramarine/crates/test/tests/full_node/node_harness.rs:1803` - harness verifies payloads, signatures bind execution requests, and V4 round-trips run via ignored tests
 
 **See also**: [load-reth-design.md](../../../../load-el-design/load-reth-design.md#2-functional-requirements) for EL perspective.
 
 ---
 
-## Phase 1: Execution ↔ Consensus Bridge ✅ COMPLETED (2025-10-27)
+## Phase 1: Execution ↔ Consensus Bridge ✅ COMPLETED (2025-10-27; updated for Engine API v4 on 2025-12-05)
 
 ### Goal
-Extend execution client interface to support Engine API v3 with blob bundle retrieval.
+Extend execution client interface to support Engine API v3 with blob bundle retrieval (upgraded to Engine API v4 + execution-request handling on 2025-12-05).
 
 ### Files to Modify
 - `ultramarine/crates/execution/src/client.rs`
@@ -146,10 +148,10 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 ### Implementation References
 - `crates/types/src/blob.rs` – blob/commitment/proof types (MAX_BLOBS_PER_BLOCK = 1024)
 - `crates/types/src/blob.rs::BlobsBundle` – validation, versioned hashes
-- `crates/execution/src/client.rs` – Engine API v3 integration (`generate_block_with_blobs`, Alloy conversions)
-- `crates/execution/src/engine_api/client.rs` – getPayloadV3 envelope parsing
+- `crates/execution/src/client.rs` – Engine API v3/v4 integration (`generate_block_with_blobs`, Alloy conversions, execution requests)
+- `crates/execution/src/engine_api/client.rs` – getPayloadV4 envelope parsing
 - `crates/execution/src/engine_api/mod.rs` – EngineApi trait extension
-- Tests: `cargo nextest run -p ultramarine-execution engine_api_v3`
+- Tests: `cargo nextest run -p ultramarine-execution engine_api_v4`
 
 ## Phase 2: Three-Layer Metadata Architecture ✅ COMPLETED (2025-10-27)
 
@@ -207,7 +209,7 @@ Modify `Decided` handler to validate blob availability before block import.
 - Blob availability validation in Decided handler
 - Blob count verification before import
 - **Versioned hash verification (Lighthouse parity)**
-- Engine API v3 integration (was already implemented)
+- Engine API v4 integration (initially landed as v3; upgraded Dec 2025)
 - Shared helper `State::process_decided_certificate` unifies blob promotion, versioned-hash validation, execution notifications, and commit sequencing for both the app handler and tests.
 - Added `ExecutionNotifier` trait plus the `ExecutionClientNotifier` adapter so production code and mocks share the same EL notification surface.
 - Integration harness exercises proposer and follower commit paths as well as EL rejection via the shared helper (see new `blob_decided_el_rejection` regression test).
@@ -215,7 +217,7 @@ Modify `Decided` handler to validate blob availability before block import.
 **Recent Enhancement**:
 - RestreamProposal - ✅ Implemented (network partition recovery edge case resolved)
 
-**Key Discovery**: Engine API v3 was already fully implemented. We only needed to add blob availability validation and versioned hash verification. Initial code review identified gaps in state synchronization, which have been **fully resolved** with SyncedValuePackage implementation.
+**Key Discovery**: Engine API v3 was already fully implemented; the Dec 2025 Prague work upgraded that same surface to v4 (execution requests + `requests_hash`). No extra business logic was required beyond blob availability validation and versioned hash verification. Initial code review identified gaps in state synchronization, which have been **fully resolved** with SyncedValuePackage implementation.
 
 **See**:
 - `docs/PHASE_5_COMPLETION.md` - Live consensus completion details

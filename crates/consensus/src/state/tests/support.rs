@@ -9,7 +9,6 @@ use alloy_rpc_types_engine::{
 };
 use alloy_rpc_types_eth::Withdrawal;
 use async_trait::async_trait;
-use bytes::Bytes;
 use malachitebft_app_channel::app::types::LocallyProposedValue;
 use ssz::Encode;
 use tempfile::{TempDir, tempdir};
@@ -19,6 +18,7 @@ use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
     blob_metadata::BlobMetadata,
+    constants::LOAD_EXECUTION_GAS_LIMIT,
     engine_api::{ExecutionPayloadHeader, load_prev_randao},
     genesis::Genesis,
     height::Height,
@@ -67,8 +67,8 @@ pub fn sample_execution_payload_header() -> ExecutionPayloadHeader {
         receipts_root: B256::from([4u8; 32]),
         logs_bloom: alloy_primitives::Bloom::ZERO,
         block_number: 1,
-        gas_limit: 30_000_000,
-        gas_used: 15_000_000,
+        gas_limit: LOAD_EXECUTION_GAS_LIMIT,
+        gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,
         timestamp: 1_700_000_000,
         base_fee_per_gas: alloy_primitives::U256::from(1),
         blob_gas_used: 0,
@@ -95,8 +95,8 @@ pub fn sample_execution_payload_v3() -> ExecutionPayloadV3 {
                 logs_bloom: alloy_primitives::Bloom::ZERO,
                 prev_randao: load_prev_randao(),
                 block_number: 1,
-                gas_limit: 30_000_000,
-                gas_used: 15_000_000,
+                gas_limit: LOAD_EXECUTION_GAS_LIMIT,
+                gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,
                 timestamp: 1_700_000_000,
                 extra_data: AlloyBytes::new(),
                 base_fee_per_gas: alloy_primitives::U256::from(1),
@@ -304,7 +304,7 @@ impl ExecutionNotifier for MockExecutionNotifier {
     async fn notify_new_block(
         &mut self,
         payload: ExecutionPayloadV3,
-        execution_requests: Vec<Bytes>,
+        execution_requests: Vec<AlloyBytes>,
         versioned_hashes: Vec<BlockHash>,
     ) -> color_eyre::Result<PayloadStatus> {
         let mut inner = self.inner.lock().unwrap();

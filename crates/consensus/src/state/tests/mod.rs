@@ -216,7 +216,8 @@ async fn propose_value_with_blobs_stores_blob_metadata() {
     let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
 
     let payload = sample_execution_payload_v3();
-    let expected_header = ExecutionPayloadHeader::from_payload(&payload, None);
+    let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(&[] as &[BlobBytes]));
+    let expected_header = ExecutionPayloadHeader::from_payload(&payload, requests_hash);
     let bundle = sample_blob_bundle(1);
     let metadata_before =
         state.store.get_blob_metadata_undecided(Height::new(1), Round::new(0)).await.expect("get");
@@ -259,7 +260,8 @@ async fn propose_blobless_value_uses_parent_root_hint() {
     state.last_blob_sidecar_root = parent_root;
 
     let payload = sample_execution_payload_v3();
-    let expected_header = ExecutionPayloadHeader::from_payload(&payload, None);
+    let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(&[] as &[BlobBytes]));
+    let expected_header = ExecutionPayloadHeader::from_payload(&payload, requests_hash);
 
     state
         .propose_value_with_blobs(

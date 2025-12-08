@@ -944,11 +944,11 @@ where
         let execution_requests =
             self.get_execution_requests(height, round).await.unwrap_or_default();
 
-        if versioned_hashes.is_empty() {
-            if let Some(proposal) = self.load_undecided_proposal(height, round).await? {
-                let commitments = proposal.value.metadata.blob_kzg_commitments.clone();
-                versioned_hashes = versioned_hashes_from_commitments(&commitments);
-            }
+        if versioned_hashes.is_empty() &&
+            let Some(proposal) = self.load_undecided_proposal(height, round).await?
+        {
+            let commitments = proposal.value.metadata.blob_kzg_commitments.clone();
+            versioned_hashes = versioned_hashes_from_commitments(&commitments);
         }
 
         // CRITICAL: Validate BEFORE promoting to ensure atomicity.
@@ -1077,15 +1077,15 @@ where
         let tx_count = payload_inner.transactions.len();
 
         let expected_parent = self.latest_block.as_ref().map(|block| block.block_hash);
-        if let Some(expected_parent_hash) = expected_parent {
-            if expected_parent_hash != parent_block_hash {
-                return Err(eyre::eyre!(
-                    "Parent hash mismatch at height {}: expected {:?} but payload declares {:?}",
-                    height,
-                    expected_parent_hash,
-                    parent_block_hash
-                ));
-            }
+        if let Some(expected_parent_hash) = expected_parent &&
+            expected_parent_hash != parent_block_hash
+        {
+            return Err(eyre::eyre!(
+                "Parent hash mismatch at height {}: expected {:?} but payload declares {:?}",
+                height,
+                expected_parent_hash,
+                parent_block_hash
+            ));
         }
 
         let _latest_valid_hash = notifier
@@ -1127,7 +1127,7 @@ where
             timestamp: execution_payload.timestamp(),
             prev_randao: expected_prev_randao,
         };
-        self.latest_block = Some(execution_block.clone());
+        self.latest_block = Some(execution_block);
 
         Ok(DecidedOutcome {
             execution_block,
@@ -2272,13 +2272,13 @@ where
             }
 
             let request_type = request[0];
-            if let Some(prev) = prev_type {
-                if request_type <= prev {
-                    return Err(format!(
-                        "execution requests must be strictly increasing by type (index {}, prev {}, current {})",
-                        idx, prev, request_type
-                    ));
-                }
+            if let Some(prev) = prev_type &&
+                request_type <= prev
+            {
+                return Err(format!(
+                    "execution requests must be strictly increasing by type (index {}, prev {}, current {})",
+                    idx, prev, request_type
+                ));
             }
             prev_type = Some(request_type);
         }

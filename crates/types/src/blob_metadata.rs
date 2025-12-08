@@ -39,6 +39,7 @@ use crate::{
     address::Address,
     aliases::{B256, Bloom, Bytes, U256},
     blob::KzgCommitment,
+    constants::LOAD_EXECUTION_GAS_LIMIT,
     engine_api::ExecutionPayloadHeader,
     ethereum_compat::{BeaconBlockBodyMinimal, BeaconBlockHeader},
     height::Height,
@@ -188,7 +189,7 @@ impl BlobMetadata {
     /// - height = 0
     /// - parent_blob_root = B256::ZERO
     /// - empty KZG commitments (no blobs at genesis)
-    /// - minimal execution payload header (zero values, gas_limit=30M arbitrary)
+    /// - minimal execution payload header (zero values, gas_limit=2B arbitrary)
     /// - proposer_index_hint = 0
     pub fn genesis() -> Self {
         let genesis_header = ExecutionPayloadHeader {
@@ -198,7 +199,7 @@ impl BlobMetadata {
             receipts_root: B256::ZERO,
             logs_bloom: Bloom::ZERO,
             block_number: 0,
-            gas_limit: 30_000_000, // Standard default
+            gas_limit: LOAD_EXECUTION_GAS_LIMIT, // Standard default
             gas_used: 0,
             timestamp: 0,
             base_fee_per_gas: U256::ZERO,
@@ -379,7 +380,7 @@ mod tests {
             receipts_root: B256::from([4u8; 32]),
             logs_bloom: Bloom::ZERO,
             block_number: 100,
-            gas_limit: 30_000_000,
+            gas_limit: LOAD_EXECUTION_GAS_LIMIT,
             gas_used: 15_000_000,
             timestamp: 1234567890,
             base_fee_per_gas: U256::from(20),
