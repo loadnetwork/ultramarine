@@ -36,7 +36,6 @@ services:
       # - "--builder.interval=10ms"
       # - "--builder.deadline=1" # The deadline in seconds for when the payload builder job should resolve
       # - "--builder.max-tasks=10" # default=3
-      # - "--txpool.gas-limit=300000000" # default * 10
       # - "--blobpool.pricebump=1"
       # - "--txpool.pending-max-count=50000" # default=10000
       # - "--txpool.queued-max-count=50000" # default=10000
@@ -77,7 +76,6 @@ services:
       # - "--builder.interval=10ms"
       # - "--builder.deadline=1" # The deadline in seconds for when the payload builder job should resolve
       # - "--builder.max-tasks=10" # default=3
-      # - "--txpool.gas-limit=300000000" # default * 10
       # - "--blobpool.pricebump=1"
       # - "--txpool.pending-max-count=50000" # default=10000
       # - "--txpool.queued-max-count=50000" # default=10000
@@ -118,7 +116,6 @@ services:
       # - "--builder.interval=10ms"
       # - "--builder.deadline=1" # The deadline in seconds for when the payload builder job should resolve
       # - "--builder.max-tasks=10" # default=3
-      # - "--txpool.gas-limit=300000000" # default * 10
       # - "--blobpool.pricebump=1"
       # - "--txpool.pending-max-count=50000" # default=10000
       # - "--txpool.queued-max-count=50000" # default=10000

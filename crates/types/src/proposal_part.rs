@@ -237,13 +237,12 @@ impl malachitebft_proto::Protobuf for BlobSidecar {
     fn from_proto(proto: Self::Proto) -> Result<Self, malachitebft_proto::Error> {
         // Convert bytes::Bytes to alloy_primitives::Bytes for Blob::new
         let blob_bytes = crate::aliases::Bytes::from(proto.blob.to_vec());
-        let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e.into()))?;
+        let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e))?;
 
-        let kzg_commitment = KzgCommitment::from_slice(&proto.kzg_commitment)
-            .map_err(|e| ProtoError::Other(e.into()))?;
+        let kzg_commitment =
+            KzgCommitment::from_slice(&proto.kzg_commitment).map_err(|e| ProtoError::Other(e))?;
 
-        let kzg_proof =
-            KzgProof::from_slice(&proto.kzg_proof).map_err(|e| ProtoError::Other(e.into()))?;
+        let kzg_proof = KzgProof::from_slice(&proto.kzg_proof).map_err(|e| ProtoError::Other(e))?;
 
         let signed_block_header = proto
             .signed_block_header
@@ -466,15 +465,15 @@ impl Protobuf for ProposalPart {
                 let blob_bytes = crate::aliases::Bytes::from(sidecar.blob.to_vec());
 
                 // Deserialize blob data (must be exactly 131,072 bytes)
-                let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e.into()))?;
+                let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e))?;
 
                 // Deserialize KZG commitment (must be exactly 48 bytes)
                 let kzg_commitment = KzgCommitment::from_slice(&sidecar.kzg_commitment)
-                    .map_err(|e| ProtoError::Other(e.into()))?;
+                    .map_err(|e| ProtoError::Other(e))?;
 
                 // Deserialize KZG proof (must be exactly 48 bytes)
-                let kzg_proof = KzgProof::from_slice(&sidecar.kzg_proof)
-                    .map_err(|e| ProtoError::Other(e.into()))?;
+                let kzg_proof =
+                    KzgProof::from_slice(&sidecar.kzg_proof).map_err(|e| ProtoError::Other(e))?;
 
                 // Phase 4: Deserialize SignedBeaconBlockHeader
                 let signed_block_header = sidecar

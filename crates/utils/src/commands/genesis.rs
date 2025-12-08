@@ -6,6 +6,7 @@ use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English
 use chrono::NaiveDate;
 use clap::Parser;
 use color_eyre::eyre::Result;
+use ultramarine_types::constants::LOAD_EXECUTION_GAS_LIMIT;
 
 /// Test mnemonics for wallet generation
 const TEST_MNEMONICS: [&str; 3] = [
@@ -92,7 +93,7 @@ pub(crate) fn generate_genesis(genesis_file: &str, chain_id: u64) -> Result<()> 
         alloc,
         ..Default::default()
     }
-    .with_gas_limit(30_000_000)
+    .with_gas_limit(LOAD_EXECUTION_GAS_LIMIT)
     .with_timestamp(0)
     .with_extra_data(Bytes::from_static(b"Load Network Dev"))
     .with_difficulty(U256::ZERO)

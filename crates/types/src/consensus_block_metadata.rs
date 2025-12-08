@@ -32,7 +32,7 @@
 //! use malachitebft_core_types::Round;
 //! use ultramarine_types::{
 //!     address::Address, aliases::B256, consensus_block_metadata::ConsensusBlockMetadata,
-//!     height::Height,
+//!     constants::LOAD_EXECUTION_GAS_LIMIT, height::Height,
 //! };
 //!
 //! let metadata = ConsensusBlockMetadata {
@@ -42,8 +42,8 @@
 //!     timestamp: 1234567890,
 //!     validator_set_hash: B256::ZERO,
 //!     execution_block_hash: B256::ZERO,
-//!     gas_limit: 30_000_000,
-//!     gas_used: 15_000_000,
+//!     gas_limit: LOAD_EXECUTION_GAS_LIMIT,
+//!     gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,
 //! };
 //! ```
 
@@ -231,6 +231,7 @@ mod tests {
     use prost::Message;
 
     use super::*;
+    use crate::constants::LOAD_EXECUTION_GAS_LIMIT;
 
     #[test]
     fn test_consensus_block_metadata_creation() {
@@ -241,15 +242,15 @@ mod tests {
             1234567890,
             B256::from([2u8; 32]),
             B256::from([3u8; 32]),
-            30_000_000,
-            15_000_000,
+            LOAD_EXECUTION_GAS_LIMIT,
+            LOAD_EXECUTION_GAS_LIMIT / 2,
         );
 
         assert_eq!(metadata.height(), Height::new(100));
         assert_eq!(metadata.round(), Round::new(0));
         assert_eq!(metadata.timestamp(), 1234567890);
-        assert_eq!(metadata.gas_limit(), 30_000_000);
-        assert_eq!(metadata.gas_used(), 15_000_000);
+        assert_eq!(metadata.gas_limit(), LOAD_EXECUTION_GAS_LIMIT);
+        assert_eq!(metadata.gas_used(), LOAD_EXECUTION_GAS_LIMIT / 2);
     }
 
     #[test]
@@ -306,8 +307,8 @@ mod tests {
             1234567890,
             B256::from([2u8; 32]),
             B256::from([3u8; 32]),
-            30_000_000,
-            15_000_000,
+            LOAD_EXECUTION_GAS_LIMIT,
+            LOAD_EXECUTION_GAS_LIMIT / 2,
         );
 
         let proto = metadata.to_proto().expect("Failed to encode");
@@ -331,8 +332,8 @@ mod tests {
             1234567890,
             B256::ZERO,
             B256::ZERO,
-            30_000_000,
-            15_000_000,
+            LOAD_EXECUTION_GAS_LIMIT,
+            LOAD_EXECUTION_GAS_LIMIT / 2,
         );
 
         let metadata2 = metadata1.clone();

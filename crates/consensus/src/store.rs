@@ -1118,6 +1118,7 @@ mod tests {
         aliases::B256,
         blob::{KzgCommitment, MAX_BLOBS_PER_BLOCK_ELECTRA},
         consensus_block_metadata::ConsensusBlockMetadata,
+        constants::LOAD_EXECUTION_GAS_LIMIT,
         engine_api::ExecutionPayloadHeader,
     };
 
@@ -1139,8 +1140,8 @@ mod tests {
             receipts_root: B256::from([4u8; 32]),
             logs_bloom: Bloom::ZERO,
             block_number: 4242,
-            gas_limit: 30_000_000,
-            gas_used: 15_000_000,
+            gas_limit: LOAD_EXECUTION_GAS_LIMIT,
+            gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,
             timestamp: 1_700_000_000,
             base_fee_per_gas: U256::from(1),
             blob_gas_used: 0,
@@ -1177,8 +1178,8 @@ mod tests {
             1_700_000_100,
             B256::from([10u8; 32]),
             B256::from([11u8; 32]),
-            30_000_000,
-            10_000_000,
+            LOAD_EXECUTION_GAS_LIMIT,
+            LOAD_EXECUTION_GAS_LIMIT / 4,
         )
     }
 

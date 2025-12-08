@@ -365,6 +365,7 @@ mod tests {
     use crate::{
         address::Address,
         aliases::{B256, Bloom, Bytes, U256},
+        constants::LOAD_EXECUTION_GAS_LIMIT,
     };
 
     fn create_test_header() -> ExecutionPayloadHeader {
@@ -375,8 +376,8 @@ mod tests {
             receipts_root: B256::from([4u8; 32]),
             logs_bloom: Bloom::from([5u8; 256]),
             block_number: 100,
-            gas_limit: 30_000_000,
-            gas_used: 15_000_000,
+            gas_limit: LOAD_EXECUTION_GAS_LIMIT,
+            gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,
             timestamp: 1234567890,
             base_fee_per_gas: U256::from(1000000000u64),
             extra_data: Bytes::from(vec![0u8; 4]),

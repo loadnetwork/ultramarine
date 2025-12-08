@@ -36,6 +36,7 @@ pub(crate) use ultramarine_test_support::execution_requests::sample_execution_re
 use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
+    constants::LOAD_EXECUTION_GAS_LIMIT,
     context::LoadContext,
     engine_api::load_prev_randao,
     genesis::Genesis,
@@ -223,8 +224,8 @@ pub(crate) fn sample_execution_payload_v3_for_height(
                 logs_bloom: Bloom::ZERO,
                 prev_randao: load_prev_randao(),
                 block_number: height.as_u64(), // Fix: block_number should equal height
-                gas_limit: 30_000_000,
-                gas_used: 15_000_000,
+                gas_limit: LOAD_EXECUTION_GAS_LIMIT,
+                gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,
                 timestamp: 1_700_000_000 + height.as_u64(),
                 extra_data: AlloyBytes::new(),
                 base_fee_per_gas: U256::from(1),

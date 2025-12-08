@@ -311,7 +311,10 @@ mod tests {
     use alloy_primitives::{B256, Bloom, U256};
 
     use super::*;
-    use crate::{address::Address, aliases::Bytes, engine_api::ExecutionPayloadHeader};
+    use crate::{
+        address::Address, aliases::Bytes, constants::LOAD_EXECUTION_GAS_LIMIT,
+        engine_api::ExecutionPayloadHeader,
+    };
 
     fn create_test_commitment(value: u8) -> KzgCommitment {
         let mut bytes = [0u8; 48];
@@ -556,7 +559,7 @@ mod tests {
 
         // Body B: Uses DIFFERENT execution header (different gas_limit, timestamp, etc.)
         let mut header_b = test_execution_header();
-        header_b.gas_limit = 30_000_000; // Different from body_a
+        header_b.gas_limit = LOAD_EXECUTION_GAS_LIMIT; // Different from body_a
         header_b.timestamp = 1234567890; // Different from body_a
         header_b.block_number = 100; // Different from body_a
         let body_b = BeaconBlockBodyMinimal::from_ultramarine_data(commitments.clone(), &header_b);

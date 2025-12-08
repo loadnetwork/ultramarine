@@ -65,32 +65,45 @@ This command performs the same steps as `make all`, but uses `compose.ipc.yaml` 
 - App checks EL capabilities, reads EL head, tells Malachite to start at current height.
 
 2) Proposer path
-- On `GetValue`, app asks EL to build a block (`getPayloadV3`), stores block bytes, replies with a proposal, and streams proposal parts to peers.
+- On `GetValue`, app asks EL to build a block (`getPayloadV4`), stores block bytes + Prague execution requests, replies with a proposal, and streams proposal parts to peers.
 - We respect Malachite’s `timeout`: if block build exceeds the timeout, we do not reply and let consensus take the propose timeout path to prevote‑nil.
 
 3) Non‑proposer path
 - Receives proposal parts, verifies signature, reassembles payload, stores undecided proposal + bytes, and replies to consensus.
 
 4) Decide/Commit
-- On `Decided`, app submits block to EL (`newPayloadV3`) and updates forkchoice; commits value + block bytes to the store; starts next height.
+- On `Decided`, app submits block to EL (`newPayloadV4`) and updates forkchoice; commits value + block bytes + execution requests to the store; starts next height.
 
 Notes:
 - “nil” in Tendermint is a vote target, not a proposal. The app must not fabricate an “empty” proposal; silence on timeout is correct.
 - For sync, values should be stored before replying; this is being hardened.
 
+### Prague / Engine API v4 Expectations
+
+- The EL reports Prague active from genesis (`pragueTime = 0`), so Ultramarine must always use `forkchoiceUpdatedV4`, `getPayloadV4`, and `newPayloadV4`. Earlier V3 calls now return `UnsupportedFork`.
+- `prevRandao` is fixed to the constant `0x01`. If the EL ever returns a different value, consensus will reject the payload and the harness tests will fail.
+- Execution requests (EIP-7685) are hashed into block headers and signatures. All harnesses share the helper in `ultramarine-test-support` so `requests_hash` stays deterministic. When debugging payload mismatches, log both the request bytes and the computed hash.
+
 ### Genesis and EL State
 
-- `cargo run --bin ultramarine-utils -- genesis` writes `assets/genesis.json`. This file is the **only** genesis the EL should use when running alongside Ultramarine. The `etc/load-dev-genesis.json` inside `load-reth/` is only for standalone EL testing.
+- `cargo run --bin ultramarine-utils -- genesis` writes `assets/genesis.json`. This file is the **only** genesis the EL should use when running alongside Ultramarine, and it now fixes `pragueTime = 0` so both CL and EL operate on the Prague ruleset. The `etc/load-dev-genesis.json` inside `load-reth/` is only for standalone EL testing.
+- **Gas limit**: 2 billion (`0x77359400`). This is configured in both CL (`LOAD_EXECUTION_GAS_LIMIT`) and EL genesis files.
 - `make all` / `make all-ipc` automatically call the new `reset-el-state` helper, which wipes `rethdata/*` and `ipc/*` before bringing up Docker. This ensures load-reth starts from the freshly generated genesis and prevents block-hash mismatches.
 - If you regenerate the genesis manually, rerun `make reset-el-state` (or `make clean-net`/`clean-net-ipc`) before restarting the stack so every EL node rebuilds its database from the updated file.
 
 ## Observability & Dashboards
 
 - Grafana: http://localhost:3000
-  - Engine metrics panels:
-    - `reth_engine_rpc_get_payload_v3_count`: payload builds
-    - `reth_engine_rpc_new_payload_*`: block import status
-    - `reth_engine_rpc_forkchoice_updated_*`: head updates
+  - Engine metrics panels (upstream reth):
+    - `reth_engine_rpc_get_payload_v4_count`: payload builds
+    - `reth_engine_rpc_new_payload_v4_*`: block import status
+    - `reth_engine_rpc_forkchoice_updated_v4_*`: head updates
+  - Load-specific EL metrics (`load_reth_*`):
+    - `load_reth_engine_forkchoice_duration_seconds`: FCU latency histogram
+    - `load_reth_engine_get_payload_duration_seconds`: getPayload latency histogram
+    - `load_reth_engine_new_payload_duration_seconds`: newPayload latency histogram
+    - `load_reth_engine_get_blobs_requests_total`, `_hits_total`, `_misses_total`: blob retrieval counters
+    - `load_reth_blob_cache_items`, `load_reth_blob_cache_bytes`: blob cache occupancy
   - Throughput and error state panels provide quick health checks.
 
 - Logs:
@@ -147,7 +160,15 @@ All metrics are exposed at each node's metrics endpoint (`:29000`, `:29001`, `:2
 
 ### Grafana Blob Dashboard
 
-The Grafana dashboard at http://localhost:3000 includes a **Blob Engine** section with 9 panels:
+The Grafana dashboard at http://localhost:3000 includes a **Blob Engine** section (CL) with 9 panels, plus a **Load Engine** section (EL) with 4 panels:
+
+**Load Engine (EL - load_reth metrics):**
+1. **Engine API P95 Latency** - forkchoice/getPayload/newPayload histograms
+2. **engine_getBlobs Hit/Miss** - Blob retrieval success vs. cache misses
+3. **Blob Cache Occupancy** - Items and bytes in EL blob cache
+4. **engine_getBlobs Requests** - Total request rate
+
+**Blob Engine (CL - consensus metrics):**
 
 1. **Blob Verifications (Total)** - Success and failure counters over time
 2. **Blob Verification Latency (P99/P50)** - KZG verification performance
@@ -399,7 +420,7 @@ Workarounds and tuning:
 
 ## Performance Tips
 
-- Use `--rate` and `--time` to shape load; keep an eye on Grafana for `get_payload_v3` and `new_payload_v3` rates and failures.
+- Use `--rate` and `--time` to shape load; keep an eye on Grafana for `get_payload_v4` and `new_payload_v4` rates and failures.
 - Reduce proposal timeouts in consensus config if payloads are reliably fast; increase them for larger payloads.
 - Run `make spam` from a separate terminal to continuously load the EL.
 
