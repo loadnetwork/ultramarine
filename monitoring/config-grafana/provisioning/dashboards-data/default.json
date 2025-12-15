@@ -601,6 +601,380 @@
     "fieldConfig": {
       "defaults": {
         "color": {
+          "mode": "thresholds"
+        },
+        "mappings": [],
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {
+              "color": "green",
+              "value": null
+            },
+            {
+              "color": "orange",
+              "value": 1
+            },
+            {
+              "color": "red",
+              "value": 50
+            }
+          ]
+        }
+      },
+      "overrides": []
+    },
+    "gridPos": {
+      "h": 4,
+      "w": 6,
+      "x": 12,
+      "y": 85
+    },
+    "id": 207,
+    "options": {
+      "colorMode": "value",
+      "graphMode": "none",
+      "justifyMode": "center",
+      "orientation": "horizontal",
+      "reduceOptions": {
+        "calcs": [
+          "lastNotNull"
+        ],
+        "fields": "",
+        "values": false
+      },
+      "textMode": "auto"
+    },
+    "pluginVersion": "11.5.1",
+    "targets": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "archiver_queue_len",
+        "instant": true,
+        "legendFormat": "queue len",
+        "range": false,
+        "refId": "A"
+      }
+    ],
+    "title": "Archiver queue len",
+    "type": "stat"
+  },
+  {
+    "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+    },
+    "fieldConfig": {
+      "defaults": {
+        "color": {
+          "mode": "thresholds"
+        },
+        "mappings": [],
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {
+              "color": "green",
+              "value": null
+            },
+            {
+              "color": "orange",
+              "value": 0.1
+            },
+            {
+              "color": "red",
+              "value": 1
+            }
+          ]
+        }
+      },
+      "overrides": []
+    },
+    "gridPos": {
+      "h": 4,
+      "w": 6,
+      "x": 18,
+      "y": 85
+    },
+    "id": 208,
+    "options": {
+      "colorMode": "value",
+      "graphMode": "none",
+      "justifyMode": "center",
+      "orientation": "horizontal",
+      "reduceOptions": {
+        "calcs": [
+          "lastNotNull"
+        ],
+        "fields": "",
+        "values": false
+      },
+      "textMode": "auto"
+    },
+    "pluginVersion": "11.5.1",
+    "targets": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "rate(archiver_upload_failures_total[$__rate_interval])",
+        "instant": false,
+        "legendFormat": "failures/s",
+        "range": true,
+        "refId": "A"
+      }
+    ],
+    "title": "Upload failures per second",
+    "type": "stat"
+  },
+  {
+    "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+    },
+    "fieldConfig": {
+      "defaults": {
+        "color": {
+          "mode": "palette-classic"
+        },
+        "custom": {
+          "axisBorderShow": false,
+          "axisCenteredZero": false,
+          "axisColorMode": "text",
+          "axisPlacement": "auto",
+          "drawStyle": "line",
+          "fillOpacity": 0,
+          "lineWidth": 2
+        },
+        "mappings": [],
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {
+              "color": "green",
+              "value": null
+            }
+          ]
+        },
+        "unit": "Bps"
+      },
+      "overrides": []
+    },
+    "gridPos": {
+      "h": 5,
+      "w": 12,
+      "x": 0,
+      "y": 89
+    },
+    "id": 209,
+    "options": {
+      "legend": {
+        "calcs": [],
+        "displayMode": "list",
+        "placement": "bottom",
+        "showLegend": true
+      },
+      "tooltip": {
+        "mode": "single",
+        "sort": "none"
+      }
+    },
+    "pluginVersion": "11.5.1",
+    "targets": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "rate(archiver_upload_bytes_total[$__rate_interval])",
+        "instant": false,
+        "legendFormat": "bytes/s",
+        "range": true,
+        "refId": "A"
+      }
+    ],
+    "title": "Archiver upload throughput (bytes/s)",
+    "type": "timeseries"
+  },
+  {
+    "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+    },
+    "fieldConfig": {
+      "defaults": {
+        "color": {
+          "mode": "palette-classic"
+        },
+        "custom": {
+          "axisBorderShow": false,
+          "axisCenteredZero": false,
+          "axisColorMode": "text",
+          "axisPlacement": "auto",
+          "drawStyle": "line",
+          "fillOpacity": 0,
+          "lineWidth": 2
+        },
+        "mappings": [],
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {
+              "color": "green",
+              "value": null
+            }
+          ]
+        },
+        "unit": "ops"
+      },
+      "overrides": []
+    },
+    "gridPos": {
+      "h": 5,
+      "w": 12,
+      "x": 12,
+      "y": 89
+    },
+    "id": 210,
+    "options": {
+      "legend": {
+        "calcs": [],
+        "displayMode": "list",
+        "placement": "bottom",
+        "showLegend": true
+      },
+      "tooltip": {
+        "mode": "single",
+        "sort": "none"
+      }
+    },
+    "pluginVersion": "11.5.1",
+    "targets": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "rate(archiver_upload_success_total[$__rate_interval])",
+        "instant": false,
+        "legendFormat": "blobs/s",
+        "range": true,
+        "refId": "A"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "rate(archiver_upload_failures_total[$__rate_interval])",
+        "instant": false,
+        "legendFormat": "failures/s",
+        "range": true,
+        "refId": "B"
+      }
+    ],
+    "title": "Archiver uploads (blobs/s)",
+    "type": "timeseries"
+  },
+  {
+    "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+    },
+    "fieldConfig": {
+      "defaults": {
+        "color": {
+          "mode": "palette-classic"
+        },
+        "custom": {
+          "axisBorderShow": false,
+          "axisCenteredZero": false,
+          "axisColorMode": "text",
+          "axisPlacement": "auto",
+          "drawStyle": "line",
+          "fillOpacity": 0,
+          "lineWidth": 2
+        },
+        "mappings": [],
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {
+              "color": "green",
+              "value": null
+            }
+          ]
+        },
+        "unit": "s"
+      },
+      "overrides": []
+    },
+    "gridPos": {
+      "h": 5,
+      "w": 24,
+      "x": 0,
+      "y": 94
+    },
+    "id": 211,
+    "options": {
+      "legend": {
+        "calcs": [],
+        "displayMode": "list",
+        "placement": "bottom",
+        "showLegend": true
+      },
+      "tooltip": {
+        "mode": "single",
+        "sort": "none"
+      }
+    },
+    "pluginVersion": "11.5.1",
+    "targets": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "histogram_quantile(0.95, sum(rate(archiver_upload_blob_duration_seconds_bucket[$__rate_interval])) by (le))",
+        "instant": false,
+        "legendFormat": "p95",
+        "range": true,
+        "refId": "A"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "editorMode": "code",
+        "expr": "histogram_quantile(0.50, sum(rate(archiver_upload_blob_duration_seconds_bucket[$__rate_interval])) by (le))",
+        "instant": false,
+        "legendFormat": "p50",
+        "range": true,
+        "refId": "B"
+      }
+    ],
+    "title": "Archiver upload latency (seconds)",
+    "type": "timeseries"
+  },
+  {
+    "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+    },
+    "fieldConfig": {
+      "defaults": {
+        "color": {
           "mode": "palette-classic"
         },
         "custom": {

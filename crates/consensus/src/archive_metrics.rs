@@ -36,8 +36,12 @@ pub struct Inner {
     pub jobs_success_total: Counter,
     /// Total failed archive jobs
     pub jobs_failure_total: Counter,
+    /// Total successful blob uploads to the archive provider
+    pub upload_success_total: Counter,
     /// Total upload failures to archive provider
     pub upload_failures_total: Counter,
+    /// Total bytes uploaded to the archive provider (successful uploads only)
+    pub upload_bytes_total: Counter,
     /// Archive notices with mismatched receipts (commitment/hash mismatch)
     pub receipt_mismatch_total: Counter,
     /// Total blobs pruned after archival
@@ -60,6 +64,8 @@ pub struct Inner {
     // === Histograms ===
     /// Duration of uploads to archive provider (seconds)
     pub upload_duration: Histogram,
+    /// Duration of a single blob upload attempt (seconds)
+    pub upload_blob_duration: Histogram,
     /// Time from notice emission to peer acknowledgment (seconds)
     pub notice_propagation: Histogram,
 }
@@ -69,7 +75,9 @@ impl Inner {
         Self {
             jobs_success_total: Counter::default(),
             jobs_failure_total: Counter::default(),
+            upload_success_total: Counter::default(),
             upload_failures_total: Counter::default(),
+            upload_bytes_total: Counter::default(),
             receipt_mismatch_total: Counter::default(),
             pruned_total: Counter::default(),
             served_total: Counter::default(),
@@ -82,6 +90,8 @@ impl Inner {
 
             // Upload duration: 10ms to 60s with exponential buckets
             upload_duration: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
+            // Per-blob upload duration: 10ms to 60s with exponential buckets
+            upload_blob_duration: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
             // Notice propagation: 1ms to 30s with exponential buckets
             notice_propagation: Histogram::new(exponential_buckets(0.001, 2.0, 15)),
         }
@@ -119,9 +129,21 @@ impl ArchiveMetrics {
             );
 
             registry.register(
+                "upload_success",
+                "Total successful blob uploads to archive provider",
+                metrics.upload_success_total.clone(),
+            );
+
+            registry.register(
                 "upload_failures",
                 "Total upload failures to archive provider",
                 metrics.upload_failures_total.clone(),
+            );
+
+            registry.register(
+                "upload_bytes",
+                "Total bytes uploaded to archive provider (successful uploads)",
+                metrics.upload_bytes_total.clone(),
             );
 
             registry.register(
@@ -179,6 +201,12 @@ impl ArchiveMetrics {
             );
 
             registry.register(
+                "upload_blob_duration_seconds",
+                "Duration of a single blob upload attempt to archive provider",
+                metrics.upload_blob_duration.clone(),
+            );
+
+            registry.register(
                 "notice_propagation_seconds",
                 "Time from notice emission to peer acknowledgment",
                 metrics.notice_propagation.clone(),
@@ -207,6 +235,12 @@ impl ArchiveMetrics {
     /// Record an upload failure.
     pub fn record_upload_failure(&self) {
         self.upload_failures_total.inc();
+    }
+
+    /// Record a successful blob upload and its byte size.
+    pub fn record_upload_success(&self, bytes: usize) {
+        self.upload_success_total.inc();
+        self.upload_bytes_total.inc_by(bytes as u64);
     }
 
     /// Record a receipt/commitment mismatch.
@@ -238,6 +272,11 @@ impl ArchiveMetrics {
     /// Record upload duration.
     pub fn observe_upload_duration(&self, duration: Duration) {
         self.upload_duration.observe(duration.as_secs_f64());
+    }
+
+    /// Observe the duration of a single blob upload attempt.
+    pub fn observe_upload_blob_duration(&self, duration: Duration) {
+        self.upload_blob_duration.observe(duration.as_secs_f64());
     }
 
     /// Record notice propagation time.

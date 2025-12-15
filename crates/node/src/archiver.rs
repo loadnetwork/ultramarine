@@ -333,7 +333,8 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
             let blob_data = sidecar.blob.data().as_ref();
 
             // Upload blob with retry/backoff
-            let locator = match self
+            let upload_start = std::time::Instant::now();
+            let upload_result = self
                 .upload_blob(
                     job.height,
                     job.round,
@@ -343,9 +344,15 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
                     versioned_hash,
                     blob_keccak,
                 )
-                .await
-            {
-                Ok(locator) => locator,
+                .await;
+            let upload_elapsed = upload_start.elapsed();
+            self.metrics.observe_upload_blob_duration(upload_elapsed);
+
+            let locator = match upload_result {
+                Ok(locator) => {
+                    self.metrics.record_upload_success(blob_data.len());
+                    locator
+                }
                 Err(err) => {
                     self.metrics.record_upload_failure();
                     return Err(err);

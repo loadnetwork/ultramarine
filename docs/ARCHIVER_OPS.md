@@ -127,7 +127,9 @@ When blobs are requested (via restream or value-sync):
 | Pruned (archived) | `MetadataOnly` package with archive notices containing locators |
 | Not found | Error |
 
-Peers receiving `MetadataOnly` should fetch blobs from the archive provider using the locator.
+Peers receiving `MetadataOnly` should treat blob bytes as unavailable over p2p (they were pruned on the sender).
+Ultramarine does not automatically re-download pruned blobs; it only propagates and persists archive notices/locators.
+External consumers (indexers, rollups, provers, explorers) can fetch blob bytes from the archive provider using the locator.
 
 ## Storage Provider Contract
 
