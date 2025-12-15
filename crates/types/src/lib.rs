@@ -4,6 +4,7 @@
 #![allow(missing_docs)]
 
 pub mod address;
+pub mod archive;
 pub mod constants;
 pub mod context;
 pub mod genesis;
@@ -55,3 +56,8 @@ pub mod consensus_block_metadata;
 // Ethereum EIP-4844 compatibility bridge that converts to BeaconBlockHeader
 // only when needed for BlobSidecar construction.
 pub mod blob_metadata;
+
+// Phase 6: Archive/Prune configuration
+// Added as part of Phase 6 archive/prune (PHASE6_ARCHIVE_PRUNE_FINAL.md)
+// Configuration for the background archiver worker
+pub mod archiver_config;

@@ -1,7 +1,7 @@
 //! The Application (or Node) definition. The Node trait implements the Consensus context and the
 //! cryptographic library used for signing.
 #![allow(missing_docs)]
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use color_eyre::eyre;
@@ -12,7 +12,7 @@ use malachitebft_app_channel::app::{
     types::{Keypair, core::VotingPower},
 };
 use rand::{CryptoRng, RngCore};
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc, task::JoinHandle};
 use ultramarine_blob_engine::{BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
 use ultramarine_cli::{config::Config, metrics};
 use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
@@ -22,6 +22,7 @@ use ultramarine_execution::{
 };
 use ultramarine_types::{
     address::Address,
+    archive::ArchiveNotice,
     codec::proto::ProtobufCodec,
     context::LoadContext,
     genesis::Genesis,
@@ -30,6 +31,8 @@ use ultramarine_types::{
     validator_set::{Validator, ValidatorSet},
 };
 use url::Url;
+
+use crate::archiver::{self, ArchiveJobSubmitter, ArchiverHandle};
 
 /// Main application struct implementing the consensus node functionality
 #[derive(Clone, Debug)]
@@ -87,7 +90,9 @@ impl Node for App {
     }
 
     fn load_config(&self) -> eyre::Result<Self::Config> {
-        Ok(self.config.clone())
+        let mut cfg = self.config.clone();
+        cfg.apply_archiver_env_overrides();
+        Ok(cfg)
     }
 
     fn get_signing_provider(&self, private_key: PrivateKey) -> Self::SigningProvider {
@@ -125,6 +130,9 @@ impl Node for App {
         let span = tracing::error_span!("node", moniker = %self.config.moniker);
         let _enter = span.enter();
 
+        // Load a single effective config (base + env overrides) and use it everywhere.
+        let effective_config = self.load_config()?;
+
         let private_key_file = self.load_private_key_file()?;
         let private_key = self.load_private_key(private_key_file);
         let public_key = self.get_public_key(&private_key);
@@ -144,7 +152,7 @@ impl Node for App {
         let (mut channels, engine_handle) = malachitebft_app_channel::start_engine(
             ctx,
             self.clone(),
-            self.config.clone(),
+            effective_config.clone(),
             codec, // wal_codec
             codec, // net_codec (same codec for both)
             self.start_height,
@@ -154,21 +162,65 @@ impl Node for App {
 
         let tx_event = channels.events.clone();
 
-        let registry = SharedRegistry::global().with_moniker(&self.config.moniker);
+        let registry = SharedRegistry::global().with_moniker(&effective_config.moniker);
         let metrics = DbMetrics::register(&registry);
         let blob_metrics = ultramarine_blob_engine::BlobEngineMetrics::register(&registry);
+        let archive_metrics =
+            ultramarine_consensus::archive_metrics::ArchiveMetrics::register(&registry);
 
-        if self.config.metrics.enabled {
-            tokio::spawn(metrics::serve(self.config.metrics.listen_addr));
+        if effective_config.metrics.enabled {
+            tokio::spawn(metrics::serve(effective_config.metrics.listen_addr));
         }
 
         let store = Store::open(self.get_home_dir().join("store.db"), metrics)?;
 
         // Initialize blob engine for EIP-4844 blob storage and KZG verification
+        // Wrapped in Arc to allow sharing with the archiver worker
         let blob_store = RocksDbBlobStore::open(self.get_home_dir().join("blob_store.db"))?;
-        let blob_engine = BlobEngineImpl::new(blob_store, blob_metrics.clone())?;
+        let blob_engine = Arc::new(BlobEngineImpl::new(blob_store, blob_metrics.clone())?);
 
         let start_height = self.start_height.unwrap_or_default();
+
+        // Create a separate signing provider for the archiver by loading the private key again
+        // (Ed25519Provider doesn't implement Clone, so we need to create a new instance)
+        let archiver_signer = {
+            let archiver_pk_file = self.load_private_key_file()?;
+            let archiver_pk = self.load_private_key(archiver_pk_file);
+            self.get_signing_provider(archiver_pk)
+        };
+        let archiver_address = address.clone();
+        let archive_metrics_for_archiver = archive_metrics.clone();
+
+        // Phase 6 strictness: no silent mock / missing config.
+        // In production binaries, mock:// backends are disallowed.
+        // If archiver is enabled, require provider_url/provider_id/bearer_token.
+        if effective_config.archiver.enabled && !cfg!(test) {
+            if effective_config.archiver.provider_url.starts_with("mock://") {
+                return Err(eyre::eyre!(
+                    "Archiver is enabled but provider_url={} is mock mode. \
+                     Mock backends are only allowed in tests.",
+                    effective_config.archiver.provider_url
+                ));
+            }
+            if effective_config.archiver.provider_url.trim().is_empty() {
+                return Err(eyre::eyre!("Archiver is enabled but archiver.provider_url is empty"));
+            }
+            if effective_config.archiver.provider_id.trim().is_empty() {
+                return Err(eyre::eyre!("Archiver is enabled but archiver.provider_id is empty"));
+            }
+            if effective_config.archiver.bearer_token.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(eyre::eyre!(
+                    "Archiver is enabled but archiver.bearer_token is not set. \
+                     Set ULTRAMARINE_ARCHIVER_BEARER_TOKEN or archiver.bearer_token in config."
+                ));
+            }
+            tracing::info!(
+                provider_url = %effective_config.archiver.provider_url,
+                provider_id = %effective_config.archiver.provider_id,
+                "Phase 6: Archiver configured for real provider"
+            );
+        }
+
         let mut state = State::new(
             genesis,
             ctx,
@@ -178,6 +230,7 @@ impl Node for App {
             store,
             blob_engine,
             blob_metrics, // Clone already done above
+            archive_metrics,
         );
 
         // Phase 4: Hydrate blob parent root from BlobMetadata (Layer 2)
@@ -185,6 +238,89 @@ impl Node for App {
 
         // Phase 4: Cleanup stale undecided blob metadata from crashes/timeouts
         state.cleanup_stale_blob_metadata().await?;
+
+        // Phase 6: Spawn archiver worker if enabled
+        let archiver_channels: Option<(
+            ArchiverHandle,
+            mpsc::Receiver<ArchiveNotice>,
+            ArchiveJobSubmitter,
+        )> = if effective_config.archiver.enabled {
+            // Tell State that archiver worker is enabled so commit() skips synchronous notices
+            state.set_archiver_enabled(true);
+
+            let (notice_tx, notice_rx) = mpsc::channel(100);
+            let handle = archiver::spawn_archiver(
+                effective_config.archiver.clone(),
+                notice_tx,
+                archiver_signer,
+                archiver_address,
+                archive_metrics_for_archiver,
+                state.blob_engine_shared(),
+            );
+            tracing::info!(
+                provider_id = %effective_config.archiver.provider_id,
+                "Phase 6: Archiver worker spawned"
+            );
+
+            let (job_submit_tx, mut job_submit_rx) = mpsc::unbounded_channel();
+            let worker_job_tx = handle.job_tx.clone();
+            tokio::spawn(async move {
+                while let Some(job) = job_submit_rx.recv().await {
+                    if let Err(e) = worker_job_tx.send(job).await {
+                        tracing::error!(
+                            error = %e,
+                            "Archiver worker channel closed; stopping dispatcher"
+                        );
+                        break;
+                    }
+                }
+            });
+
+            // Recover any pending archive jobs from previous run (crash recovery)
+            // Use blocking send to ensure all recovered jobs are enqueued - startup can wait.
+            match state.recover_pending_archive_jobs().await {
+                Ok(recovered_jobs) => {
+                    let count = recovered_jobs.len();
+                    let mut enqueued = 0;
+                    let mut failed = 0;
+                    for job in recovered_jobs {
+                        // Use async send (not try_send) to wait for queue space if needed
+                        // This ensures recovered jobs aren't dropped on startup
+                        match handle.job_tx.send(job).await {
+                            Ok(_) => enqueued += 1,
+                            Err(e) => {
+                                // Channel closed - worker died during startup
+                                tracing::error!(
+                                    error = %e,
+                                    "Archiver channel closed during job recovery"
+                                );
+                                failed += 1;
+                                break; // No point trying more if channel is closed
+                            }
+                        }
+                    }
+                    if count > 0 {
+                        tracing::info!(
+                            recovered_count = count,
+                            enqueued = enqueued,
+                            failed = failed,
+                            "Phase 6: Recovered pending archive jobs from previous run"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to recover pending archive jobs"
+                    );
+                }
+            }
+
+            Some((handle, notice_rx, job_submit_tx))
+        } else {
+            tracing::info!("Phase 6: Archiver disabled in config");
+            None
+        };
 
         // --- Initialize Execution Client ---
         // Development defaults: if Engine/Eth endpoints are not provided, derive them from
@@ -328,8 +464,26 @@ impl Node for App {
             Err(e) => return Err(eyre::eyre!("Failed to reach Eth RPC at {}: {}", eth_url_str, e)),
         }
 
+        // Extract job_tx and notice_rx from archiver_channels
+        let (archiver_job_tx, archive_notice_rx) = match archiver_channels {
+            Some((handle, notice_rx, submit_tx)) => {
+                // keep handle alive for lifetime of node
+                drop(handle);
+                (Some(submit_tx), Some(notice_rx))
+            }
+            None => (None, None),
+        };
+
         let app_handle = tokio::spawn(async move {
-            if let Err(e) = crate::app::run(&mut state, &mut channels, execution_client).await {
+            if let Err(e) = crate::app::run(
+                &mut state,
+                &mut channels,
+                execution_client,
+                archiver_job_tx,
+                archive_notice_rx,
+            )
+            .await
+            {
                 tracing::error!(%e, "Application error");
             }
         });

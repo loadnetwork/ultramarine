@@ -575,8 +575,25 @@ spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 	cargo run --bin ultramarine-utils -- spam --time=60 --rate=500 --rpc-url=http://127.0.0.1:8545
 
 .PHONY: spam-blobs
-spam-blobs: ## Spam the EL with EIP-4844 blob transactions (60s @ 50 tps, 128 blobs per tx).
-	cargo run --bin ultramarine-utils -- spam --time=60 --rate=50 --rpc-url=http://127.0.0.1:8545 --blobs --blobs-per-tx=6
+spam-blobs: ## Spam all three EL nodes with blob transactions (60s @ 50 tps per EL, 6 blobs per tx).
+	@echo "⚙️  Building ultramarine-utils spammer binary..."
+	@cargo build --quiet --bin ultramarine-utils
+	@echo "🚀 Spamming blob txs against load-reth RPCs on 8545, 18545, and 28545"
+	@set -e; \
+	  i=0; \
+	  for rpc in 8545 18545 28545; do \
+	    echo "→ blasting http://127.0.0.1:$$rpc"; \
+	    target/debug/ultramarine-utils spam \
+	      --time=60 \
+	      --rate=50 \
+	      --rpc-url=http://127.0.0.1:$$rpc \
+	      --blobs \
+	      --blobs-per-tx=6 \
+	      --signer-index=$$i \
+	      & \
+	    i=$$((i+1)); \
+	  done; \
+	  wait
 
 # Test Architecture:
 # - Tier0 (3 tests, ~8-10s): Component tests in consensus crate

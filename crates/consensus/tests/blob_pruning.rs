@@ -29,6 +29,8 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
 
     let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
     node.state.set_blob_retention_window_for_testing(TEST_RETENTION_WINDOW);
+    // Enable archiver mode to prevent auto-archival during commit
+    node.state.set_archiver_enabled(true);
 
     for height_idx in 0..TOTAL_HEIGHTS {
         let height = Height::new(height_idx as u64);
@@ -55,31 +57,29 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
     }
 
     let metrics = node.blob_metrics.snapshot();
-    let retention_window = TEST_RETENTION_WINDOW as usize;
-    let expected_pruned = TOTAL_HEIGHTS.saturating_sub(retention_window);
     assert_eq!(metrics.lifecycle_promoted, TOTAL_HEIGHTS as u64);
+
+    // With archiver enabled, blobs are NOT auto-archived during commit.
+    // Pruning only happens after actual archival via the archiver worker.
+    // Since we haven't archived anything, no blobs should be pruned.
     assert_eq!(
-        metrics.lifecycle_pruned, expected_pruned as u64,
-        "pruning metric should reflect heights beyond retention window"
+        metrics.lifecycle_pruned, 0,
+        "no pruning without actual archival (archiver_enabled=true)"
     );
 
-    // Storage should reflect only the retained heights.
-    assert_eq!(
-        metrics.storage_bytes_decided,
-        ((TOTAL_HEIGHTS - expected_pruned) * BYTES_PER_BLOB) as i64
+    // All decided blobs should still be present.
+    assert_eq!(metrics.storage_bytes_decided, (TOTAL_HEIGHTS * BYTES_PER_BLOB) as i64);
+
+    // All heights should retain their blobs until archived.
+    for height in 0..TOTAL_HEIGHTS {
+        let decided = node.state.blob_engine().get_for_import(Height::new(height as u64)).await?;
+        assert_eq!(decided.len(), 1, "height {} should retain its blob until archived", height);
+    }
+
+    assert!(
+        node.state.get_decided_value(Height::new(0)).await.is_some(),
+        "decided value at height 0 should remain until archival completes"
     );
-
-    // Heights older than retention window should have no decided blobs after pruning.
-    for height in 0..expected_pruned {
-        let decided = node.state.blob_engine().get_for_import(Height::new(height as u64)).await?;
-        assert!(decided.is_empty(), "height {} should be pruned", height);
-    }
-
-    // Remaining heights should stay accessible.
-    for height in expected_pruned..TOTAL_HEIGHTS {
-        let decided = node.state.blob_engine().get_for_import(Height::new(height as u64)).await?;
-        assert_eq!(decided.len(), 1, "height {} should retain its blob", height);
-    }
 
     // Current height should have advanced beyond the last committed height.
     assert_eq!(node.state.current_height, Height::new(TOTAL_HEIGHTS as u64));

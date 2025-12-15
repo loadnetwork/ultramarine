@@ -1,6 +1,6 @@
 /// ! High-level blob engine orchestration
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use ultramarine_types::{blob::BYTES_PER_BLOB, height::Height, proposal_part::BlobSidecar};
 
 use crate::{error::BlobEngineError, store::BlobStore, verifier::BlobVerifier};
@@ -115,9 +115,15 @@ pub trait BlobEngine: Send + Sync {
     /// * `indices` - Blob indices to delete
     async fn mark_archived(&self, height: Height, indices: &[u16]) -> Result<(), BlobEngineError>;
 
-    /// Prune all decided blobs before a given height
+    /// Prune all decided blobs before a given height.
     ///
-    /// Used for cleanup after finalization or archival.
+    /// **⚠️ WARNING**: This method performs height-only deletion without checking
+    /// archive status. Callers MUST ensure all blobs at heights being pruned have
+    /// been successfully archived before calling this method. For production use,
+    /// prefer `State::prune_archived_height` which performs proper archive verification.
+    ///
+    /// This method is intended for CLI/manual cleanup operations where the caller
+    /// has already verified archive status through `BlobMetadata`.
     ///
     /// # Arguments
     ///
@@ -126,6 +132,11 @@ pub trait BlobEngine: Send + Sync {
     /// # Returns
     ///
     /// Number of blobs deleted
+    ///
+    /// # Safety
+    ///
+    /// Calling this method without verifying archive status will result in
+    /// permanent data loss for un-archived blobs.
     async fn prune_archived_before(&self, height: Height) -> Result<usize, BlobEngineError>;
 
     /// Retrieve undecided blobs for a specific (height, round)
@@ -352,6 +363,12 @@ where
     }
 
     async fn prune_archived_before(&self, height: Height) -> Result<usize, BlobEngineError> {
+        // WARNING: This method does NOT check archive status - caller must verify
+        warn!(
+            before_height = height.as_u64(),
+            "⚠️  prune_archived_before called - ensure all blobs are archived first!"
+        );
+
         let count = self.store.prune_before(height).await?;
 
         // Estimate bytes (each blob is BYTES_PER_BLOB)

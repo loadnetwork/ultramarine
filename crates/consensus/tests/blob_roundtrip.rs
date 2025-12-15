@@ -26,6 +26,11 @@ async fn blob_roundtrip() -> color_eyre::Result<()> {
     let dirs = TestDirs::new();
     let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
+    // Enable archiver mode to prevent auto-archival of blobs during commit.
+    // When archiver_enabled=true, blobs are archived asynchronously by the archiver worker
+    // instead of being immediately pruned with placeholder locators.
+    node.state.set_archiver_enabled(true);
+
     use common::mocks::MockEngineApi;
     use ultramarine_execution::EngineApi;
 
@@ -39,12 +44,17 @@ async fn blob_roundtrip() -> color_eyre::Result<()> {
         raw_payload.clone(),
         Some(raw_bundle.clone()),
     );
-    let (payload, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
+    let (payload_result, maybe_bundle) = mock_engine.get_payload_with_blobs(payload_id).await?;
     let bundle = maybe_bundle.expect("bundle");
     let round = Round::new(0);
-    let (proposed, payload_bytes, maybe_sidecars) =
-        propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle))
-            .await?;
+    let (proposed, payload_bytes, maybe_sidecars) = propose_with_optional_blobs(
+        &mut node.state,
+        height,
+        round,
+        &payload_result.payload,
+        Some(&bundle),
+    )
+    .await?;
     let sidecars = maybe_sidecars.expect("sidecars present");
 
     assert_eq!(sidecars.len(), bundle.blobs.len(), "sidecar count matches blob bundle");

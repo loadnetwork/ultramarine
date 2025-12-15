@@ -123,11 +123,11 @@ Ultramarine includes comprehensive blob sidecar support (EIP-4844) with full obs
    make all
    ```
 
-2. **Run blob spam:**
+2. **Run blob spam across all EL RPC endpoints:**
    ```bash
    make spam-blobs
    ```
-   This sends 60 seconds of blob transactions (50 TPS, 6 blobs per transaction) to test blob lifecycle.
+   The Make target fans out across `http://127.0.0.1:{8545,18545,28545}` so every proposer’s EL sees the same workload (60 seconds @ 50 TPS per node, 6 blobs/tx). This prevents “empty block” rounds where only one EL had pending blobs.
 
 3. **Check blob metrics:**
    ```bash
@@ -347,7 +347,7 @@ Blob spam generates deterministic 131,072-byte blobs with valid KZG commitments 
 ### Convenience Make Targets
 
 - `make spam` → 60s @ 500 TPS (EIP-1559 transactions)
-- `make spam-blobs` → 60s @ 50 TPS with 6 blobs per transaction
+- `make spam-blobs` → 60s @ 50 TPS with 6 blobs per transaction against **all three** EL RPCs (8545/18545/28545) in parallel
 
 ## Quick EL Sanity Checks
 

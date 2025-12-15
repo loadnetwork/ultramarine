@@ -60,7 +60,13 @@ make release-dry        # cargo publish dry-run
 
 ### Local Testnet
 
-The Makefile includes targets for running a complete local testnet with either an HTTP or IPC based Engine API.
+The Makefile includes targets for running a complete local testnet with either an HTTP or IPC based Engine API.  
+Before starting the stack, copy `.env.example` → `.env`, set `ULTRAMARINE_ARCHIVER_BEARER_TOKEN` to your Load Cloud Platform (load_acc) API key (see the [LS3 with load_acc docs](https://docs.load.network/load-cloud-platform-lcp/ls3-with-load_acc)), and run `make` from the `ultramarine/` directory so Docker Compose automatically loads the file.
+
+```bash
+cp .env.example .env
+$EDITOR .env   # set ULTRAMARINE_ARCHIVER_BEARER_TOKEN=...
+```
 
 ```bash
 # Run a local testnet with Engine API over HTTP
@@ -80,6 +86,8 @@ The EL defaults to the published Load image `docker.io/loadnetwork/load-reth:v0.
 
 > **Genesis alignment:** every `make all` / `make all-ipc` regenerates `assets/genesis.json` and automatically wipes the EL datadirs (`rethdata/*`, `ipc/*`) via `make reset-el-state`. This keeps load-reth and Ultramarine on the exact same genesis. Do not point the EL at `etc/load-dev-genesis.json` when running with Ultramarine—the `assets/` file is the single source of truth. If you update the genesis manually, run `make reset-el-state` before restarting the stack so the EL database is rebuilt from the new config.
 
+> **Pinned P2P identities:** `assets/p2p-keys/reth{0,1,2}.key` hold the devnet’s discovery secrets. Compose passes them via `--p2p-secret-key`, so even if `rethdata/*` is wiped the load-reth nodes keep the same `enode://…` IDs and auto-peer using the hardcoded `--bootnodes`. If you rotate these keys, regenerate the files first (e.g. `openssl rand -hex 32 > assets/p2p-keys/reth0.key`), then update the `--bootnodes` entries in both compose files with the new `admin_nodeInfo` output.
+
 For more details on the testnet setup, see `docs/DEV_WORKFLOW.md`.
 
 ### Blob Testing (EIP-4844)
@@ -90,7 +98,7 @@ Test blob sidecars with full observability:
 # Start testnet
 make all
 
-# Run blob spam (60s @ 50 TPS, 6 blobs/tx)
+# Run blob spam (60s @ 50 TPS, 6 blobs/tx *per* EL RPC)
 make spam-blobs
 
 # Check blob metrics

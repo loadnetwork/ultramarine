@@ -66,7 +66,7 @@ pub(crate) fn generate_genesis(genesis_file: &str, chain_id: u64) -> Result<()> 
     // on March 13, 2024, at epoch 269,568.
     let date = NaiveDate::from_ymd_opt(2024, 3, 14).unwrap();
     let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-    let valid_cancun_timestamp = datetime.and_utc().timestamp() as u64;
+    let _valid_cancun_timestamp = datetime.and_utc().timestamp() as u64;
 
     // Create genesis configuration
     let genesis = Genesis {

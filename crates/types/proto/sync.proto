@@ -81,9 +81,11 @@ message FullPackage {
   bytes execution_payload_ssz = 2;        // Raw execution payload bytes
   repeated BlobSidecar blob_sidecars = 3; // Blob sidecars (~131KB each)
   repeated bytes execution_requests = 4;  // Execution layer requests (EIP-7685)
+  repeated ArchiveNotice archive_notices = 5; // Post-commit archive notices
 }
 
 // Metadata-only fallback (for pruned data)
 message MetadataOnlyPackage {
   Value value = 1;  // Just the Value metadata
+  repeated ArchiveNotice archive_notices = 2; // Archive notices with locators for pruned blobs
 }

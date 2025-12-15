@@ -11,25 +11,102 @@ use malachitebft_app_channel::{
 };
 use malachitebft_engine::host::Next;
 use ssz::Encode;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::State;
 use ultramarine_execution::client::ExecutionClient;
 use ultramarine_types::{
+    archive::ArchiveNotice,
     context::LoadContext,
     engine_api::{ExecutionBlock, load_prev_randao},
     height::Height,
+    proposal_part::ProposalPart,
     sync::SyncedValuePackage,
 };
+
+use crate::archiver::ArchiveJobSubmitter;
 
 pub async fn run(
     state: &mut State,
     channels: &mut Channels<LoadContext>,
     execution_layer: ExecutionClient,
+    archiver_job_tx: Option<ArchiveJobSubmitter>,
+    mut archive_notice_rx: Option<mpsc::Receiver<ArchiveNotice>>,
 ) -> eyre::Result<()> {
     info!("🚀 App message loop starting");
-    while let Some(msg) = channels.consensus.recv().await {
+    state.rehydrate_pending_prunes().await?;
+
+    loop {
+        // Use tokio::select! to poll both consensus channel and archive notice channel
+        let msg = tokio::select! {
+            // Poll consensus channel
+            consensus_msg = channels.consensus.recv() => {
+                match consensus_msg {
+                    Some(msg) => msg,
+                    None => {
+                        // Consensus channel closed - exit the loop
+                        return Err(eyre!("Consensus channel closed unexpectedly"));
+                    }
+                }
+            }
+            // Poll archive notice channel if available
+            notice = async {
+                match &mut archive_notice_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match notice {
+                    Some(notice) => {
+                        // Handle archive notice from the archiver worker
+                        debug!(
+                            height = %notice.body.height,
+                            blob_index = %notice.body.blob_index,
+                            "📦 Received archive notice from worker"
+                        );
+                        if let Err(e) = state.handle_archive_notice(notice.clone()).await {
+                            error!("Failed to handle archive notice: {}", e);
+                        }
+
+                        // Broadcast notice to peers via ProposalPart::ArchiveNotice
+                        let broadcast_start = std::time::Instant::now();
+                        let stream_message = state.stream_archive_notice(notice.clone());
+                        match channels
+                            .network
+                            .send(NetworkMsg::PublishProposalPart(stream_message))
+                            .await
+                        {
+                            Ok(_) => {
+                                state.observe_notice_propagation(broadcast_start.elapsed());
+                                info!(
+                                    height = %notice.body.height,
+                                    index = %notice.body.blob_index,
+                                    "📡 Broadcast ArchiveNotice from worker"
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    height = %notice.body.height,
+                                    index = %notice.body.blob_index,
+                                    error = %e,
+                                    "Failed to broadcast ArchiveNotice from worker"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        // Archive notice channel closed (worker stopped)
+                        // Clear the receiver so we fall through to pending() and don't spin
+                        warn!("Archive notice channel closed, archiver worker stopped");
+                        archive_notice_rx = None;
+                    }
+                }
+                // Continue polling - don't exit the loop
+                continue;
+            }
+        };
+
         debug!("📨 Received message: {:?}", std::mem::discriminant(&msg));
         match msg {
             // The first message to handle is the `ConsensusReady` message, signaling to the app
@@ -202,13 +279,13 @@ pub async fn run(
                             }
                         };
 
-                        // Get blobs from blob_engine if they exist, then rebuild with fresh header
+                        // Fetch blobs via serving contract; fall back to metadata-only when pruned
+                        let mut pruned_locators: Option<Vec<String>> = None;
                         let restream_blob_sidecars = if blob_metadata.blob_count() == 0 {
                             None
                         } else {
                             match state
-                                .blob_engine()
-                                .get_undecided_blobs(height, proposal_round.as_i64())
+                                .get_undecided_blobs_with_status_check(height, proposal_round)
                                 .await
                             {
                                 Ok(sidecars) if !sidecars.is_empty() => {
@@ -237,12 +314,50 @@ pub async fn run(
                                     );
                                     continue;
                                 }
+                                Err(ultramarine_blob_engine::BlobEngineError::BlobsPruned {
+                                    locators,
+                                    ..
+                                }) => {
+                                    pruned_locators = Some(locators.clone());
+                                    warn!(
+                                        %height,
+                                        %proposal_round,
+                                        locator_count = %locators.len(),
+                                        "Blobs pruned for restream; sending metadata-only with archive notices"
+                                    );
+                                    if let Some(first) = locators.get(0) {
+                                        debug!(
+                                            %height,
+                                            %proposal_round,
+                                            locator = %first,
+                                            "First locator for pruned restream height"
+                                        );
+                                    }
+                                    if let Err(e) =
+                                        restream_archive_notices(state, channels, height).await
+                                    {
+                                        error!(
+                                            %height,
+                                            "Failed to restream archive notices for pruned height: {}",
+                                            e
+                                        );
+                                    }
+                                    None
+                                }
                                 Err(e) => {
                                     error!(%height, %proposal_round, "Failed to get blobs: {}", e);
                                     continue;
                                 }
                             }
                         };
+
+                        if pruned_locators.is_some() && blob_metadata.blob_count() > 0 {
+                            info!(
+                                %height,
+                                %proposal_round,
+                                "Restreaming metadata-only payload (peers should fetch blobs from archive)"
+                            );
+                        }
 
                         // If we're restreaming into a *new* round, replicate the proposal and
                         // payload under the target round locally so commit() can find it later.
@@ -338,6 +453,15 @@ pub async fn run(
                                 break;
                             }
                         }
+
+                        if let Err(e) = restream_archive_notices(state, channels, height).await {
+                            error!(
+                                %height,
+                                %round,
+                                error = %e,
+                                "Failed to restream archive notices"
+                            );
+                        }
                     }
                     Ok(None) => {
                         // This can happen if we've already pruned the proposal from our store.
@@ -360,6 +484,26 @@ pub async fn run(
             // have all its constituent parts. Then we send that value back to consensus for it to
             // consider and vote for or against it (ie. vote `nil`), depending on its validity.
             AppMsg::ReceivedProposalPart { from, part, reply } => {
+                if let Some(proposal_part) = part.content.as_data() {
+                    if let Some(notice) = proposal_part.as_archive_notice() {
+                        match state.handle_archive_notice(notice.clone()).await {
+                            Ok(_) => {
+                                debug!(
+                                    height = %notice.body.height,
+                                    index = %notice.body.blob_index,
+                                    "Processed ArchiveNotice"
+                                );
+                            }
+                            Err(e) => {
+                                error!("Error processing ArchiveNotice: {}", e);
+                            }
+                        }
+                        if reply.send(None).is_err() {
+                            error!("Failed to send reply for ArchiveNotice");
+                        }
+                        continue;
+                    }
+                }
                 let (part_type, part_size) = match &part.content {
                     StreamContent::Data(part) => (part.get_type(), part.size_bytes()),
                     StreamContent::Fin => ("end of stream", 0),
@@ -515,6 +659,37 @@ pub async fn run(
                     "✅ Decided certificate processed successfully"
                 );
 
+                // Phase 6: Handle archiving - either via worker or sync notices
+                if let Some(job) = outcome.archive_job.clone() {
+                    if let Some(job_tx) = &archiver_job_tx {
+                        let job_height = job.height;
+                        let blob_count = job.blob_indices.len();
+                        if let Err(e) = job_tx.send(job) {
+                            error!(
+                                height = %job_height,
+                                blob_count = blob_count,
+                                error = %e,
+                                "Failed to submit archive job; requesting consensus restart"
+                            );
+                            let _ = reply
+                                .send(Next::Restart(height, state.get_validator_set().clone()));
+                            continue;
+                        }
+
+                        info!(
+                            height = %job_height,
+                            blob_count = blob_count,
+                            "📦 Submitted archive job to dispatcher"
+                        );
+                    } else {
+                        warn!(
+                            height = %height,
+                            "Archiver worker disabled but node produced blobs; \
+                             these blobs will remain pending until the worker is configured"
+                        );
+                    }
+                }
+
                 // Pause briefly before starting next height, just to make following the logs easier
                 // tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -605,11 +780,13 @@ pub async fn run(
                         let execution_requests =
                             state.get_execution_requests(height, round).await.unwrap_or_default();
 
-                        // Attempt to retrieve blob sidecars
-                        let blob_sidecars_result = state.blob_engine().get_for_import(height).await;
+                        // Attempt to retrieve blob sidecars (with pruned status check)
+                        let blob_sidecars_result = state.get_blobs_with_status_check(height).await;
+                        let archive_notices =
+                            state.load_archive_notices(height).await.unwrap_or_default();
 
                         // Build the sync package
-                        let package = match (payload_bytes, blob_sidecars_result) {
+                        let package = match (payload_bytes, &blob_sidecars_result) {
                             (Some(payload), Ok(blobs)) if !blobs.is_empty() => {
                                 info!(
                                     %height,
@@ -621,8 +798,9 @@ pub async fn run(
                                 SyncedValuePackage::Full {
                                     value: decided_value.value.clone(),
                                     execution_payload_ssz: payload,
-                                    blob_sidecars: blobs,
+                                    blob_sidecars: blobs.clone(),
                                     execution_requests: execution_requests.clone(),
+                                    archive_notices: archive_notices.clone(),
                                 }
                             }
                             (Some(payload), Ok(_blobs)) => {
@@ -638,18 +816,52 @@ pub async fn run(
                                     execution_payload_ssz: payload,
                                     blob_sidecars: vec![],
                                     execution_requests: execution_requests.clone(),
+                                    archive_notices: archive_notices.clone(),
+                                }
+                            }
+                            (
+                                Some(_payload),
+                                Err(ultramarine_blob_engine::BlobEngineError::BlobsPruned {
+                                    locators,
+                                    ..
+                                }),
+                            ) => {
+                                // Blobs have been pruned - send MetadataOnly with archive notices
+                                // The receiving peer can use the locators to fetch from external
+                                // archive NOTE: We do NOT send Full
+                                // with empty sidecars as that causes
+                                // process_synced_package to panic (empty hashes vs non-empty
+                                // commitments)
+                                warn!(
+                                    %height,
+                                    %round,
+                                    locator_count = locators.len(),
+                                    notice_count = archive_notices.len(),
+                                    "Blobs pruned, sending MetadataOnly with archive notices"
+                                );
+                                if !locators.is_empty() {
+                                    debug!(
+                                        %height,
+                                        %round,
+                                        first_locator = %locators[0],
+                                        "Blob archived; operators should serve via external locator"
+                                    );
+                                }
+                                SyncedValuePackage::MetadataOnly {
+                                    value: decided_value.value.clone(),
+                                    archive_notices: archive_notices.clone(),
                                 }
                             }
                             _ => {
-                                // In pre-v0 this shouldn't happen (no pruning yet)
-                                // But provide safe fallback
+                                // Payload missing or other error
                                 error!(
                                     %height,
                                     %round,
-                                    "Payload or blobs missing, sending MetadataOnly (this shouldn't happen in pre-v0!)"
+                                    "Payload or blobs missing/error, sending MetadataOnly"
                                 );
                                 SyncedValuePackage::MetadataOnly {
                                     value: decided_value.value.clone(),
+                                    archive_notices: archive_notices.clone(),
                                 }
                             }
                         };
@@ -678,11 +890,22 @@ pub async fn run(
             }
         }
     }
+}
 
-    // If we get there, it can only be because the channel we use to receive message
-    // from consensus has been closed, meaning that the consensus actor has died.
-    // We can do nothing but return an error here.
-    Err(eyre!("Consensus channel closed unexpectedly"))
+async fn restream_archive_notices(
+    state: &mut State,
+    channels: &mut Channels<LoadContext>,
+    height: Height,
+) -> eyre::Result<()> {
+    let notices = state.load_archive_notices(height).await?;
+    if notices.is_empty() {
+        return Ok(());
+    }
+    for notice in notices {
+        let stream_message = state.stream_archive_notice(notice);
+        channels.network.send(NetworkMsg::PublishProposalPart(stream_message)).await?;
+    }
+    Ok(())
 }
 
 async fn handle_get_value(
@@ -769,7 +992,32 @@ async fn handle_get_value(
     for stream_message in
         state.stream_proposal(proposal, bytes, stream_sidecars, &execution_requests, None)
     {
-        info!(%height, %round, "Streaming proposal part: {stream_message:?}");
+        let part_desc = match &stream_message.content {
+            StreamContent::Fin => "Fin".to_string(),
+            StreamContent::Data(part) => match part {
+                ProposalPart::Init(_) => "Init".to_string(),
+                ProposalPart::Data(data) => format!("Data(len={} bytes)", data.size_bytes()),
+                ProposalPart::BlobSidecar(sidecar) => {
+                    format!(
+                        "BlobSidecar(index={}, bytes={})",
+                        sidecar.index,
+                        sidecar.blob.data().len()
+                    )
+                }
+                ProposalPart::ArchiveNotice(notice) => format!(
+                    "ArchiveNotice(height={}, index={})",
+                    notice.body.height, notice.body.blob_index
+                ),
+                ProposalPart::Fin(_) => "Fin(part)".to_string(),
+            },
+        };
+        info!(
+            %height,
+            %round,
+            sequence = stream_message.sequence,
+            part = %part_desc,
+            "Streaming proposal part"
+        );
         channels
             .network
             .send(NetworkMsg::PublishProposalPart(stream_message))

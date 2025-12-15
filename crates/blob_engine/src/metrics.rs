@@ -99,13 +99,13 @@ impl BlobEngineMetrics {
         registry.with_prefix("blob_engine", |registry| {
             // Verification metrics
             registry.register(
-                "verifications_success_total",
+                "verifications_success",
                 "Successful blob KZG proof verifications",
                 metrics.verifications_success.clone(),
             );
 
             registry.register(
-                "verifications_failure_total",
+                "verifications_failure",
                 "Failed blob KZG proof verifications",
                 metrics.verifications_failure.clone(),
             );
@@ -143,32 +143,32 @@ impl BlobEngineMetrics {
 
             // Lifecycle metrics
             registry.register(
-                "lifecycle_promoted_total",
+                "lifecycle_promoted",
                 "Blobs promoted to decided state",
                 metrics.lifecycle_promoted.clone(),
             );
 
             registry.register(
-                "lifecycle_dropped_total",
+                "lifecycle_dropped",
                 "Blobs dropped from undecided state",
                 metrics.lifecycle_dropped.clone(),
             );
 
             registry.register(
-                "lifecycle_pruned_total",
+                "lifecycle_pruned",
                 "Decided blobs pruned/archived",
                 metrics.lifecycle_pruned.clone(),
             );
 
             // Restream/Sync metrics
             registry.register(
-                "restream_rebuilds_total",
+                "restream_rebuilds",
                 "Blob metadata rebuilds during restream",
                 metrics.restream_rebuilds.clone(),
             );
 
             registry.register(
-                "sync_failures_total",
+                "sync_failures",
                 "Blob sync/fetch failures",
                 metrics.sync_failures.clone(),
             );

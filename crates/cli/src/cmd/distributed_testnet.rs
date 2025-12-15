@@ -297,5 +297,6 @@ fn generate_distributed_config(
         logging,
         runtime,
         test: TestConfig::default(),
+        archiver: Default::default(),
     }
 }

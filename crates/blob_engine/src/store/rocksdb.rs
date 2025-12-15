@@ -57,6 +57,31 @@ impl RocksDbBlobStore {
         Ok(Self { db: Arc::new(db) })
     }
 
+    /// Open the blob store in read-only mode without taking a lock.
+    ///
+    /// This is primarily used by integration tests that inspect on-disk state
+    /// while the node (and archiver worker) may still be running. Read-only
+    /// mode avoids the "lock held by current process" error emitted by
+    /// RocksDB when attempting to reopen the database.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, BlobStoreError> {
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(false);
+        db_opts.create_missing_column_families(false);
+
+        let cf_undecided = ColumnFamilyDescriptor::new(CF_UNDECIDED, Options::default());
+        let cf_decided = ColumnFamilyDescriptor::new(CF_DECIDED, Options::default());
+
+        let db = DB::open_cf_descriptors_read_only(
+            &db_opts,
+            path,
+            vec![cf_undecided, cf_decided],
+            // error_if_log_file_exist =
+            false,
+        )?;
+
+        Ok(Self { db: Arc::new(db) })
+    }
+
     /// Get column family handle, returning error if not found
     fn cf_handle(&self, name: &str) -> Result<&rocksdb::ColumnFamily, BlobStoreError> {
         self.db

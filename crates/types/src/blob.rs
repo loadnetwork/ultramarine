@@ -38,14 +38,19 @@
 //! - Polynomial commitments: https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/polynomial-commitments.md
 
 // Use Alloy's versioned hash calculation (uses SHA-256 per EIP-4844 spec)
-use alloy_eips::eip4844::kzg_to_versioned_hash;
+// Re-export so other crates can depend on ultramarine_types instead of alloy directly.
+pub use alloy_eips::eip4844::kzg_to_versioned_hash;
 // Phase 1b: Import Alloy's BlobsBundleV1 for conversion from Engine API responses
 use alloy_rpc_types_engine::BlobsBundleV1;
 use malachitebft_proto::{Error as ProtoError, Protobuf};
 use serde::{Deserialize, Serialize};
+use sha3::{Digest as Sha3Digest, Keccak256};
 use tree_hash::{PackedEncoding, TreeHash, TreeHashType};
 
-use crate::{aliases::Bytes, proto};
+use crate::{
+    aliases::{B256, Bytes},
+    proto,
+};
 
 /// The number of bytes in a single blob.
 ///
@@ -196,6 +201,14 @@ impl Blob {
     #[inline]
     pub const fn size(&self) -> usize {
         BYTES_PER_BLOB
+    }
+
+    /// Computes the keccak256 hash of the blob bytes.
+    #[inline]
+    pub fn keccak_hash(&self) -> B256 {
+        let mut hasher = Keccak256::new();
+        hasher.update(self.data.as_ref());
+        B256::from_slice(hasher.finalize().as_slice())
     }
 
     /// Consumes the blob and returns the underlying data.
@@ -712,6 +725,11 @@ impl BlobsBundle {
                 hash.0 // Convert B256 to [u8; 32]
             })
             .collect()
+    }
+
+    /// Returns keccak256 hashes for each blob's bytes.
+    pub fn blob_keccak_hashes(&self) -> Vec<B256> {
+        self.blobs.iter().map(|blob| blob.keccak_hash()).collect()
     }
 
     /// Returns the number of blobs in the bundle.

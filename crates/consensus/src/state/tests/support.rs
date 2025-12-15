@@ -35,10 +35,13 @@ use crate::{
 };
 
 pub fn sample_blob_metadata(height: Height, parent_blob_root: B256) -> BlobMetadata {
+    let commitments = vec![KzgCommitment::new([42u8; 48])];
+    let blob_hashes = commitments.iter().map(|_| B256::ZERO).collect();
     BlobMetadata::new(
         height,
         parent_blob_root,
-        vec![KzgCommitment::new([42u8; 48])],
+        commitments,
+        blob_hashes,
         sample_execution_payload_header(),
         Some(0),
     )
@@ -166,6 +169,7 @@ pub fn build_state(
     let address = validator.address.clone();
 
     let blob_metrics = ultramarine_blob_engine::BlobEngineMetrics::new();
+    let archive_metrics = crate::archive_metrics::ArchiveMetrics::new();
     let state = State::new(
         genesis,
         LoadContext::new(),
@@ -173,8 +177,9 @@ pub fn build_state(
         address,
         start_height,
         store,
-        mock_engine.clone(),
+        Arc::new(mock_engine.clone()),
         blob_metrics,
+        archive_metrics,
     );
 
     (state, tmp)

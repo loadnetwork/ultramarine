@@ -64,7 +64,10 @@
 use bytes::Bytes;
 use malachitebft_proto::{Error as ProtoError, Protobuf};
 
-use crate::{aliases::Bytes as AlloyBytes, proposal_part::BlobSidecar, proto, value::Value};
+use crate::{
+    aliases::Bytes as AlloyBytes, archive::ArchiveNotice, proposal_part::BlobSidecar, proto,
+    value::Value,
+};
 
 /// Synced block data package for state synchronization
 ///
@@ -126,17 +129,20 @@ pub enum SyncedValuePackage {
         ///
         /// Stored as opaque byte arrays with the request type prepended.
         execution_requests: Vec<AlloyBytes>,
+
+        /// Archive notices emitted post-commit for blobs at this height.
+        archive_notices: Vec<ArchiveNotice>,
     },
 
     /// Metadata-only (blobs not available)
     ///
-    /// Fallback when: Execution payload or blobs are missing.
+    /// Fallback when: Execution payload or blobs are missing, or blobs have been pruned.
     ///
-    /// In pre-v0 this shouldn't happen (no pruning yet), but provides a
-    /// safe degradation path. The syncing peer will receive just the Value
-    /// metadata and should skip EL import (assuming EL synced independently).
+    /// Used for pruned heights where actual blob data is no longer available locally.
+    /// The syncing peer will receive the Value metadata and archive notices containing
+    /// locators for fetching blobs from external archives.
     ///
-    /// **Size**: ~2KB (just Value metadata)
+    /// **Size**: ~2KB (Value metadata) + archive notices
     MetadataOnly {
         /// Just the Value (metadata: header + commitments)
         ///
@@ -144,6 +150,11 @@ pub enum SyncedValuePackage {
         /// - ExecutionPayloadHeader (lightweight, no transactions)
         /// - KZG commitments (48 bytes each)
         value: Value,
+        /// Archive notices with locators for pruned blobs
+        ///
+        /// When blobs have been pruned, these notices provide the storage
+        /// locators where the blobs can be fetched from external archives.
+        archive_notices: Vec<ArchiveNotice>,
     },
 }
 
@@ -212,7 +223,7 @@ impl SyncedValuePackage {
     pub fn value_metadata(&self) -> &Value {
         match self {
             Self::Full { value, .. } => value,
-            Self::MetadataOnly { value } => value,
+            Self::MetadataOnly { value, .. } => value,
         }
     }
 
@@ -259,15 +270,23 @@ impl SyncedValuePackage {
     /// - `MetadataOnly`: ~2KB
     pub fn estimated_size(&self) -> usize {
         match self {
-            Self::Full { value, execution_payload_ssz, blob_sidecars, execution_requests } => {
+            Self::Full {
+                value,
+                execution_payload_ssz,
+                blob_sidecars,
+                execution_requests,
+                archive_notices: _,
+            } => {
                 value.size_bytes() +
                     execution_payload_ssz.len() +
                     execution_requests.iter().map(|r| r.len()).sum::<usize>() +
                     blob_sidecars.iter().map(|b| b.size_bytes()).sum::<usize>() +
                     100 // Overhead for enum tag, lengths, etc.
             }
-            Self::MetadataOnly { value } => {
-                value.size_bytes() + 50 // Overhead
+            Self::MetadataOnly { value, archive_notices } => {
+                value.size_bytes() +
+                    archive_notices.len() * 200 + // Approximate size per notice
+                    50 // Overhead
             }
         }
     }
@@ -282,27 +301,32 @@ impl Protobuf for SyncedValuePackage {
     fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
         match proto.package {
             Some(proto::synced_value_package::Package::Full(full)) => {
-                // Extract Value
                 let value = full
                     .value
                     .ok_or_else(|| ProtoError::missing_field::<proto::FullPackage>("value"))
                     .and_then(Value::from_proto)?;
 
-                // Extract blob sidecars
                 let blob_sidecars = full
                     .blob_sidecars
                     .into_iter()
-                    .map(|proto_sidecar| BlobSidecar::from_proto(proto_sidecar))
+                    .map(BlobSidecar::from_proto)
                     .collect::<Result<Vec<_>, _>>()?;
 
                 let execution_requests =
                     full.execution_requests.into_iter().map(AlloyBytes::from).collect();
+
+                let archive_notices = full
+                    .archive_notices
+                    .into_iter()
+                    .map(ArchiveNotice::from_proto)
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 Ok(SyncedValuePackage::Full {
                     value,
                     execution_payload_ssz: full.execution_payload_ssz,
                     blob_sidecars,
                     execution_requests,
+                    archive_notices,
                 })
             }
             Some(proto::synced_value_package::Package::MetadataOnly(metadata)) => {
@@ -311,7 +335,13 @@ impl Protobuf for SyncedValuePackage {
                     .ok_or_else(|| ProtoError::missing_field::<proto::MetadataOnlyPackage>("value"))
                     .and_then(Value::from_proto)?;
 
-                Ok(SyncedValuePackage::MetadataOnly { value })
+                let archive_notices = metadata
+                    .archive_notices
+                    .into_iter()
+                    .map(ArchiveNotice::from_proto)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(SyncedValuePackage::MetadataOnly { value, archive_notices })
             }
             None => Err(ProtoError::missing_field::<proto::SyncedValuePackage>("package")),
         }
@@ -324,10 +354,16 @@ impl Protobuf for SyncedValuePackage {
                 execution_payload_ssz,
                 blob_sidecars,
                 execution_requests,
+                archive_notices,
             } => {
                 let proto_blob_sidecars = blob_sidecars
                     .iter()
                     .map(|sidecar| sidecar.to_proto())
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let proto_archive_notices = archive_notices
+                    .iter()
+                    .map(|notice| notice.to_proto())
                     .collect::<Result<Vec<_>, _>>()?;
 
                 proto::synced_value_package::Package::Full(proto::FullPackage {
@@ -339,11 +375,18 @@ impl Protobuf for SyncedValuePackage {
                         .cloned()
                         .map(|req| req.0)
                         .collect(),
+                    archive_notices: proto_archive_notices,
                 })
             }
-            SyncedValuePackage::MetadataOnly { value } => {
+            SyncedValuePackage::MetadataOnly { value, archive_notices } => {
+                let proto_archive_notices = archive_notices
+                    .iter()
+                    .map(|notice| notice.to_proto())
+                    .collect::<Result<Vec<_>, _>>()?;
+
                 proto::synced_value_package::Package::MetadataOnly(proto::MetadataOnlyPackage {
                     value: Some(value.to_proto()?),
+                    archive_notices: proto_archive_notices,
                 })
             }
         };
@@ -369,6 +412,7 @@ mod tests {
             execution_payload_ssz: Bytes::from(vec![1u8; 1024]),
             blob_sidecars: vec![],
             execution_requests: Vec::new(),
+            archive_notices: Vec::new(),
         };
 
         assert!(package.is_full());
@@ -380,7 +424,8 @@ mod tests {
     fn test_synced_value_package_metadata_only_is_not_full() {
         #[allow(deprecated)]
         let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
-        let package = SyncedValuePackage::MetadataOnly { value: value.clone() };
+        let package =
+            SyncedValuePackage::MetadataOnly { value: value.clone(), archive_notices: vec![] };
 
         assert!(!package.is_full());
         assert!(package.execution_payload().is_none());
@@ -401,6 +446,7 @@ mod tests {
             execution_payload_ssz: payload.clone(),
             blob_sidecars: vec![sidecar],
             execution_requests: Vec::new(),
+            archive_notices: Vec::new(),
         };
 
         // Encode
@@ -419,7 +465,8 @@ mod tests {
     fn test_encode_decode_roundtrip_metadata_only() {
         #[allow(deprecated)]
         let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
-        let package = SyncedValuePackage::MetadataOnly { value: value.clone() };
+        let package =
+            SyncedValuePackage::MetadataOnly { value: value.clone(), archive_notices: vec![] };
 
         // Encode
         let encoded = package.encode().expect("Failed to encode");
@@ -457,6 +504,7 @@ mod tests {
             execution_payload_ssz: payload,
             blob_sidecars: sidecars,
             execution_requests: Vec::new(),
+            archive_notices: Vec::new(),
         };
 
         // Roundtrip
@@ -487,6 +535,7 @@ mod tests {
             execution_payload_ssz: payload,
             blob_sidecars: vec![sidecar],
             execution_requests: Vec::new(),
+            archive_notices: Vec::new(),
         };
 
         let size = package.estimated_size();
@@ -500,7 +549,7 @@ mod tests {
     fn test_estimated_size_metadata_only() {
         #[allow(deprecated)]
         let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
-        let package = SyncedValuePackage::MetadataOnly { value };
+        let package = SyncedValuePackage::MetadataOnly { value, archive_notices: vec![] };
 
         let size = package.estimated_size();
 
@@ -532,7 +581,7 @@ mod tests {
     fn test_protobuf_roundtrip_metadata_only() {
         #[allow(deprecated)]
         let value = Value::from_bytes(Bytes::from(vec![0u8; 32]));
-        let package = SyncedValuePackage::MetadataOnly { value };
+        let package = SyncedValuePackage::MetadataOnly { value, archive_notices: vec![] };
 
         // Encode using protobuf
         let encoded = package.encode().expect("Failed to encode");
@@ -560,6 +609,7 @@ mod tests {
             execution_payload_ssz: payload,
             blob_sidecars: vec![sidecar],
             execution_requests: Vec::new(),
+            archive_notices: Vec::new(),
         };
 
         // Encode using protobuf

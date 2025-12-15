@@ -110,6 +110,7 @@ message ProposalPart {
         ProposalData data = 2;
         BlobSidecar blob_sidecar = 3;  // Phase 3: EIP-4844 blob sidecar
         ProposalFin fin = 4;
+        ArchiveNotice archive_notice = 5;
     }
 }
 
@@ -187,4 +188,29 @@ message BlobMetadata {
     uint32 blob_count = 4;                 // Number of blobs (0 for blobless)
     ExecutionPayloadHeader execution_payload_header = 5;
     optional uint64 proposer_index_hint = 6;
+    repeated bytes blob_keccak = 7;        // keccak256 hash of blob bytes (per blob)
+    repeated ArchiveRecord archival_records = 8; // Archive records per blob index
+    bool pruned = 9;                       // True once blobs at this height have been pruned
+}
+
+message ArchiveRecord {
+    ArchiveNoticeBody body = 1;
+    Signature archive_signature = 2;
+}
+
+message ArchiveNotice {
+    ArchiveNoticeBody body = 1;
+    Signature signature = 2;
+}
+
+message ArchiveNoticeBody {
+    uint64 height = 1;
+    int32 round = 2;
+    uint32 blob_index = 3;
+    bytes kzg_commitment = 4;
+    bytes blob_keccak = 5;
+    string provider_id = 6;
+    string locator = 7;
+    Address archived_by = 8;
+    uint64 archived_at = 9;
 }
