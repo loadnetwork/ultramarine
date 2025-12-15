@@ -355,7 +355,7 @@ pub async fn run(
                             info!(
                                 %height,
                                 %proposal_round,
-                                "Restreaming metadata-only payload (peers should fetch blobs from archive)"
+                                "Restreaming metadata-only payload (blobs pruned on sender; locators included for external consumers)"
                             );
                         }
 

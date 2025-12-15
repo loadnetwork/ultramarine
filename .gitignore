@@ -1,6 +1,8 @@
 /target
 debug/
 ipc/
+assets/genesis.json
+assets/jwtsecret
 
 .vscode
 .idea
