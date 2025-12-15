@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     address::Address,
     // Phase 3: Import blob types for BlobSidecar
-    aliases::Bytes as AlloyBytes,
+    aliases::{B256, Bytes as AlloyBytes},
+    archive::ArchiveNotice,
     blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof},
     codec::proto::{decode_signature, encode_signature},
     context::LoadContext,
@@ -226,6 +227,11 @@ impl BlobSidecar {
     pub fn size_bytes(&self) -> usize {
         2 + BYTES_PER_BLOB + 48 + 48 + 192 + (self.kzg_commitment_inclusion_proof.len() * 32)
     }
+
+    /// Returns the keccak256 hash of the blob contents.
+    pub fn blob_keccak(&self) -> B256 {
+        self.blob.keccak_hash()
+    }
 }
 
 /// Protobuf conversion for BlobSidecar (Phase 4)
@@ -346,6 +352,8 @@ pub enum ProposalPart {
     Data(ProposalData),
     /// Phase 3: Blob sidecar with KZG proof (EIP-4844)
     BlobSidecar(BlobSidecar),
+    /// Phase 6: Archive notice emitted post-commit
+    ArchiveNotice(ArchiveNotice),
     Fin(ProposalFin),
 }
 
@@ -355,6 +363,7 @@ impl ProposalPart {
             Self::Init(_) => "init",
             Self::Data(_) => "data",
             Self::BlobSidecar(_) => "blob_sidecar",
+            Self::ArchiveNotice(_) => "archive_notice",
             Self::Fin(_) => "fin",
         }
     }
@@ -377,6 +386,13 @@ impl ProposalPart {
     pub fn as_blob_sidecar(&self) -> Option<&BlobSidecar> {
         match self {
             Self::BlobSidecar(sidecar) => Some(sidecar),
+            _ => None,
+        }
+    }
+
+    pub fn as_archive_notice(&self) -> Option<&ArchiveNotice> {
+        match self {
+            Self::ArchiveNotice(notice) => Some(notice),
             _ => None,
         }
     }
@@ -523,6 +539,10 @@ impl Protobuf for ProposalPart {
                     kzg_commitment_inclusion_proof,
                 }))
             }
+            Part::ArchiveNotice(notice) => {
+                let notice = ArchiveNotice::from_proto(notice)?;
+                Ok(Self::ArchiveNotice(notice))
+            }
 
             Part::Fin(fin) => Ok(Self::Fin(ProposalFin {
                 signature: fin
@@ -596,6 +616,9 @@ impl Protobuf for ProposalPart {
                         kzg_commitment_inclusion_proof,
                     })),
                 })
+            }
+            Self::ArchiveNotice(notice) => {
+                Ok(Self::Proto { part: Some(Part::ArchiveNotice(notice.to_proto()?)) })
             }
 
             Self::Fin(fin) => Ok(Self::Proto {

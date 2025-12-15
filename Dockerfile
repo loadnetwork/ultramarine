@@ -74,6 +74,11 @@ RUN cp target/${BUILD_PROFILE}/ultramarine /usr/src/ultramarine/ultramarine
 FROM ubuntu:24.04 AS runtime
 WORKDIR /usr/src/ultramarine
 
+# Runtime deps: TLS root certificates for archiver HTTP uploads.
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends ca-certificates && \
+  rm -rf /var/lib/apt/lists/*
+
 # Copy the built binary from the previous stage.
 COPY --from=builder /usr/src/ultramarine/ultramarine /usr/local/bin/ultramarine
 

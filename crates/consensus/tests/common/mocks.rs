@@ -113,7 +113,7 @@ impl EngineApi for MockEngineApi {
 
     async fn get_payload(&self, payload_id: PayloadId) -> Result<ExecutionPayloadResult> {
         let guard = self.payloads.lock().unwrap();
-        let (payload, _) = guard
+        let payload = guard
             .get(&payload_id)
             .cloned()
             .map(|(payload, _)| payload)

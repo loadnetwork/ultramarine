@@ -177,6 +177,12 @@ impl Spammer {
             let mut txs_sent_in_interval = 0u64;
             let interval_start = Instant::now();
 
+            // Resync the nonce once per tick to avoid getting stuck if a previous send was
+            // accepted by the node but our local nonce bookkeeping didn't advance.
+            if let Ok(latest) = self.get_latest_nonce(address).await {
+                nonce = nonce.max(latest);
+            }
+
             // Send up to max_rate transactions per one-second interval.
             while txs_sent_in_interval < self.max_rate {
                 // Check exit conditions before sending each transaction.
@@ -220,8 +226,6 @@ impl Spammer {
                     .map(|_: String| tx_bytes_len);
 
                 // Report result and update counters.
-                // Only increment nonce if transaction was accepted (even if it returns an error)
-                // Don't increment on connection/timeout errors
                 match &result {
                     Ok(_) => {
                         // Transaction accepted by node
@@ -231,18 +235,27 @@ impl Spammer {
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
-                        // Only increment nonce for errors that indicate the tx was received
-                        // (e.g., "nonce too low", "insufficient funds", etc.)
-                        // Don't increment for connection errors
-                        if err_msg.contains("nonce too low") ||
-                            err_msg.contains("insufficient funds") ||
-                            err_msg.contains("already known") ||
-                            err_msg.contains("replacement")
-                        {
-                            nonce += 1;
-                        }
-                        // Count the attempt for rate limiting regardless
+                        // Count the attempt for rate limiting regardless of outcome.
                         txs_sent_in_interval += 1;
+
+                        // Nonce handling:
+                        // - "already known": treat as accepted (node already has it); advance nonce
+                        // - "nonce too low"/"replacement transaction underpriced": we're behind or
+                        //   raced ourselves; resync from pending nonce
+                        // - "insufficient funds": do NOT advance nonce (would create gaps); abort
+                        if err_msg.contains("already known") {
+                            nonce += 1;
+                            txs_sent_total += 1;
+                        } else if err_msg.contains("nonce too low") ||
+                            err_msg.contains("replacement transaction underpriced")
+                        {
+                            // Resync nonce from the node to avoid creating gaps / getting stuck.
+                            if let Ok(latest) = self.get_latest_nonce(address).await {
+                                nonce = nonce.max(latest);
+                            }
+                        } else if err_msg.contains("insufficient funds") {
+                            return Err(eyre::eyre!("{err_msg}"));
+                        }
                     }
                 }
                 result_sender.send(result).await?;

@@ -53,6 +53,21 @@ pub enum BlobEngineError {
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
+
+    /// Blobs have been pruned after archival
+    ///
+    /// This error indicates that blobs for the requested height were archived
+    /// and subsequently pruned from local storage. Callers should use the
+    /// provided locators to retrieve blobs from the archive provider.
+    #[error("Blobs pruned at height {height}: archived to {blob_count} locators")]
+    BlobsPruned {
+        /// Height at which blobs were pruned
+        height: Height,
+        /// Number of blobs that were archived
+        blob_count: usize,
+        /// Archive locators for each blob (indexed by blob_index)
+        locators: Vec<String>,
+    },
 }
 
 /// Re-export KZG verification errors from consensus

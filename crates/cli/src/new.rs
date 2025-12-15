@@ -149,5 +149,6 @@ pub fn generate_config(
         logging,
         runtime,
         test: TestConfig::default(),
+        archiver: Default::default(),
     }
 }

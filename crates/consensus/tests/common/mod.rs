@@ -31,13 +31,16 @@ use tempfile::TempDir;
 use ultramarine_blob_engine::{
     BlobEngineImpl, BlobEngineMetrics, store::rocksdb::RocksDbBlobStore,
 };
-use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
+use ultramarine_consensus::{
+    archive_metrics::ArchiveMetrics, metrics::DbMetrics, state::State, store::Store,
+};
 pub(crate) use ultramarine_test_support::execution_requests::sample_execution_requests_for_height;
 use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
     constants::LOAD_EXECUTION_GAS_LIMIT,
     context::LoadContext,
+    engine_api::load_prev_randao,
     genesis::Genesis,
     height::Height,
     proposal_part::BlobSidecar,
@@ -142,9 +145,10 @@ pub(crate) fn build_state(
     let store = Store::open(&dirs.store_path, DbMetrics::new())?;
     let blob_store = RocksDbBlobStore::open(&dirs.blob_store_path)?;
     let blob_metrics = BlobEngineMetrics::new();
-    let blob_engine = BlobEngineImpl::new(blob_store, blob_metrics.clone())?;
+    let blob_engine = Arc::new(BlobEngineImpl::new(blob_store, blob_metrics.clone())?);
 
     let provider = Ed25519Provider::new(validator.private_key());
+    let archive_metrics = ArchiveMetrics::new();
     let state = State::new(
         genesis.clone(),
         LoadContext::new(),
@@ -154,6 +158,7 @@ pub(crate) fn build_state(
         store,
         blob_engine,
         blob_metrics.clone(),
+        archive_metrics,
     );
 
     Ok(StateHarness { state, blob_metrics })
@@ -221,7 +226,7 @@ pub(crate) fn sample_execution_payload_v3_for_height(
                 state_root: B256::from([3u8; 32]),
                 receipts_root: B256::from([4u8; 32]),
                 logs_bloom: Bloom::ZERO,
-                prev_randao: B256::from([5u8; 32]),
+                prev_randao: load_prev_randao(),
                 block_number: height.as_u64(), // Fix: block_number should equal height
                 gas_limit: LOAD_EXECUTION_GAS_LIMIT,
                 gas_used: LOAD_EXECUTION_GAS_LIMIT / 2,

@@ -57,6 +57,7 @@ async fn blob_sync_commitment_mismatch_rejected() -> color_eyre::Result<()> {
         execution_payload_ssz: payload_bytes.clone(),
         blob_sidecars: sidecars.clone(),
         execution_requests: Vec::new(),
+        archive_notices: Vec::new(),
     };
 
     // Encode and decode to simulate receiving from network
@@ -124,6 +125,7 @@ async fn blob_sync_inclusion_proof_failure_rejected() -> color_eyre::Result<()> 
         execution_payload_ssz: payload_bytes.clone(),
         blob_sidecars: tampered_sidecars.clone(),
         execution_requests: Vec::new(),
+        archive_notices: Vec::new(),
     };
 
     let encoded = package.encode().map_err(|e| color_eyre::eyre::eyre!(e))?;

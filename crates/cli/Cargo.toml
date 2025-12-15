@@ -17,6 +17,8 @@ malachitebft-config.workspace = true
 malachitebft-core-types.workspace = true
 malachitebft-metrics.workspace = true
 
+ultramarine-types.workspace = true
+
 axum = { workspace = true }
 bytesize = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }

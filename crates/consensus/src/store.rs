@@ -15,6 +15,7 @@ use thiserror::Error;
 use tracing::error;
 use ultramarine_types::{
     aliases::Bytes as AlloyBytes,
+    archive::ArchiveRecord,
     blob_metadata::BlobMetadata,
     codec::{proto as codec, proto::ProtobufCodec},
     consensus_block_metadata::ConsensusBlockMetadata,
@@ -62,7 +63,7 @@ impl BlockPayloadRecord {
 }
 
 mod keys;
-use keys::{HeightKey, UndecidedValueKey};
+use keys::{BlobArchivalKey, HeightKey, UndecidedValueKey};
 
 use crate::metrics::DbMetrics;
 
@@ -139,6 +140,10 @@ const BLOB_METADATA_UNDECIDED_TABLE: redb::TableDefinition<UndecidedValueKey, Ve
 // Metadata pointer for O(1) latest blob metadata lookup
 const BLOB_METADATA_META_TABLE: redb::TableDefinition<&str, Vec<u8>> =
     redb::TableDefinition::new("blob_metadata_meta");
+
+// Archive notices persisted per (height, blob_index)
+const BLOB_ARCHIVAL_TABLE: redb::TableDefinition<BlobArchivalKey, Vec<u8>> =
+    redb::TableDefinition::new("blob_archival");
 
 struct Db {
     db: redb::Database,
@@ -383,6 +388,7 @@ impl Db {
         let _ = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
         let _ = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
         let _ = tx.open_table(BLOB_METADATA_META_TABLE)?;
+        let _ = tx.open_table(BLOB_ARCHIVAL_TABLE)?;
 
         tx.commit()?;
 
@@ -643,7 +649,8 @@ impl Db {
             let mut buf = Bytes::copy_from_slice(&bytes);
             let proto = proto::BlobMetadata::decode(&mut buf)
                 .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
-            let metadata = BlobMetadata::from_proto(proto)?;
+            let mut metadata = BlobMetadata::from_proto(proto)?;
+            self.hydrate_archival_records(&tx, height, &mut metadata)?;
 
             self.metrics.add_read_bytes(bytes.len() as u64);
             self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
@@ -656,6 +663,106 @@ impl Db {
         self.metrics.observe_read_time(start.elapsed());
 
         Ok(metadata)
+    }
+
+    fn insert_archive_record(
+        &self,
+        height: Height,
+        blob_index: u16,
+        record: &ArchiveRecord,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+        let record_proto = record.to_proto()?;
+        let bytes = record_proto.encode_to_vec();
+
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(BLOB_ARCHIVAL_TABLE)?;
+            table.insert((height, blob_index), bytes)?;
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+
+        Ok(())
+    }
+
+    fn archived_blob_indexes(&self, height: Height) -> Result<Vec<u16>, StoreError> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOB_ARCHIVAL_TABLE)?;
+        let mut indexes = Vec::new();
+        for entry in table.range((height, 0u16)..=(height, u16::MAX))? {
+            let (key, _) = entry?;
+            let (_, idx) = key.value();
+            indexes.push(idx);
+        }
+        Ok(indexes)
+    }
+
+    fn hydrate_archival_records(
+        &self,
+        tx: &redb::ReadTransaction,
+        height: Height,
+        metadata: &mut BlobMetadata,
+    ) -> Result<(), StoreError> {
+        let table = tx.open_table(BLOB_ARCHIVAL_TABLE)?;
+        for entry in table.range((height, 0u16)..=(height, u16::MAX))? {
+            let (_, value) = entry?;
+            let bytes = value.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::ArchiveRecord::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            let record = ArchiveRecord::from_proto(proto)?;
+            metadata.set_archive_record(record);
+        }
+        Ok(())
+    }
+
+    fn archive_records(&self, height: Height) -> Result<Vec<ArchiveRecord>, StoreError> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOB_ARCHIVAL_TABLE)?;
+        let mut records = Vec::new();
+        for entry in table.range((height, 0u16)..=(height, u16::MAX))? {
+            let (_, value) = entry?;
+            let bytes = value.value();
+            let mut buf = Bytes::copy_from_slice(&bytes);
+            let proto = proto::ArchiveRecord::decode(&mut buf)
+                .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
+            records.push(ArchiveRecord::from_proto(proto)?);
+        }
+        Ok(records)
+    }
+
+    fn update_blob_metadata(
+        &self,
+        height: Height,
+        metadata: &BlobMetadata,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+        let proto = metadata.to_proto()?;
+        let bytes = proto.encode_to_vec();
+
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+            table.insert(height, bytes)?;
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+
+        Ok(())
+    }
+
+    fn decided_heights(&self) -> Result<Vec<Height>, StoreError> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOB_METADATA_DECIDED_TABLE)?;
+        let mut heights = Vec::new();
+        for entry in table.iter()? {
+            let (key, _) = entry?;
+            heights.push(key.value());
+        }
+        Ok(heights)
     }
 
     /// Mark blob metadata as decided (atomic promotion)
@@ -801,7 +908,8 @@ impl Db {
                 let mut buf = Bytes::copy_from_slice(&bytes);
                 let proto = proto::BlobMetadata::decode(&mut buf)
                     .map_err(|e| StoreError::Protobuf(ProtoError::Other(e.to_string())))?;
-                let metadata = BlobMetadata::from_proto(proto)?;
+                let mut metadata = BlobMetadata::from_proto(proto)?;
+                self.hydrate_archival_records(&tx, height, &mut metadata)?;
 
                 self.metrics.add_read_bytes(bytes.len() as u64);
                 self.metrics.add_key_read_bytes(size_of::<Height>() as u64);
@@ -1042,6 +1150,41 @@ impl Store {
         tokio::task::spawn_blocking(move || db.get_blob_metadata(height)).await?
     }
 
+    pub async fn insert_archive_record(
+        &self,
+        height: Height,
+        blob_index: u16,
+        record: ArchiveRecord,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.insert_archive_record(height, blob_index, &record))
+            .await?
+    }
+
+    pub async fn archived_blob_indexes(&self, height: Height) -> Result<Vec<u16>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.archived_blob_indexes(height)).await?
+    }
+
+    pub async fn archive_records(&self, height: Height) -> Result<Vec<ArchiveRecord>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.archive_records(height)).await?
+    }
+
+    pub async fn update_blob_metadata(
+        &self,
+        height: Height,
+        metadata: BlobMetadata,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.update_blob_metadata(height, &metadata)).await?
+    }
+
+    pub async fn decided_heights(&self) -> Result<Vec<Height>, StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.decided_heights()).await?
+    }
+
     /// Mark blob metadata as decided (atomic promotion)
     ///
     /// This is the critical method for committing metadata:
@@ -1161,10 +1304,13 @@ mod tests {
             commitments.push(KzgCommitment::new([i as u8; 48]));
         }
 
+        let blob_hashes = commitments.iter().map(|_| B256::ZERO).collect();
+
         BlobMetadata::new(
             height,
             parent_blob_root,
             commitments,
+            blob_hashes,
             sample_execution_payload_header(),
             Some(42),
         )
@@ -1262,10 +1408,12 @@ mod tests {
             let metadata = if *h % 2 == 0 {
                 BlobMetadata::blobless(height, parent_root, &header, Some(1))
             } else {
+                let blob_hashes = vec![B256::ZERO];
                 BlobMetadata::new(
                     height,
                     parent_root,
                     vec![KzgCommitment::new([*h as u8; 48])],
+                    blob_hashes,
                     header.clone(),
                     Some(1),
                 )

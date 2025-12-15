@@ -10,13 +10,15 @@ use malachitebft_app_channel::app::types::{
 };
 use ssz::Encode;
 use support::*;
-use ultramarine_blob_engine::BlobEngine;
+use ultramarine_blob_engine::{BlobEngine, BlobEngineError};
 use ultramarine_types::{
     aliases::Bytes as BlobBytes,
+    archive::{ArchiveNotice, ArchiveNoticeBody},
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
     blob_metadata::BlobMetadata,
     engine_api::ExecutionPayloadHeader,
     height::Height,
+    signing::Ed25519Provider,
     sync::SyncedValuePackage,
     validator_set::{Validator, ValidatorSet},
     value::Value,
@@ -461,8 +463,15 @@ async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
     let (_signed_header, sidecars) =
         state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle)).expect("prepare");
 
-    let blob_metadata =
-        BlobMetadata::new(height, B256::ZERO, bundle.commitments.clone(), header.clone(), Some(0));
+    let blob_hashes = bundle.blob_keccak_hashes();
+    let blob_metadata = BlobMetadata::new(
+        height,
+        B256::ZERO,
+        bundle.commitments.clone(),
+        blob_hashes,
+        header.clone(),
+        Some(0),
+    );
 
     let rebuilt = state
         .rebuild_blob_sidecars_for_restream(&blob_metadata, state.validator_address(), &sidecars)
@@ -1043,6 +1052,7 @@ async fn proposer_rotation_updates_metadata_hint() {
             .expect("store");
         let engine = MockBlobEngine::default();
         let metrics = ultramarine_blob_engine::BlobEngineMetrics::new();
+        let archive_metrics = crate::archive_metrics::ArchiveMetrics::new();
         let state = State::new(
             genesis.clone(),
             LoadContext::new(),
@@ -1050,8 +1060,9 @@ async fn proposer_rotation_updates_metadata_hint() {
             validators[idx].address.clone(),
             Height::new(0),
             store,
-            engine.clone(),
+            std::sync::Arc::new(engine.clone()),
             metrics,
+            archive_metrics,
         );
         states.push((state, engine, tmp));
     }
@@ -1089,6 +1100,7 @@ async fn proposer_rotation_updates_metadata_hint() {
                     execution_payload_ssz: payload_bytes.clone(),
                     blob_sidecars: sidecars.clone(),
                     execution_requests: Vec::new(),
+                    archive_notices: Vec::new(),
                 };
                 other_state
                     .process_synced_package(
@@ -1144,6 +1156,68 @@ async fn proposer_rotation_updates_metadata_hint() {
                 "state {} should update latest block after commit",
                 idx
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_blobs_with_status_check_returns_pruned_error() {
+        let mock_engine = MockBlobEngine::default();
+        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+        let height = Height::new(1);
+        let round = Round::new(0);
+
+        let commitments = vec![KzgCommitment::new([0x11; 48]), KzgCommitment::new([0x22; 48])];
+        let blob_hashes = vec![B256::from([0xAA; 32]), B256::from([0xBB; 32])];
+        let header = sample_execution_payload_header();
+        let metadata = BlobMetadata::new(
+            height,
+            B256::ZERO,
+            commitments.clone(),
+            blob_hashes.clone(),
+            header,
+            Some(0),
+        );
+        state
+            .store
+            .put_blob_metadata_undecided(height, round, &metadata)
+            .await
+            .expect("store undecided metadata");
+        state.store.mark_blob_metadata_decided(height, round).await.expect("promote metadata");
+
+        let signer = Ed25519Provider::new(state.signing_provider.private_key().clone());
+        for (idx, commitment) in commitments.iter().enumerate() {
+            let body = ArchiveNoticeBody {
+                height,
+                round,
+                blob_index: idx as u16,
+                kzg_commitment: *commitment,
+                blob_keccak: blob_hashes[idx],
+                provider_id: "test-provider".to_string(),
+                locator: format!("test://{}", idx),
+                archived_by: state.address,
+                archived_at: 42,
+            };
+            let notice = ArchiveNotice::sign(body, &signer);
+            state.handle_archive_notice(notice).await.expect("handle archive notice");
+        }
+
+        let mut decided_metadata = state
+            .store
+            .get_blob_metadata(height)
+            .await
+            .expect("load metadata")
+            .expect("metadata present");
+        state
+            .prune_archived_height(height, &mut decided_metadata)
+            .await
+            .expect("prune archived height");
+
+        match state.get_blobs_with_status_check(height).await {
+            Err(BlobEngineError::BlobsPruned { blob_count, locators, .. }) => {
+                assert_eq!(blob_count, 2);
+                assert_eq!(locators, vec!["test://0".to_string(), "test://1".to_string()]);
+            }
+            other => panic!("expected BlobsPruned error, got {:?}", other),
         }
     }
 }

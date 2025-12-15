@@ -12,7 +12,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - ultra_net
+      ultra_net:
+        ipv4_address: 10.250.42.20
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -31,6 +32,9 @@ services:
       - "--port=30303"
       - "--auth-ipc"
       - "--auth-ipc.path=/ipc/engine.ipc"
+      - "--p2p-secret-key=/assets/p2p-keys/reth0.key"
+      - "--nat=extip:10.250.42.20"
+      - "--bootnodes=enode://db1e946e73dc3781bf8a3437b21dfeae0388aec45b2e1dc632c7088b98842897d58c08f73209f851a68661b2f8daadbaf3f4d48bc0513073104b67c0f71101c7@10.250.42.21:40303,enode://f1a8ab5d2068e0c16f541e2190b19d15b62b0bcc9daae707b69a6de1e30dbfc52b3a187ab36ca6ef65f400a0f69a2f98a59b85db1b223d1f575b29bf9af0767c@10.250.42.22:50303"
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/engine.ipc"]
       interval: 1s
@@ -51,7 +55,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - ultra_net
+      ultra_net:
+        ipv4_address: 10.250.42.21
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -70,6 +75,9 @@ services:
       - "--port=40303"
       - "--auth-ipc"
       - "--auth-ipc.path=/ipc/engine.ipc"
+      - "--p2p-secret-key=/assets/p2p-keys/reth1.key"
+      - "--nat=extip:10.250.42.21"
+      - "--bootnodes=enode://e0ca607db1c230a1587402e5f92e9aa71a9d94306745c12fa9014885c65bd3a7a81902eda068d8c27514a28cdae633bb5047a029b36f9f73649cce1b125d2edf@10.250.42.20:30303,enode://f1a8ab5d2068e0c16f541e2190b19d15b62b0bcc9daae707b69a6de1e30dbfc52b3a187ab36ca6ef65f400a0f69a2f98a59b85db1b223d1f575b29bf9af0767c@10.250.42.22:50303"
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/engine.ipc"]
       interval: 1s
@@ -90,7 +98,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - ultra_net
+      ultra_net:
+        ipv4_address: 10.250.42.22
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -109,6 +118,9 @@ services:
       - "--port=50303"
       - "--auth-ipc"
       - "--auth-ipc.path=/ipc/engine.ipc"
+      - "--p2p-secret-key=/assets/p2p-keys/reth2.key"
+      - "--nat=extip:10.250.42.22"
+      - "--bootnodes=enode://e0ca607db1c230a1587402e5f92e9aa71a9d94306745c12fa9014885c65bd3a7a81902eda068d8c27514a28cdae633bb5047a029b36f9f73649cce1b125d2edf@10.250.42.20:30303,enode://db1e946e73dc3781bf8a3437b21dfeae0388aec45b2e1dc632c7088b98842897d58c08f73209f851a68661b2f8daadbaf3f4d48bc0513073104b67c0f71101c7@10.250.42.21:40303"
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/engine.ipc"]
       interval: 1s
@@ -132,8 +144,10 @@ services:
     volumes:
       - ./nodes/0:/nodes/0
       - ./ipc/0:/ipc
+    env_file:
+      - ./.env
     ports:
-      - "29000:29000"
+      - "127.0.0.1:29000:29000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -154,8 +168,10 @@ services:
     volumes:
       - ./nodes/1:/nodes/1
       - ./ipc/1:/ipc
+    env_file:
+      - ./.env
     ports:
-      - "29001:29001"
+      - "127.0.0.1:29001:29001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -176,8 +192,10 @@ services:
     volumes:
       - ./nodes/2:/nodes/2
       - ./ipc/2:/ipc
+    env_file:
+      - ./.env
     ports:
-      - "29002:29002"
+      - "127.0.0.1:29002:29002"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -203,7 +221,6 @@ services:
 
   grafana:
     image: grafana/grafana-oss
-    user: "${LOCAL_UID}"
     ports:
       - 127.0.0.1:3000:3000
     volumes:
@@ -216,6 +233,7 @@ services:
       - ultra_net
     environment:
       GF_LOG_LEVEL: info
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards-data/default.json
       GF_AUTH_ANONYMOUS_ENABLED: true
       GF_AUTH_BASIC_ENABLED: false
 

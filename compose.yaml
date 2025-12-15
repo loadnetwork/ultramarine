@@ -13,6 +13,9 @@ services:
       - "30303:30303/udp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      ultra_net:
+        ipv4_address: 10.250.42.20
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -32,6 +35,9 @@ services:
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=30303"
       - "--port=30303"
+      - "--p2p-secret-key=/assets/p2p-keys/reth0.key"
+      - "--nat=extip:10.250.42.20"
+      - "--bootnodes=enode://db1e946e73dc3781bf8a3437b21dfeae0388aec45b2e1dc632c7088b98842897d58c08f73209f851a68661b2f8daadbaf3f4d48bc0513073104b67c0f71101c7@10.250.42.21:40303,enode://f1a8ab5d2068e0c16f541e2190b19d15b62b0bcc9daae707b69a6de1e30dbfc52b3a187ab36ca6ef65f400a0f69a2f98a59b85db1b223d1f575b29bf9af0767c@10.250.42.22:50303"
       # - "--builder.gaslimit=3600000000" # default * 100
       # - "--builder.interval=10ms"
       # - "--builder.deadline=1" # The deadline in seconds for when the payload builder job should resolve
@@ -53,6 +59,9 @@ services:
       - "40303:40303/udp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      ultra_net:
+        ipv4_address: 10.250.42.21
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -72,6 +81,9 @@ services:
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=40303"
       - "--port=40303"
+      - "--p2p-secret-key=/assets/p2p-keys/reth1.key"
+      - "--nat=extip:10.250.42.21"
+      - "--bootnodes=enode://e0ca607db1c230a1587402e5f92e9aa71a9d94306745c12fa9014885c65bd3a7a81902eda068d8c27514a28cdae633bb5047a029b36f9f73649cce1b125d2edf@10.250.42.20:30303,enode://f1a8ab5d2068e0c16f541e2190b19d15b62b0bcc9daae707b69a6de1e30dbfc52b3a187ab36ca6ef65f400a0f69a2f98a59b85db1b223d1f575b29bf9af0767c@10.250.42.22:50303"
       # - "--builder.gaslimit=3600000000" # default * 100
       # - "--builder.interval=10ms"
       # - "--builder.deadline=1" # The deadline in seconds for when the payload builder job should resolve
@@ -93,6 +105,9 @@ services:
       - "50303:50303/udp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      ultra_net:
+        ipv4_address: 10.250.42.22
     environment:
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     command:
@@ -112,6 +127,9 @@ services:
       - "--metrics=0.0.0.0:9001"
       - "--discovery.port=50303"
       - "--port=50303"
+      - "--p2p-secret-key=/assets/p2p-keys/reth2.key"
+      - "--nat=extip:10.250.42.22"
+      - "--bootnodes=enode://e0ca607db1c230a1587402e5f92e9aa71a9d94306745c12fa9014885c65bd3a7a81902eda068d8c27514a28cdae633bb5047a029b36f9f73649cce1b125d2edf@10.250.42.20:30303,enode://db1e946e73dc3781bf8a3437b21dfeae0388aec45b2e1dc632c7088b98842897d58c08f73209f851a68661b2f8daadbaf3f4d48bc0513073104b67c0f71101c7@10.250.42.21:40303"
       # - "--builder.gaslimit=3600000000" # default * 100
       # - "--builder.interval=10ms"
       # - "--builder.deadline=1" # The deadline in seconds for when the payload builder job should resolve
@@ -129,6 +147,8 @@ services:
       - ./monitoring/data-prometheus:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
   #    command:
   #      - "--config.file=/etc/prometheus/prometheus.yml"
   #      - "--storage.tsdb.path=/prometheus"
@@ -139,16 +159,16 @@ services:
   #      - "--storage.tsdb.no-lockfile"
   grafana:
     image: grafana/grafana-oss
-    # Run as the invoking user to keep permissions consistent
-    user: "${LOCAL_UID}"
     ports:
       - 127.0.0.1:3000:3000
     volumes:
-      - ./monitoring/data-grafana:/var/lib/grafana
+      - grafana_data:/var/lib/grafana
       - ./monitoring/config-grafana/provisioning:/etc/grafana/provisioning
       - ./monitoring/config-grafana/grafana.ini:/etc/grafana/grafana.ini
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ultra_net
     environment:
       GF_LOG_LEVEL: info
       GF_ANALYTICS_ENABLED: false
@@ -164,3 +184,14 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
       GF_AUTH_BASIC_ENABLED: false
       GF_NEWS_NEWS_FEED_ENABLED: false
+
+volumes:
+  grafana_data:
+
+networks:
+  ultra_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.250.42.0/24

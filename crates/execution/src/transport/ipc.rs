@@ -34,7 +34,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
-use tracing::info;
+use tracing::{debug, info};
 
 use super::{JsonRpcRequest, JsonRpcResponse, Transport};
 
@@ -79,16 +79,16 @@ impl Transport for IpcTransport {
         // multiple requests per connection.
         let mut req_bytes = serde_json::to_vec(req)?;
         req_bytes.push(b'\n');
-        info!("Request bytes: {}", String::from_utf8_lossy(&req_bytes));
+        debug!("Request bytes: {}", String::from_utf8_lossy(&req_bytes));
         tokio::time::timeout(REQUEST_TIMEOUT, stream.write_all(&req_bytes)).await??;
         tokio::time::timeout(REQUEST_TIMEOUT, stream.flush()).await??;
-        info!("Request bytes sent");
+        debug!("Request bytes sent");
 
         // Read a single newline-delimited JSON response frame.
         let mut reader = BufReader::new(stream);
         let mut resp_bytes = Vec::new();
         tokio::time::timeout(REQUEST_TIMEOUT, reader.read_until(b'\n', &mut resp_bytes)).await??;
-        info!("Response bytes received: {}", String::from_utf8_lossy(&resp_bytes));
+        debug!("Response bytes received: {}", String::from_utf8_lossy(&resp_bytes));
 
         serde_json::from_slice(&resp_bytes).map_err(|e| e.into())
     }

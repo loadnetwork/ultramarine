@@ -38,6 +38,7 @@ use malachitebft_proto::{Error as ProtoError, Protobuf};
 use crate::{
     address::Address,
     aliases::{B256, Bloom, Bytes, U256},
+    archive::{ArchiveRecord, BlobArchivalStatus},
     blob::KzgCommitment,
     constants::LOAD_EXECUTION_GAS_LIMIT,
     engine_api::ExecutionPayloadHeader,
@@ -91,6 +92,15 @@ pub struct BlobMetadata {
     /// Number of blobs (0 for blobless blocks)
     pub blob_count: u16,
 
+    /// keccak256 hashes of blob bytes (per blob index)
+    pub blob_keccak_hashes: Vec<B256>,
+
+    /// Archive records per blob index (None while pending)
+    archival_records: Vec<Option<ArchiveRecord>>,
+
+    /// True once blobs at this height have been pruned from local storage.
+    pruned: bool,
+
     /// Lightweight execution payload header (copied from ValueMetadata)
     pub execution_payload_header: ExecutionPayloadHeader,
 
@@ -113,17 +123,27 @@ impl BlobMetadata {
         height: Height,
         parent_blob_root: B256,
         blob_kzg_commitments: Vec<KzgCommitment>,
+        blob_keccak_hashes: Vec<B256>,
         execution_payload_header: ExecutionPayloadHeader,
         proposer_index_hint: Option<u64>,
     ) -> Self {
         let blob_count =
             u16::try_from(blob_kzg_commitments.len()).expect("blob count exceeds u16::MAX");
 
+        assert_eq!(
+            blob_kzg_commitments.len(),
+            blob_keccak_hashes.len(),
+            "commitments and blob_keccak hashes must have same length"
+        );
+
         let metadata = Self {
             height,
             parent_blob_root,
             blob_kzg_commitments,
             blob_count,
+            blob_keccak_hashes,
+            archival_records: vec![None; blob_count as usize],
+            pruned: false,
             execution_payload_header,
             proposer_index_hint,
         };
@@ -149,7 +169,14 @@ impl BlobMetadata {
         execution: &ExecutionPayloadHeader,
         proposer_index_hint: Option<u64>,
     ) -> Self {
-        Self::new(height, parent_blob_root, Vec::new(), execution.clone(), proposer_index_hint)
+        Self::new(
+            height,
+            parent_blob_root,
+            Vec::new(),
+            Vec::new(),
+            execution.clone(),
+            proposer_index_hint,
+        )
     }
 
     /// Create genesis blob metadata for height 0
@@ -269,6 +296,41 @@ impl BlobMetadata {
         self.blob_count
     }
 
+    pub fn blob_keccak_hashes(&self) -> &[B256] {
+        &self.blob_keccak_hashes
+    }
+
+    pub fn archival_status(&self, index: usize) -> BlobArchivalStatus {
+        self.archival_records
+            .get(index)
+            .and_then(|opt| opt.clone())
+            .map(BlobArchivalStatus::Archived)
+            .unwrap_or(BlobArchivalStatus::Pending)
+    }
+
+    pub fn archive_records(&self) -> impl Iterator<Item = &ArchiveRecord> {
+        self.archival_records.iter().filter_map(|entry| entry.as_ref())
+    }
+
+    pub fn set_archive_record(&mut self, record: ArchiveRecord) {
+        let idx = usize::from(record.body.blob_index);
+        assert!(
+            idx < self.archival_records.len(),
+            "archive record index {} exceeds blob_count {}",
+            idx,
+            self.archival_records.len()
+        );
+        self.archival_records[idx] = Some(record);
+    }
+
+    pub fn is_pruned(&self) -> bool {
+        self.pruned
+    }
+
+    pub fn mark_pruned(&mut self) {
+        self.pruned = true;
+    }
+
     /// Get height
     pub fn height(&self) -> Height {
         self.height
@@ -321,6 +383,17 @@ impl Protobuf for BlobMetadata {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let blob_keccak_hashes: Vec<B256> =
+            proto.blob_keccak.into_iter().map(|bytes| B256::from_slice(&bytes)).collect();
+
+        if blob_keccak_hashes.len() != blob_kzg_commitments.len() {
+            return Err(ProtoError::Other(format!(
+                "blob_keccak count {} does not match number of commitments {}",
+                blob_keccak_hashes.len(),
+                blob_kzg_commitments.len()
+            )));
+        }
+
         let blob_count = u16::try_from(proto.blob_count).map_err(|_| {
             ProtoError::Other(format!("blob_count {} exceeds u16::MAX", proto.blob_count))
         })?;
@@ -333,6 +406,20 @@ impl Protobuf for BlobMetadata {
             )));
         }
 
+        let mut archival_records = vec![None; blob_kzg_commitments.len()];
+        for record_proto in proto.archival_records {
+            let record = ArchiveRecord::from_proto(record_proto)?;
+            let idx = usize::from(record.body.blob_index);
+            if idx >= archival_records.len() {
+                return Err(ProtoError::Other(format!(
+                    "archive record index {} out of bounds ({} blobs)",
+                    idx,
+                    archival_records.len()
+                )));
+            }
+            archival_records[idx] = Some(record);
+        }
+
         let execution_payload_header =
             ExecutionPayloadHeader::from_proto(proto.execution_payload_header.ok_or_else(
                 || ProtoError::missing_field::<Self::Proto>("execution_payload_header"),
@@ -343,23 +430,40 @@ impl Protobuf for BlobMetadata {
             parent_blob_root: B256::from_slice(&proto.parent_blob_root),
             blob_kzg_commitments,
             blob_count,
+            blob_keccak_hashes,
+            archival_records,
+            pruned: proto.pruned,
             execution_payload_header,
             proposer_index_hint: proto.proposer_index_hint,
         })
     }
 
     fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        let archival_records: Result<Vec<_>, ProtoError> = self
+            .archival_records
+            .iter()
+            .filter_map(|record| record.as_ref())
+            .map(|record| record.to_proto())
+            .collect();
+
         Ok(proto::BlobMetadata {
             height: self.height.as_u64(),
-            parent_blob_root: self.parent_blob_root.to_vec().into(),
+            parent_blob_root: self.parent_blob_root.as_slice().to_vec().into(),
             kzg_commitments: self
                 .blob_kzg_commitments
                 .iter()
                 .map(|c| c.0.to_vec().into())
                 .collect(),
+            blob_keccak: self
+                .blob_keccak_hashes
+                .iter()
+                .map(|hash| hash.as_slice().to_vec().into())
+                .collect(),
             blob_count: self.blob_kzg_commitments.len() as u32,
             execution_payload_header: Some(self.execution_payload_header.to_proto()?),
             proposer_index_hint: self.proposer_index_hint,
+            archival_records: archival_records?,
+            pruned: self.pruned,
         })
     }
 }
@@ -398,10 +502,12 @@ mod tests {
     #[test]
     fn test_blob_metadata_creation() {
         let commitment = KzgCommitment::new([1u8; 48]);
+        let blob_hashes = vec![B256::ZERO];
         let metadata = BlobMetadata::new(
             Height::new(100),
             B256::from([2u8; 32]),
             vec![commitment],
+            blob_hashes,
             sample_execution_header(),
             Some(42),
         );
@@ -435,10 +541,12 @@ mod tests {
     #[test]
     fn test_to_beacon_header() {
         let commitment = KzgCommitment::new([1u8; 48]);
+        let blob_hashes = vec![B256::ZERO];
         let metadata = BlobMetadata::new(
             Height::new(100),
             B256::from([2u8; 32]),
             vec![commitment],
+            blob_hashes,
             sample_execution_header(),
             Some(7),
         );
@@ -454,10 +562,12 @@ mod tests {
     #[test]
     fn test_compute_blob_root() {
         let commitment = KzgCommitment::new([1u8; 48]);
+        let blob_hashes = vec![B256::ZERO];
         let metadata = BlobMetadata::new(
             Height::new(100),
             B256::from([2u8; 32]),
             vec![commitment],
+            blob_hashes,
             sample_execution_header(),
             Some(0),
         );
@@ -475,16 +585,28 @@ mod tests {
         let mut header1 = sample_execution_header();
         header1.block_hash = B256::from([11u8; 32]);
         let commitment1 = KzgCommitment::new([1u8; 48]);
-        let metadata1 =
-            BlobMetadata::new(Height::new(1), B256::ZERO, vec![commitment1], header1, Some(1));
+        let metadata1 = BlobMetadata::new(
+            Height::new(1),
+            B256::ZERO,
+            vec![commitment1],
+            vec![B256::ZERO],
+            header1,
+            Some(1),
+        );
 
         let blob_root1 = metadata1.compute_blob_root();
 
         let mut header2 = sample_execution_header();
         header2.block_hash = B256::from([22u8; 32]);
         let commitment2 = KzgCommitment::new([2u8; 48]);
-        let metadata2 =
-            BlobMetadata::new(Height::new(2), blob_root1, vec![commitment2], header2, Some(2));
+        let metadata2 = BlobMetadata::new(
+            Height::new(2),
+            blob_root1,
+            vec![commitment2],
+            vec![B256::ZERO],
+            header2,
+            Some(2),
+        );
 
         assert_eq!(metadata2.parent_blob_root(), blob_root1);
     }
@@ -496,6 +618,7 @@ mod tests {
             Height::new(123),
             B256::from([2u8; 32]),
             vec![commitment],
+            vec![B256::ZERO],
             sample_execution_header(),
             Some(0),
         );
@@ -526,10 +649,12 @@ mod tests {
     #[test]
     fn test_protobuf_serialization_size() {
         let commitments: Vec<_> = (0..6).map(|i| KzgCommitment::new([i; 48])).collect();
+        let blob_hashes = commitments.iter().map(|_| B256::ZERO).collect();
         let metadata = BlobMetadata::new(
             Height::new(1000),
             B256::from([2u8; 32]),
             commitments,
+            blob_hashes,
             sample_execution_header(),
             None,
         );
@@ -537,8 +662,9 @@ mod tests {
         let proto = metadata.to_proto().expect("Failed to encode");
         let bytes = proto.encode_to_vec();
 
+        // Phase 6 added archival records and prune flags; keep a soft guardrail.
         assert!(
-            bytes.len() < 1100,
+            bytes.len() < 1200,
             "BlobMetadata protobuf size {} unexpectedly large",
             bytes.len()
         );
@@ -569,10 +695,12 @@ mod tests {
     #[test]
     fn test_multiple_blobs() {
         let commitments: Vec<_> = (0..10).map(|i| KzgCommitment::new([i; 48])).collect();
+        let blob_hashes = commitments.iter().map(|_| B256::ZERO).collect();
         let metadata = BlobMetadata::new(
             Height::new(100),
             B256::from([2u8; 32]),
             commitments.clone(),
+            blob_hashes,
             sample_execution_header(),
             None,
         );

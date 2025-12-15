@@ -89,37 +89,37 @@ impl DbMetrics {
             registry.register("db_size", "Size of the database (bytes)", metrics.db_size.clone());
 
             registry.register(
-                "db_write_bytes_total",
+                "db_write_bytes",
                 "Amount of data written to the database (bytes)",
                 metrics.db_write_bytes.clone(),
             );
 
             registry.register(
-                "db_read_bytes_total",
+                "db_read_bytes",
                 "Amount of data read from the database (bytes)",
                 metrics.db_read_bytes.clone(),
             );
 
             registry.register(
-                "db_key_read_bytes_total",
+                "db_key_read_bytes",
                 "Amount of key data read from the database (bytes)",
                 metrics.db_key_read_bytes.clone(),
             );
 
             registry.register(
-                "db_read_count_total",
+                "db_read_count",
                 "Total number of reads from the database",
                 metrics.db_read_count.clone(),
             );
 
             registry.register(
-                "db_write_count_total",
+                "db_write_count",
                 "Total number of writes to the database",
                 metrics.db_write_count.clone(),
             );
 
             registry.register(
-                "db_delete_count_total",
+                "db_delete_count",
                 "Total number of deletions to the database",
                 metrics.db_delete_count.clone(),
             );
