@@ -198,6 +198,7 @@ Phase 6 metrics are registered under the `archiver_` prefix and tracked in:
   - auth token propagation
   - restart recovery detection
   - helper config: `FullNodeTestBuilder::with_archiver(...)` / `with_mock_archiver()` keep archiver config consistent in tests (`with_mock_archiver()` uses `mock://` provider URLs and requires `ultramarine-node` built with `feature="test-harness"`, which the full-node harness enables)
+  - harness hardening: panic-safe teardown (`Drop` aborts spawned node tasks), port allocation avoids TOCTOU races (retry plan), and read-only store access avoids incidental writes during polling
 
 Run: `make itest-node-archiver` (or individual `cargo test ... -- --ignored` invocations).
 

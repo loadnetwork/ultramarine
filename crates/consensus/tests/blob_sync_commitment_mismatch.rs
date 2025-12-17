@@ -46,7 +46,7 @@ async fn blob_sync_commitment_mismatch_rejected() -> color_eyre::Result<()> {
     let fake_commitment = KzgCommitment(fake_commitment_bytes);
 
     // Build a Value with the FAKE commitment in metadata
-    let header = ExecutionPayloadHeader::from_payload(&payload, None);
+    let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
     let fake_metadata = ValueMetadata::new(header, vec![fake_commitment]);
     let fake_value = Value::new(fake_metadata);
 
@@ -114,7 +114,7 @@ async fn blob_sync_inclusion_proof_failure_rejected() -> color_eyre::Result<()> 
     let mut tampered_sidecars = sidecars.clone();
     tampered_sidecars[0].kzg_commitment_inclusion_proof.clear();
 
-    let header = ExecutionPayloadHeader::from_payload(&payload, None);
+    let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
     let metadata = ValueMetadata::new(header, bundle.commitments.clone());
     let value = Value::new(metadata);
 

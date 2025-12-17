@@ -61,9 +61,13 @@ impl Protobuf for Proposal {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        let round = self
+            .round
+            .as_u32()
+            .ok_or_else(|| ProtoError::Other("proposal round is nil".to_string()))?;
         Ok(Self::Proto {
             height: self.height.to_proto()?,
-            round: self.round.as_u32().expect("round should not be nil"),
+            round,
             value: Some(self.value.to_proto()?),
             pol_round: self.pol_round.as_u32(),
             validator_address: Some(self.validator_address.to_proto()?),

@@ -95,6 +95,7 @@ For Load S3 Agent, a standard resolver URL is:
 - Tier-1 full-node scenarios: `make itest-node`
 - Tier-1 archiver/prune suite: `make itest-node-archiver`
 - Note: the Tier‑1 harness defaults `archiver.enabled=false`; archiver tests opt in via `FullNodeTestBuilder::with_archiver(...)` / `with_mock_archiver()` (`mock://` requires `ultramarine-node` built with `feature="test-harness"`).
+- Harness stability: panic-safe teardown (`Drop`), port allocation retries, and read-only store opens reduce flakiness across CI and under load.
 - Spam blobs across EL RPCs: `make spam-blobs`
   - Uses different signers per RPC process to avoid nonce contention.
 

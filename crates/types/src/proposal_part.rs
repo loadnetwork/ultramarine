@@ -560,7 +560,9 @@ impl Protobuf for ProposalPart {
             Self::Init(init) => Ok(Self::Proto {
                 part: Some(Part::Init(proto::ProposalInit {
                     height: init.height.as_u64(),
-                    round: init.round.as_u32().unwrap(),
+                    round: init.round.as_u32().ok_or_else(|| {
+                        ProtoError::Other("proposal init round is nil".to_string())
+                    })?,
                     proposer: Some(init.proposer.to_proto()?),
                 })),
             }),

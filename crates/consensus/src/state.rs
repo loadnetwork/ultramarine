@@ -581,7 +581,7 @@ where
     /// Returns a list of archive jobs for heights with pending blobs where we were proposer.
     pub async fn recover_pending_archive_jobs(&self) -> eyre::Result<Vec<ArchiveJob>> {
         let mut jobs = Vec::new();
-        let decided_heights = self.store.decided_heights().await.unwrap_or_default();
+        let decided_heights = self.store.decided_heights().await?;
 
         for height in decided_heights {
             let metadata = match self.store.get_blob_metadata(height).await? {
@@ -1482,7 +1482,7 @@ where
             block.body.blob_versioned_hashes_iter().copied().collect();
 
         let execution_requests =
-            self.get_execution_requests(height, round).await.unwrap_or_default();
+            self.get_execution_requests(height, round).await?.unwrap_or_default();
 
         if versioned_hashes.is_empty() &&
             let Some(proposal) = self.load_undecided_proposal(height, round).await?
@@ -1716,21 +1716,25 @@ where
     }
 
     /// Retrieves a decided block at the given height
-    pub async fn get_decided_value(&self, height: Height) -> Option<DecidedValue> {
-        self.store.get_decided_value(height).await.ok().flatten()
+    pub async fn get_decided_value(&self, height: Height) -> eyre::Result<Option<DecidedValue>> {
+        self.store.get_decided_value(height).await.map_err(|e| eyre::Report::new(e))
     }
 
     /// Retrieves a decided block data at the given height
-    pub async fn get_block_data(&self, height: Height, round: Round) -> Option<Bytes> {
-        self.store.get_block_data(height, round).await.ok().flatten()
+    pub async fn get_block_data(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> eyre::Result<Option<Bytes>> {
+        self.store.get_block_data(height, round).await.map_err(|e| eyre::Report::new(e))
     }
 
     pub async fn get_execution_requests(
         &self,
         height: Height,
         round: Round,
-    ) -> Option<Vec<AlloyBytes>> {
-        self.store.get_execution_requests(height, round).await.ok().flatten()
+    ) -> eyre::Result<Option<Vec<AlloyBytes>>> {
+        self.store.get_execution_requests(height, round).await.map_err(|e| eyre::Report::new(e))
     }
 
     /// Fetch blob metadata for a specific (height, round), falling back to decided metadata.
@@ -2226,7 +2230,7 @@ where
 
         // Phase 2: Extract lightweight header from execution payload
         let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(execution_requests));
-        let header = ExecutionPayloadHeader::from_payload(execution_payload, requests_hash);
+        let header = ExecutionPayloadHeader::from_payload(execution_payload, requests_hash)?;
 
         // Phase 2: Extract KZG commitments from blobs bundle
         let commitments = blobs_bundle.map(|bundle| bundle.commitments.clone()).unwrap_or_default();
@@ -2504,7 +2508,8 @@ where
                     let requests_hash =
                         Some(ExecutionPayloadHeader::compute_requests_hash(&execution_requests));
                     let header =
-                        ExecutionPayloadHeader::from_payload(&execution_payload, requests_hash);
+                        ExecutionPayloadHeader::from_payload(&execution_payload, requests_hash)
+                            .map_err(|err| err.to_string())?;
                     let commitments = if has_blobs {
                         blob_sidecars.iter().map(|sidecar| sidecar.kzg_commitment).collect()
                     } else {
@@ -3007,8 +3012,8 @@ fn reconstruct_roots_from_proof(
 mod tests;
 
 /// Decodes a Value from its byte representation using ProtobufCodec
-pub fn decode_value(bytes: Bytes) -> Value {
-    ProtobufCodec.decode(bytes).expect("panic during protobuf velue decode")
+pub fn decode_value(bytes: Bytes) -> Result<Value, malachitebft_proto::Error> {
+    ProtobufCodec.decode(bytes)
 }
 
 pub const BLOB_RETENTION_WINDOW: u64 = 4_096;

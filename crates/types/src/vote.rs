@@ -109,10 +109,14 @@ impl Protobuf for Vote {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        let round = self
+            .round
+            .as_u32()
+            .ok_or_else(|| ProtoError::Other("vote round is nil".to_string()))?;
         Ok(Self::Proto {
             vote_type: encode_votetype(self.typ).into(),
             height: self.height.to_proto()?,
-            round: self.round.as_u32().expect("round should not be nil"),
+            round,
             value: match &self.value {
                 NilOrVal::Nil => None,
                 NilOrVal::Val(v) => Some(v.to_proto()?),

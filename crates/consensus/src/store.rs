@@ -320,7 +320,7 @@ impl Db {
     fn prune(&self, retain_height: Height) -> Result<Vec<Height>, StoreError> {
         let start = Instant::now();
 
-        let tx = self.db.begin_write().unwrap();
+        let tx = self.db.begin_write()?;
 
         let pruned = {
             let mut undecided = tx.open_table(UNDECIDED_PROPOSALS_TABLE)?;
@@ -360,8 +360,8 @@ impl Db {
     fn min_decided_value_height(&self) -> Option<Height> {
         let start = Instant::now();
 
-        let tx = self.db.begin_read().unwrap();
-        let table = tx.open_table(DECIDED_VALUES_TABLE).unwrap();
+        let tx = self.db.begin_read().ok()?;
+        let table = tx.open_table(DECIDED_VALUES_TABLE).ok()?;
         let (key, value) = table.first().ok()??;
 
         self.metrics.observe_read_time(start.elapsed());
@@ -372,8 +372,8 @@ impl Db {
     }
 
     fn max_decided_value_height(&self) -> Option<Height> {
-        let tx = self.db.begin_read().unwrap();
-        let table = tx.open_table(DECIDED_VALUES_TABLE).unwrap();
+        let tx = self.db.begin_read().ok()?;
+        let table = tx.open_table(DECIDED_VALUES_TABLE).ok()?;
         let (key, _) = table.last().ok()??;
         Some(key.value())
     }

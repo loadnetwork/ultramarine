@@ -1,5 +1,7 @@
 #![allow(missing_docs)]
 
+use std::fmt;
+
 use alloy_rpc_types::Withdrawal;
 use alloy_rpc_types_engine::ExecutionPayloadV3;
 use malachitebft_proto::{Error as ProtoError, Protobuf};
@@ -13,6 +15,31 @@ use crate::{
     // Phase 2: KzgCommitment will be used in ValueMetadata
     // blob::KzgCommitment,
 };
+
+/// Canonical `prev_randao` value enforced by the Load protocol.
+pub const LOAD_PREVRANDAO_U64: u64 = 1;
+
+const B256_LEN: usize = 32;
+const U256_LE_BYTES: usize = 32;
+const BLOOM_LEN: usize = 256;
+const MAX_EXTRA_DATA_LEN: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExecutionPayloadHeaderError {
+    TransactionsRoot(String),
+    WithdrawalsRoot(String),
+}
+
+impl fmt::Display for ExecutionPayloadHeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TransactionsRoot(err) => write!(f, "failed to compute transactions_root: {err}"),
+            Self::WithdrawalsRoot(err) => write!(f, "failed to compute withdrawals_root: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ExecutionPayloadHeaderError {}
 
 /// Returns the canonical `prev_randao` value for Load Network blocks.
 ///
@@ -54,17 +81,20 @@ use crate::{
 /// - [load-reth-design.md Section
 ///   2](../../../../load-el-design/load-reth-design.md#2-functional-requirements)
 pub fn load_prev_randao() -> B256 {
-    B256::from(U256::from(1u64))
+    B256::from(U256::from(LOAD_PREVRANDAO_U64))
 }
 
 #[cfg(test)]
 mod tests {
     use super::load_prev_randao;
-    use crate::aliases::{B256, U256};
+    use crate::{
+        aliases::{B256, U256},
+        engine_api::LOAD_PREVRANDAO_U64,
+    };
 
     #[test]
     fn load_prev_randao_is_constant_one() {
-        let expected = B256::from(U256::from(1u64));
+        let expected = B256::from(U256::from(LOAD_PREVRANDAO_U64));
         assert_eq!(load_prev_randao(), expected);
     }
 }
@@ -210,7 +240,7 @@ pub struct ExecutionBlock {
 ///
 /// Created from `ExecutionPayloadV3` via:
 /// ```rust,ignore
-/// let header = ExecutionPayloadHeader::from_payload(&payload);
+/// let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
 /// ```
 ///
 /// ## Size Estimate
@@ -310,20 +340,23 @@ impl ExecutionPayloadHeader {
     /// let (payload, blobs_bundle) = execution_client.generate_block_with_blobs(...).await?;
     ///
     /// // Extract lightweight header for consensus
-    /// let header = ExecutionPayloadHeader::from_payload(&payload);
+    /// let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
     ///
     /// // Create metadata for consensus voting
     /// let metadata = ValueMetadata::new(header, blobs_bundle.commitments);
     /// ```
-    pub fn from_payload(payload: &ExecutionPayloadV3, requests_hash: Option<B256>) -> Self {
+    pub fn from_payload(
+        payload: &ExecutionPayloadV3,
+        requests_hash: Option<B256>,
+    ) -> Result<Self, ExecutionPayloadHeaderError> {
         let inner = &payload.payload_inner.payload_inner;
 
         let extra_data = inner.extra_data.clone();
         let transactions_root = tree_hash_transactions_ssz(&inner.transactions)
-            .unwrap_or_else(|e| panic!("Failed to compute transactions_root: {}", e));
+            .map_err(ExecutionPayloadHeaderError::TransactionsRoot)?;
         let withdrawals_root = tree_hash_withdrawals_ssz(&payload.payload_inner.withdrawals)
-            .unwrap_or_else(|e| panic!("Failed to compute withdrawals_root: {}", e));
-        Self {
+            .map_err(ExecutionPayloadHeaderError::WithdrawalsRoot)?;
+        Ok(Self {
             block_hash: inner.block_hash,
             parent_hash: inner.parent_hash,
             state_root: inner.state_root,
@@ -342,31 +375,31 @@ impl ExecutionPayloadHeader {
             prev_randao: inner.prev_randao,
             fee_recipient: inner.fee_recipient.into(),
             requests_hash,
-        }
+        })
     }
 
     /// Calculate approximate size in bytes
     ///
     /// Useful for metrics and ensuring `ValueMetadata` stays under target size.
     pub fn size_bytes(&self) -> usize {
-        32 + // block_hash
-        32 + // parent_hash
-        32 + // state_root
-        32 + // receipts_root
-        256 + // logs_bloom
+        B256_LEN + // block_hash
+        B256_LEN + // parent_hash
+        B256_LEN + // state_root
+        B256_LEN + // receipts_root
+        BLOOM_LEN + // logs_bloom
         8 + // block_number
         8 + // gas_limit
         8 + // gas_used
         8 + // timestamp
-        32 + // base_fee_per_gas
-        self.extra_data.as_ref().len().min(32) + // extra_data (<= 32 bytes)
-        32 + // transactions_root
-        32 + // withdrawals_root
+        U256_LE_BYTES + // base_fee_per_gas
+        self.extra_data.as_ref().len().min(MAX_EXTRA_DATA_LEN) + // extra_data (<= 32 bytes)
+        B256_LEN + // transactions_root
+        B256_LEN + // withdrawals_root
         8 + // blob_gas_used
         8 + // excess_blob_gas
-        32 + // prev_randao
+        B256_LEN + // prev_randao
         20 + // fee_recipient
-        self.requests_hash.map(|_| 32).unwrap_or(0)
+        self.requests_hash.map(|_| B256_LEN).unwrap_or(0)
     }
 }
 
@@ -382,7 +415,7 @@ impl Protobuf for ExecutionPayloadHeader {
             if bytes.is_empty() {
                 return Ok(B256::ZERO);
             }
-            if bytes.len() != 32 {
+            if bytes.len() != B256_LEN {
                 return Err(ProtoError::Other(format!("Expected 32 bytes, got {}", bytes.len())));
             }
             Ok(B256::from_slice(bytes))
@@ -391,25 +424,33 @@ impl Protobuf for ExecutionPayloadHeader {
         // Helper to convert bytes to Bloom
         fn bytes_to_bloom(bytes: &[u8]) -> Result<Bloom, ProtoError> {
             if bytes.is_empty() {
-                return Ok(Bloom::from([0u8; 256]));
+                return Ok(Bloom::from([0u8; BLOOM_LEN]));
             }
-            if bytes.len() != 256 {
+            if bytes.len() != BLOOM_LEN {
                 return Err(ProtoError::Other(format!(
                     "Expected 256 bytes for bloom, got {}",
                     bytes.len()
                 )));
             }
-            let mut array = [0u8; 256];
+            let mut array = [0u8; BLOOM_LEN];
             array.copy_from_slice(bytes);
             Ok(Bloom::from(array))
         }
 
         // Helper to convert bytes to U256
         fn bytes_to_u256(bytes: &[u8]) -> Result<U256, ProtoError> {
-            if bytes.len() > 32 {
+            if bytes.is_empty() {
+                return Ok(U256::ZERO);
+            }
+            if bytes.len() > U256_LE_BYTES {
                 return Err(ProtoError::Other(format!("U256 bytes too long: {}", bytes.len())));
             }
-            Ok(U256::try_from_le_slice(bytes).unwrap_or_default())
+            U256::try_from_le_slice(bytes).ok_or_else(|| {
+                ProtoError::Other(format!(
+                    "Invalid U256 little-endian encoding (len={})",
+                    bytes.len()
+                ))
+            })
         }
 
         Ok(Self {
@@ -449,7 +490,7 @@ impl Protobuf for ExecutionPayloadHeader {
             gas_limit: self.gas_limit,
             gas_used: self.gas_used,
             timestamp: self.timestamp,
-            base_fee_per_gas: self.base_fee_per_gas.to_le_bytes::<32>().to_vec().into(),
+            base_fee_per_gas: self.base_fee_per_gas.to_le_bytes::<U256_LE_BYTES>().to_vec().into(),
             extra_data: ::bytes::Bytes::from(self.extra_data.as_ref().to_vec()),
             transactions_root: self.transactions_root.0.to_vec().into(),
             withdrawals_root: self.withdrawals_root.0.to_vec().into(),
@@ -457,10 +498,10 @@ impl Protobuf for ExecutionPayloadHeader {
             excess_blob_gas: self.excess_blob_gas,
             prev_randao: self.prev_randao.0.to_vec().into(),
             fee_recipient: self.fee_recipient.to_proto()?.value,
-            requests_hash: self
-                .requests_hash
-                .map(|hash| hash.0.to_vec().into())
-                .unwrap_or_default(),
+            requests_hash: match self.requests_hash {
+                Some(hash) => hash.0.to_vec().into(),
+                None => ::bytes::Bytes::new(),
+            },
         })
     }
 }

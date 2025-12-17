@@ -163,7 +163,7 @@ impl Value {
     ///     .await?;
     ///
     /// // Extract metadata
-    /// let header = ExecutionPayloadHeader::from_payload(&payload);
+    /// let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
     /// let commitments = blobs_bundle
     ///     .map(|b| b.commitments)
     ///     .unwrap_or_default();

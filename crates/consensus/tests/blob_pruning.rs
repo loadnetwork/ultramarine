@@ -76,7 +76,7 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
     }
 
     assert!(
-        node.state.get_decided_value(Height::new(0)).await.is_some(),
+        node.state.get_decided_value(Height::new(0)).await?.is_some(),
         "decided value at height 0 should remain until archival completes"
     );
 
