@@ -19,13 +19,13 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
-    pub fn new(url: Url) -> Self {
+    pub fn new(url: Url) -> eyre::Result<Self> {
         let client = Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .expect("Failed to build HTTP client for Engine Api");
-        Self { client, url, jwt_provider: None }
+            .map_err(|e| eyre::eyre!("Failed to build HTTP client for Engine API: {e}"))?;
+        Ok(Self { client, url, jwt_provider: None })
     }
 
     pub fn with_jwt(mut self, secret: [u8; 32]) -> Self {

@@ -683,7 +683,7 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
 
                 let follower_payload = follower
                     .get_block_data(height, winning_round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut follower_notifier = MockExecutionNotifier::default();
                 let follower_outcome = follower
@@ -718,7 +718,7 @@ async fn full_node_restream_multiple_rounds_cleanup() -> Result<()> {
 
                 let proposer_payload = proposer
                     .get_block_data(height, winning_round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut proposer_notifier = MockExecutionNotifier::default();
                 proposer
@@ -1259,7 +1259,7 @@ async fn full_node_restream_multi_validator() -> Result<()> {
 
                 let follower_payload = follower
                     .get_block_data(height, round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut follower_notifier = MockExecutionNotifier::default();
                 let follower_outcome = follower
@@ -1284,7 +1284,7 @@ async fn full_node_restream_multi_validator() -> Result<()> {
 
                 let proposer_payload = proposer
                     .get_block_data(height, round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut proposer_notifier = MockExecutionNotifier::default();
                 proposer
@@ -1341,7 +1341,7 @@ async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
                 fake_commitment_bytes[0] ^= 0xFF;
                 let fake_commitment = KzgCommitment(fake_commitment_bytes);
 
-                let header = ExecutionPayloadHeader::from_payload(&payload, None);
+                let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
                 let fake_metadata = ValueMetadata::new(header, vec![fake_commitment]);
                 let fake_value = StateValue::new(fake_metadata);
 
@@ -1419,7 +1419,7 @@ async fn full_node_value_sync_inclusion_proof_failure() -> Result<()> {
                 let mut sidecars = maybe_sidecars.expect("sidecars expected");
                 sidecars[0].kzg_commitment_inclusion_proof.clear();
 
-                let header = ExecutionPayloadHeader::from_payload(&payload, None);
+                let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
                 let metadata = ValueMetadata::new(header, bundle.commitments.clone());
                 let value = StateValue::new(metadata);
 
@@ -1603,7 +1603,7 @@ async fn full_node_execution_requests_roundtrip() -> Result<()> {
 
                 let follower_payload = follower
                     .get_block_data(height, round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut follower_notifier = MockExecutionNotifier::default();
                 follower
@@ -1615,7 +1615,7 @@ async fn full_node_execution_requests_roundtrip() -> Result<()> {
                     .await?;
 
                 assert_eq!(
-                    follower.get_execution_requests(height, round).await,
+                    follower.get_execution_requests(height, round).await?,
                     Some(execution_requests.clone())
                 );
                 let calls = follower_notifier.new_block_calls.lock().unwrap().clone();
@@ -1624,7 +1624,7 @@ async fn full_node_execution_requests_roundtrip() -> Result<()> {
 
                 let proposer_payload = proposer
                     .get_block_data(height, round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut proposer_notifier = MockExecutionNotifier::default();
                 proposer
@@ -1723,11 +1723,11 @@ async fn full_node_execution_requests_signature_protection() -> Result<()> {
                 }
 
                 assert!(
-                    follower.get_block_data(height, round).await.is_none(),
+                    follower.get_block_data(height, round).await?.is_none(),
                     "tampered proposal should not be stored"
                 );
                 assert!(
-                    follower.get_execution_requests(height, round).await.is_none(),
+                    follower.get_execution_requests(height, round).await?.is_none(),
                     "tampered proposal should not persist execution requests"
                 );
 
@@ -1802,13 +1802,13 @@ async fn full_node_store_pruning_retains_recent_heights() -> Result<()> {
                 // bytes. Old decided values should be removed from the store...
                 for height in 0..expected_pruned {
                     let height = Height::new(height as u64);
-                    let decided = state.get_decided_value(height).await;
+                    let decided = state.get_decided_value(height).await?;
                     assert!(decided.is_none(), "decided value at height {height} should be pruned");
                 }
                 // ...while the most recent decided values are retained.
                 for height in expected_pruned..TOTAL_HEIGHTS {
                     let height = Height::new(height as u64);
-                    let decided = state.get_decided_value(height).await;
+                    let decided = state.get_decided_value(height).await?;
                     assert!(decided.is_some(), "expected decided value at height {height}");
                 }
                 // Blob bytes themselves remain available locally unless an archive notice triggers
@@ -1847,7 +1847,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                 let bundle = sample_blob_bundle(1);
                 let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
                 let payload_bytes = Bytes::from(payload.as_ssz_bytes());
-                let header = ExecutionPayloadHeader::from_payload(&payload, None);
+                let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
                 let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
                 let value = StateValue::new(value_metadata.clone());
 
@@ -1879,7 +1879,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                 };
                 let payload_for_commit = state
                     .get_block_data(height, round)
-                    .await
+                    .await?
                     .unwrap_or_else(|| payload_bytes.clone());
                 let mut notifier = MockExecutionNotifier::default();
                 state
@@ -1935,7 +1935,7 @@ async fn full_node_value_sync_proof_failure() -> Result<()> {
 
                 let package = SyncedValuePackage::Full {
                     value: StateValue::new(ValueMetadata::new(
-                        ExecutionPayloadHeader::from_payload(&payload, None),
+                        ExecutionPayloadHeader::from_payload(&payload, None)?,
                         bundle.commitments.clone(),
                     )),
                     execution_payload_ssz: payload_bytes.clone(),

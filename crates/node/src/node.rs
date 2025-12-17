@@ -288,7 +288,7 @@ impl Node for App {
                 archiver_address,
                 archive_metrics_for_archiver,
                 state.blob_engine_shared(),
-            );
+            )?;
             tracing::info!(
                 provider_id = %effective_config.archiver.provider_id,
                 "Phase 6: Archiver worker spawned"

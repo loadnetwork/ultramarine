@@ -196,9 +196,12 @@ impl Protobuf for ConsensusBlockMetadata {
             return Err(ProtoError::Other(format!("round {} cannot be negative", proto.round)));
         }
 
+        let round = u32::try_from(proto.round)
+            .map_err(|_| ProtoError::Other(format!("round {} exceeds u32::MAX", proto.round)))?;
+
         Ok(Self {
             height: Height::new(proto.height),
-            round: Round::new(proto.round as u32),
+            round: Round::new(round),
             proposer: Address::from_proto(
                 proto
                     .proposer
@@ -213,9 +216,16 @@ impl Protobuf for ConsensusBlockMetadata {
     }
 
     fn to_proto(&self) -> Result<Self::Proto, ProtoError> {
+        let round = i32::try_from(self.round.as_i64()).map_err(|_| {
+            ProtoError::Other(format!(
+                "round {} exceeds i32::MAX and cannot be represented in protobuf",
+                self.round.as_i64()
+            ))
+        })?;
+
         Ok(proto::ConsensusBlockMetadata {
             height: self.height.as_u64(),
-            round: self.round.as_i64() as i32,
+            round,
             proposer: Some(self.proposer.to_proto()?),
             timestamp: self.timestamp,
             validator_set_hash: self.validator_set_hash.to_vec().into(),

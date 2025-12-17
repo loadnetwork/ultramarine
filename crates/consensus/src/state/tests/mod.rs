@@ -219,7 +219,8 @@ async fn propose_value_with_blobs_stores_blob_metadata() {
 
     let payload = sample_execution_payload_v3();
     let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(&[] as &[BlobBytes]));
-    let expected_header = ExecutionPayloadHeader::from_payload(&payload, requests_hash);
+    let expected_header =
+        ExecutionPayloadHeader::from_payload(&payload, requests_hash).expect("build header");
     let bundle = sample_blob_bundle(1);
     let metadata_before =
         state.store.get_blob_metadata_undecided(Height::new(1), Round::new(0)).await.expect("get");
@@ -263,7 +264,8 @@ async fn propose_blobless_value_uses_parent_root_hint() {
 
     let payload = sample_execution_payload_v3();
     let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(&[] as &[BlobBytes]));
-    let expected_header = ExecutionPayloadHeader::from_payload(&payload, requests_hash);
+    let expected_header =
+        ExecutionPayloadHeader::from_payload(&payload, requests_hash).expect("build header");
 
     state
         .propose_value_with_blobs(
@@ -453,7 +455,7 @@ async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
     let height = Height::new(1);
     let round = Round::new(0);
     let payload = sample_execution_payload_v3();
-    let header = ExecutionPayloadHeader::from_payload(&payload, None);
+    let header = ExecutionPayloadHeader::from_payload(&payload, None).expect("build header");
     let bundle = sample_blob_bundle(1);
 
     let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
@@ -511,7 +513,7 @@ async fn process_decided_certificate_rejects_mismatched_prev_randao() {
     let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
 
     // Store corresponding proposal/metadata so commit() would succeed if prev_randao matched.
-    let header = ExecutionPayloadHeader::from_payload(&payload, None);
+    let header = ExecutionPayloadHeader::from_payload(&payload, None).expect("build header");
     let value_metadata = ValueMetadata::new(header.clone(), Vec::new());
     let value = Value::new(value_metadata.clone());
     let proposer = state.address;
@@ -962,8 +964,10 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
     assert_eq!(meta_h2.parent_blob_root(), parent_after_h1, "Blobless block must chain to h1");
 
     // Commit height 2
-    let value_meta_h2 =
-        ValueMetadata::new(ExecutionPayloadHeader::from_payload(&payload_h2, None), Vec::new());
+    let value_meta_h2 = ValueMetadata::new(
+        ExecutionPayloadHeader::from_payload(&payload_h2, None).expect("build header"),
+        Vec::new(),
+    );
     let value_h2 = Value::new(value_meta_h2.clone());
     let proposal_h2 = ProposedValue {
         height: Height::new(2),
@@ -1126,7 +1130,7 @@ async fn proposer_rotation_updates_metadata_hint() {
                 .store
                 .get_block_data(height, round)
                 .await
-                .unwrap_or(None)
+                .expect("load payload")
                 .unwrap_or_else(|| payload_bytes.clone());
             state.latest_block = None;
             let mut notifier = MockExecutionNotifier::new();

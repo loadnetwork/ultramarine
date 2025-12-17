@@ -64,7 +64,7 @@ impl ExecutionClient {
         let engine_client: Arc<dyn EngineApi> = match config.engine_api_endpoint {
             EngineApiEndpoint::Http(url) => {
                 info!("Using HTTP transport for Engine API");
-                let transport = HttpTransport::new(url).with_jwt(config.jwt_secret);
+                let transport = HttpTransport::new(url)?.with_jwt(config.jwt_secret);
                 Arc::new(EngineApiClient::new(transport))
             }
             EngineApiEndpoint::Ipc(path) => {
@@ -310,10 +310,10 @@ impl ExecutionClient {
     /// let (payload, maybe_bundle) = client.generate_block_with_blobs(&latest_block).await?;
     ///
     /// // Extract header for consensus voting
-    /// let header = ExecutionPayloadHeader::from_payload(&payload);
+    /// let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
     ///
     /// // Extract commitments for ValueMetadata
-    /// let commitments = maybe_bundle.map(|b| b.commitments).unwrap_or_default();
+    /// let commitments = maybe_bundle.map(|b| b.commitments).unwrap_or_else(Vec::new);
     ///
     /// // Create metadata for consensus
     /// let metadata = ValueMetadata::new(header, commitments);

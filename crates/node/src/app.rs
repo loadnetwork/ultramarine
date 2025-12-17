@@ -239,20 +239,37 @@ pub async fn run(
                             .get_block_data(height, proposal_round)
                             .await
                         {
-                            Some(bytes) => bytes,
-                            None => {
+                            Ok(Some(bytes)) => bytes,
+                            Ok(None) => {
                                 warn!(
                                     %height, %proposal_round, %value_id,
                                     "Block data not found for restreaming; it may have been pruned"
                                 );
                                 continue;
                             }
+                            Err(e) => {
+                                error!(
+                                    %height, %proposal_round, %value_id,
+                                    "Failed to load block data for restream: {}",
+                                    e
+                                );
+                                continue;
+                            }
                         };
 
-                        let execution_requests = state
-                            .get_execution_requests(height, proposal_round)
-                            .await
-                            .unwrap_or_default();
+                        let execution_requests =
+                            match state.get_execution_requests(height, proposal_round).await {
+                                Ok(maybe) => maybe.unwrap_or_default(),
+                                Err(e) => {
+                                    error!(
+                                        %height,
+                                        %proposal_round,
+                                        "Failed to load execution requests for restream: {}",
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
 
                         // Fetch blob metadata so we can rebuild headers deterministically
                         let blob_metadata = match state
@@ -586,16 +603,33 @@ pub async fn run(
                     "🟢🟢 Consensus has decided on value"
                 );
 
-                let Some(block_bytes) = state.get_block_data(height, round).await else {
-                    // Keep the application loop alive: instruct consensus to replay this height.
-                    error!(
-                        "[DIAG] ❌ Missing block bytes for decided value at height {} round {} on node {}; requesting restart",
-                        height,
-                        round,
-                        state.validator_address()
-                    );
-                    let _ = reply.send(Next::Restart(height, state.get_validator_set().clone()));
-                    continue;
+                let block_bytes = match state.get_block_data(height, round).await {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
+                        // Keep the application loop alive: instruct consensus to replay this
+                        // height.
+                        error!(
+                            "[DIAG] ❌ Missing block bytes for decided value at height {} round {} on node {}; requesting restart",
+                            height,
+                            round,
+                            state.validator_address()
+                        );
+                        let _ =
+                            reply.send(Next::Restart(height, state.get_validator_set().clone()));
+                        continue;
+                    }
+                    Err(e) => {
+                        error!(
+                            "[DIAG] ❌ Failed to load block bytes for decided value at height {} round {} on node {}: {}; requesting restart",
+                            height,
+                            round,
+                            state.validator_address(),
+                            e
+                        );
+                        let _ =
+                            reply.send(Next::Restart(height, state.get_validator_set().clone()));
+                        continue;
+                    }
                 };
 
                 // DIAGNOSTIC: Confirm block bytes found
@@ -625,17 +659,16 @@ pub async fn run(
                     height, round
                 );
 
-                let outcome = state
+                let outcome = match state
                     .process_decided_certificate(&certificate, block_bytes.clone(), &mut notifier)
-                    .await;
-
-                // DIAGNOSTIC: Log outcome
-                match &outcome {
-                    Ok(o) => {
+                    .await
+                {
+                    Ok(outcome) => {
                         debug!(
                             "[DIAG] ✅ process_decided_certificate succeeded: {} txs, {} blobs, current_height now={}",
-                            o.tx_count, o.blob_count, state.current_height
+                            outcome.tx_count, outcome.blob_count, state.current_height
                         );
+                        outcome
                     }
                     Err(e) => {
                         error!(
@@ -646,9 +679,7 @@ pub async fn run(
                             reply.send(Next::Restart(height, state.get_validator_set().clone()));
                         continue;
                     }
-                }
-
-                let outcome = outcome.unwrap();
+                };
 
                 debug!(
                     height = %height,
@@ -767,7 +798,14 @@ pub async fn run(
             AppMsg::GetDecidedValue { height, reply } => {
                 info!(%height, "🟢🟢 GetDecidedValue - bundling payload + blobs for sync");
 
-                let decided_value = state.get_decided_value(height).await;
+                let decided_value = match state.get_decided_value(height).await {
+                    Ok(value) => value,
+                    Err(e) => {
+                        error!(%height, "Failed to load decided value for GetDecidedValue: {}", e);
+                        let _ = reply.send(None);
+                        continue;
+                    }
+                };
 
                 let raw_decided_value = match decided_value {
                     Some(decided_value) => {
@@ -775,14 +813,48 @@ pub async fn run(
                         let round = decided_value.certificate.round;
 
                         // Attempt to retrieve execution payload bytes and execution requests
-                        let payload_bytes = state.get_block_data(height, round).await;
+                        let payload_bytes = match state.get_block_data(height, round).await {
+                            Ok(payload_bytes) => payload_bytes,
+                            Err(e) => {
+                                error!(
+                                    %height,
+                                    %round,
+                                    "Failed to load block data for GetDecidedValue: {}",
+                                    e
+                                );
+                                let _ = reply.send(None);
+                                continue;
+                            }
+                        };
                         let execution_requests =
-                            state.get_execution_requests(height, round).await.unwrap_or_default();
+                            match state.get_execution_requests(height, round).await {
+                                Ok(maybe) => maybe.unwrap_or_default(),
+                                Err(e) => {
+                                    error!(
+                                        %height,
+                                        %round,
+                                        "Failed to load execution requests for GetDecidedValue: {}",
+                                        e
+                                    );
+                                    let _ = reply.send(None);
+                                    continue;
+                                }
+                            };
 
                         // Attempt to retrieve blob sidecars (with pruned status check)
                         let blob_sidecars_result = state.get_blobs_with_status_check(height).await;
-                        let archive_notices =
-                            state.load_archive_notices(height).await.unwrap_or_default();
+                        let archive_notices = match state.load_archive_notices(height).await {
+                            Ok(notices) => notices,
+                            Err(e) => {
+                                error!(
+                                    %height,
+                                    "Failed to load archive notices for GetDecidedValue: {}",
+                                    e
+                                );
+                                let _ = reply.send(None);
+                                continue;
+                            }
+                        };
 
                         // Build the sync package
                         let package = match (payload_bytes, &blob_sidecars_result) {

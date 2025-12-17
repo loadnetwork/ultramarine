@@ -126,14 +126,14 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
         validator_address: Address,
         metrics: ArchiveMetrics,
         blob_engine: Arc<E>,
-    ) -> Self {
+    ) -> color_eyre::Result<Self> {
         // Build HTTP client with reasonable timeouts
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to build HTTP client: {e}"))?;
 
-        Self {
+        Ok(Self {
             config,
             job_rx,
             notice_tx,
@@ -142,7 +142,7 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
             metrics,
             http_client,
             blob_engine,
-        }
+        })
     }
 
     /// Maximum retry backoff delay for failed jobs.
@@ -644,7 +644,7 @@ pub fn spawn_archiver<E>(
     validator_address: Address,
     metrics: ArchiveMetrics,
     blob_engine: Arc<E>,
-) -> ArchiverHandle
+) -> color_eyre::Result<ArchiverHandle>
 where
     E: BlobEngine + Send + 'static,
 {
@@ -658,9 +658,9 @@ where
         validator_address,
         metrics,
         blob_engine,
-    );
+    )?;
 
     let handle = tokio::spawn(worker.run());
 
-    ArchiverHandle { job_tx, handle }
+    Ok(ArchiverHandle { job_tx, handle })
 }

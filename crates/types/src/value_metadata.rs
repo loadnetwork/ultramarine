@@ -110,7 +110,7 @@ use crate::{
 ///     .await?;
 ///
 /// // Extract lightweight header
-/// let header = ExecutionPayloadHeader::from_payload(&payload);
+/// let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
 ///
 /// // Extract commitments
 /// let commitments = blobs_bundle
@@ -165,7 +165,7 @@ impl ValueMetadata {
     /// ## Example
     ///
     /// ```rust,ignore
-    /// let header = ExecutionPayloadHeader::from_payload(&payload);
+    /// let header = ExecutionPayloadHeader::from_payload(&payload, None)?;
     /// let commitments = blobs_bundle.commitments;
     ///
     /// let metadata = ValueMetadata::new(header, commitments);
