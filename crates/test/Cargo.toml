@@ -8,40 +8,40 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+malachitebft-app.workspace = true
 ultramarine-blob-engine.workspace = true
+ultramarine-cli.workspace = true
 ultramarine-consensus.workspace = true
 ultramarine-execution.workspace = true
-ultramarine-types.workspace = true
-ultramarine-cli.workspace = true
-ultramarine-node.workspace = true
+ultramarine-node = { workspace = true, features = ["test-harness"] }
 ultramarine-test-support.workspace = true
+ultramarine-types.workspace = true
 
 malachitebft-app-channel.workspace = true
-malachitebft-app.workspace = true
-malachitebft-proto.workspace = true
 malachitebft-config.workspace = true
 malachitebft-engine.workspace = true
+malachitebft-proto.workspace = true
 
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
-alloy-consensus.workspace = true
-alloy-eips.workspace = true
-bytes.workspace = true
-color-eyre.workspace = true
 async-trait.workspace = true
 axum = { version = "0.8.4", features = ["multipart"] }
+bytes.workspace = true
+color-eyre.workspace = true
 ethereum_ssz.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
 
 c-kzg.workspace = true
 hex.workspace = true
+multiaddr = "0.18.2"
 serde.workspace = true
 serde_json.workspace = true
-url.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-multiaddr = "0.18.2"
+url.workspace = true
 
 # Tokio async runtime for integration tests
 [dev-dependencies.tokio]

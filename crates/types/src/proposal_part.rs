@@ -222,8 +222,7 @@ impl BlobSidecar {
     /// - commitment: 48 bytes
     /// - proof: 48 bytes
     /// - signed_block_header: ~192 bytes (5 × 32 + 64)
-    /// - kzg_commitment_inclusion_proof: 544 bytes (17 × 32)
-    /// Total: ~132,905 bytes
+    /// - kzg_commitment_inclusion_proof: 544 bytes (17 × 32) Total: ~132,905 bytes
     pub fn size_bytes(&self) -> usize {
         2 + BYTES_PER_BLOB + 48 + 48 + 192 + (self.kzg_commitment_inclusion_proof.len() * 32)
     }
@@ -243,12 +242,12 @@ impl malachitebft_proto::Protobuf for BlobSidecar {
     fn from_proto(proto: Self::Proto) -> Result<Self, malachitebft_proto::Error> {
         // Convert bytes::Bytes to alloy_primitives::Bytes for Blob::new
         let blob_bytes = crate::aliases::Bytes::from(proto.blob.to_vec());
-        let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e))?;
+        let blob = Blob::new(blob_bytes).map_err(ProtoError::Other)?;
 
         let kzg_commitment =
-            KzgCommitment::from_slice(&proto.kzg_commitment).map_err(|e| ProtoError::Other(e))?;
+            KzgCommitment::from_slice(&proto.kzg_commitment).map_err(ProtoError::Other)?;
 
-        let kzg_proof = KzgProof::from_slice(&proto.kzg_proof).map_err(|e| ProtoError::Other(e))?;
+        let kzg_proof = KzgProof::from_slice(&proto.kzg_proof).map_err(ProtoError::Other)?;
 
         let signed_block_header = proto
             .signed_block_header
@@ -481,15 +480,15 @@ impl Protobuf for ProposalPart {
                 let blob_bytes = crate::aliases::Bytes::from(sidecar.blob.to_vec());
 
                 // Deserialize blob data (must be exactly 131,072 bytes)
-                let blob = Blob::new(blob_bytes).map_err(|e| ProtoError::Other(e))?;
+                let blob = Blob::new(blob_bytes).map_err(ProtoError::Other)?;
 
                 // Deserialize KZG commitment (must be exactly 48 bytes)
                 let kzg_commitment = KzgCommitment::from_slice(&sidecar.kzg_commitment)
-                    .map_err(|e| ProtoError::Other(e))?;
+                    .map_err(ProtoError::Other)?;
 
                 // Deserialize KZG proof (must be exactly 48 bytes)
                 let kzg_proof =
-                    KzgProof::from_slice(&sidecar.kzg_proof).map_err(|e| ProtoError::Other(e))?;
+                    KzgProof::from_slice(&sidecar.kzg_proof).map_err(ProtoError::Other)?;
 
                 // Phase 4: Deserialize SignedBeaconBlockHeader
                 let signed_block_header = sidecar

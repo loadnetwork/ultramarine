@@ -82,6 +82,7 @@ This approach resolves the gap between purely manual testing and the need for au
 ### Testnet Infrastructure (✅ Production-Ready)
 
 **Architecture** (as of 2025-10-28):
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Execution Layer (load-reth)                               │
@@ -107,6 +108,7 @@ This approach resolves the gap between purely manual testing and the need for au
 ```
 
 **Automation** (`Makefile` targets):
+
 - `make all` - Full testnet setup (genesis → docker → spawn nodes)
 - `make all-ipc` - Testnet with Engine IPC (Docker-based)
 - `make spam` - Transaction load testing (supports `--blobs` flag)
@@ -114,6 +116,7 @@ This approach resolves the gap between purely manual testing and the need for au
 - `make stop` - Stop Docker stack
 
 **Scripts**:
+
 - `scripts/spawn.bash` - Node lifecycle management (supports `--engine-ipc-base`, `--jwt-path`)
 - `scripts/add_peers.sh` - P2P bootstrapping
 - `crates/cli/src/cmd/testnet.rs` - Config generation for N validators
@@ -121,12 +124,14 @@ This approach resolves the gap between purely manual testing and the need for au
 ### Existing Metrics
 
 **Malachite (Consensus)**:
+
 - `malachitebft_core_consensus_height` - Block height
 - `malachitebft_core_consensus_round` - Round number
 - `malachitebft_core_consensus_block_size_bytes` - Block size
 - `app_channel_db_*` - Database I/O (consensus store)
 
 **load-reth (Execution — metrics still prefixed `reth_` upstream)**:
+
 - `reth_engine_rpc_get_payload_v3_count` - Engine API calls
 - `reth_engine_rpc_forkchoice_updated_messages` - FCU messages
 - `reth_transaction_pool_*` - Txpool metrics (pending/queued)
@@ -159,6 +164,7 @@ spammer()
 ```
 
 **Capabilities**:
+
 - ✅ Real blob data, commitments, proofs, and sidecar wiring per transaction.
 - ✅ `--blobs-per-tx` validated for 1–1024 blobs; default stays 128.
 - ✅ Nonce management accounts for “already known/replacement” responses.
@@ -166,6 +172,7 @@ spammer()
 - ⚠️ Still prints a warning when blob mode is enabled (Engine V3 peers without sidecar support can reject blobs); keep until Engine V4 rollout.
 
 **Outstanding Enhancements**:
+
 - No Prometheus metrics or structured logs yet—future Phase 5 work can expose spammer stats.
 - Error handling remains best-effort (no backoff/retry policy beyond nonce bumps).
 
@@ -176,6 +183,7 @@ spammer()
 ### Phase A – Metrics Instrumentation (4–6 hours) — ✅ Complete (A.1 + A.2)
 
 **Phase A.1: BlobEngine Surface** ✅ **Complete (2025-11-04)**
+
 - ✅ Implemented `BlobEngineMetrics` module with 12 metrics (8 counters, 3 gauges, 1 histogram)
 - ✅ Extended `BlobStore` API to return counts for metrics tracking
 - ✅ Instrumented all 6 BlobEngine methods: `verify_and_store`, `mark_decided`, `drop_round`, `mark_archived`, `prune_archived_before`, `get_undecided_blobs`
@@ -184,6 +192,7 @@ spammer()
 - ✅ 11 tests passing, full codebase builds successfully
 
 **Phase A.2: State/Consensus Hooks** ✅ **Complete (2025-11-04)**
+
 - ✅ Pass `BlobEngineMetrics` to `State` constructor (with `pub(crate)` visibility)
 - ✅ Fixed `set_blobs_per_block(count)` in `BlobEngine::mark_decided()` (was missing)
 - ✅ Instrument `State::rebuild_blob_sidecars_for_restream()` for restream counter
@@ -195,6 +204,7 @@ spammer()
 **Note**: Phase A.2 also fixed a critical issue where `blobs_per_block` gauge was defined but never updated. The encapsulation improvements ensure State owns its instrumentation surface, preventing metric implementation details from leaking across crate boundaries.
 
 ### Phase B – In-Process Tests (6–8 hours) — ✅ COMPLETE (2025-11-18 determinism refresh)
+
 - Implement inline helper structs inside `tests/` (and optionally `tests/common`) to:
   - Spin up Ultramarine nodes on Tokio runtimes with per-test `TempDir` storage.
   - Mock only the Execution client while reusing real blob engine/KZG verification.
@@ -206,16 +216,19 @@ spammer()
 - Shared helpers `State::process_synced_package` and `State::process_decided_certificate` keep integration tests aligned with production handlers.
 - Use `serial_test` or per-test temp dirs to keep runs deterministic (2–5 s each).
 
-**Progress (2025-11-05)**  
+**Progress (2025-11-05)**
+
 - ✅ Scaffolded deterministic helpers and migrated component smokes into `crates/consensus/tests` (real RocksDB + KZG).
 - ✅ Implemented proposer→commit lifecycle and sync-package ingestion with shared mocks for the execution client.
 
-**Progress (2025-11-08)**  
+**Progress (2025-11-08)**
+
 - ✅ Refactored the Decided path into `State::process_decided_certificate` plus the `ExecutionNotifier` trait so the app handler and integration tests share identical logic.
 - ✅ Expanded full-node coverage (14 scenarios) with proposer/follower commit assertions and execution-layer rejection coverage via `MockExecutionNotifier`.
 - ✅ Hardened sync coverage with commitment-mismatch and inclusion-proof regression tests.
 
-**Progress (2025-11-18)**  
+**Progress (2025-11-18)**
+
 - ✅ Tier 1 harness de-flaked: `full_node_restart_mid_height` now gates on `StartedHeight`; `wait_for_nodes_at` helper replaces ad-hoc joins/sleeps.
 - ✅ Full Tier 1 suite passes via `make itest-node` (14/14, event-driven).
 
@@ -228,43 +241,47 @@ spammer()
 - Update `DEV_WORKFLOW.md` with `make itest` usage and smoke test guidance.
 
 ### Phase D – Tooling & Documentation (2–3 hours)
+
 - ✅ Spam utility generates valid blob transactions (real KZG commitments and proofs)
 - ✅ Updated `DEV_WORKFLOW.md` with comprehensive blob testing section
 - ✅ Updated `README.md` with blob testing quick start
 
-
 ## Testing Strategy
 
 ### Tier 0 – Component (default)
+
 - Run via `cargo test -p ultramarine-consensus --test blob_roundtrip --test blob_sync_commitment_mismatch --test blob_pruning` or `make itest`.
 - Uses inline helpers with a mocked Execution client (real blob engine/KZG) to exercise proposer→commit, commitment/sidecar validation, and retention/metrics without Docker.
 - Each test completes in ~2–4 s and relies on `tempfile::TempDir` Drop for cleanup. These run in `make test` and CI by default.
 
 ### Tier 1 – Full-Node (multi-validator)
+
 - Mirrors Malachite’s TestBuilder blueprint by spinning **three** validators (2f + 1) plus optional follower nodes under the real channel actors, WAL, and libp2p transport.
 - Exercises proposer/follower blob flow, crash/restart, ValueSync happy + failure paths, pruning, blobless sequences, and sync-package roundtrip with the production application loop talking to an Engine RPC stub (HTTP ExecutionClient wiring remains a follow-up).
 - `make itest-node` invokes each Tier 1 scenario via its own `cargo test ... -- --ignored` call so every harness run starts from a clean process; CI job `itest-tier1` runs all 14 with `RUST_TEST_THREADS=1`, `CARGO_NET_OFFLINE` overridable, 20m timeout, and artifacts on failure.
-- Named scenarios: `full_node_blob_quorum_roundtrip`, `full_node_validator_restart_recovers`, `full_node_restart_mid_height`, `full_node_new_node_sync`, `full_node_multi_height_valuesync_restart`, `full_node_restart_multi_height_rebuilds`, `full_node_restream_multiple_rounds_cleanup`, `full_node_restream_multi_validator`, `full_node_value_sync_commitment_mismatch`, `full_node_value_sync_inclusion_proof_failure`, `full_node_blob_blobless_sequence_behaves`, `full_node_blob_pruning_retains_recent_heights`, `full_node_sync_package_roundtrip`, and `full_node_value_sync_proof_failure`. Collectively these cover restart hydration, pruning, blobless sequences, restream permutations, and every ValueSync rejection path without touching the stores manually.
+- Named scenarios: `full_node_blob_quorum_roundtrip`, `full_node_validator_restart_recovers`, `full_node_restart_mid_height`, `full_node_new_node_sync`, `full_node_multi_height_valuesync_restart`, `full_node_restart_multi_height_rebuilds`, `full_node_restream_multiple_rounds_cleanup`, `full_node_restream_multi_validator`, `full_node_value_sync_commitment_mismatch`, `full_node_value_sync_inclusion_proof_failure`, `full_node_blob_blobless_sequence_behaves`, `full_node_store_pruning_retains_recent_heights`, `full_node_sync_package_roundtrip`, and `full_node_value_sync_proof_failure`. Collectively these cover restart hydration, pruning, blobless sequences, restream permutations, and every ValueSync rejection path without touching the stores manually.
 
 - Run manually via `make all` + `make spam-blobs` (optionally gated by env vars such as `ULTRA_E2E=1`).
 - Boots docker stack (`make all`), runs blob spam script, queries RPC/metrics for verification, tears down (`make clean-net`).
 - Used for load/perf validation and manual dashboards; not required for every CI run.
 
 ### Manual Exploratory Checks
+
 - Grafana dashboards, Prometheus queries, and `tmux` logs remain available for debugging beyond automated assertions.
 - Documented in `DEV_WORKFLOW.md`.
 
 ## Test Artifacts
 
-| Test | Result | Time |
-|------|--------|------|
-| `blob_roundtrip` | ✅ | ~3 s |
-| `blob_sync_commitment_mismatch` (incl. inclusion proof failure) | ✅ | ~3 s |
-| `blob_pruning` | ✅ | ~3 s |
+| Test                                                            | Result | Time |
+| --------------------------------------------------------------- | ------ | ---- |
+| `blob_roundtrip`                                                | ✅     | ~3 s |
+| `blob_sync_commitment_mismatch` (incl. inclusion proof failure) | ✅     | ~3 s |
+| `blob_pruning`                                                  | ✅     | ~3 s |
 
 **Harness Summary**: 3/3 Tier 0 smoke scenarios (now under `crates/consensus/tests/`) passing via `cargo test -p ultramarine-consensus --test <name> -- --nocapture` in ~8–10 s (real KZG proofs using `c-kzg`). Metrics snapshots confirm promotion/demotion counters remain stable across runs.
 
 **2025-11-18 Update**: Tier 1 harness de-flaked and aligned with docs.
+
 - `full_node_restart_mid_height` now waits on `Event::StartedHeight` before crashing a node, forcing a deterministic ValueSync replay (no sleeps/race).
 - Multi-node waits use a shared helper (`wait_for_nodes_at`) to avoid timing drifts; peer warm-up remains the only fixed delay.
 - Full Tier 1 suite passes via `cargo test -p ultramarine-test --test full_node -- --ignored --nocapture` (14/14 scenarios).
@@ -276,18 +293,21 @@ spammer()
 ### 2025-10-28 (Monday) - Analysis & Planning
 
 **Completed**:
+
 - ✅ Comprehensive review of testnet infrastructure
 - ✅ Identified observability gaps (0 blob metrics, 0 dashboard panels)
 - ✅ Created PHASE5_TESTNET.md document
 - ✅ Defined implementation roadmap (Phases A-D, ~14-19 hours)
 
 **Findings**:
+
 - Testnet infrastructure is production-ready (Docker, Prometheus, Grafana all working)
 - 🔴 **CRITICAL**: Spam tool `--blobs` flag creates incomplete transactions (fake versioned hashes, no blob data)
 - 18 existing dashboard panels (5 Malachite, 13 load-reth) but 0 for blobs
 - BlobEngine has logging but zero Prometheus instrumentation
 
 **Critical Discovery** (Evening):
+
 - Deep-dive code review of `crates/utils/src/tx.rs` revealed spam tool issues
 - `make_eip4844_tx()` uses hardcoded fake versioned hash: `0x00...01`
 - Does NOT generate actual blob data (131KB), KZG commitments, or proofs
@@ -295,6 +315,7 @@ spammer()
 - Added Phase E to roadmap (4-6 hours) to fix spam tool before integration testing
 
 **UPDATE (2025-11-04)**: This analysis was incorrect. The spam tool actually DOES work correctly:
+
 - Generates real 131KB blob data (deterministic, KZG-compatible)
 - Computes valid KZG commitments using c-kzg library
 - Generates valid KZG proofs with trusted setup
@@ -302,6 +323,7 @@ spammer()
 - Phase E was not needed - spam tool was functional all along
 
 **Next Steps** (Updated):
+
 - ✅ Phase A.1: Create BlobEngine metrics module - COMPLETE
 - ✅ Phase A.2: Register metrics in node startup - COMPLETE
 - ✅ Phase C: Testnet validation - COMPLETE
@@ -311,6 +333,7 @@ spammer()
 ### 2025-11-04 (Tuesday) - Phase A.1 Complete: BlobEngine Metrics
 
 **Completed**:
+
 - ✅ **Phase A.1: BlobEngine Surface Metrics** — Full implementation complete
 - ✅ Created `crates/blob_engine/src/metrics.rs` (235 lines) with 12 metrics
 - ✅ Extended `BlobStore` trait API to return counts for metrics tracking
@@ -321,12 +344,14 @@ spammer()
 - ✅ Updated documentation: METRICS_PROGRESS.md, PHASE5_PROGRESS.md
 
 **Metrics Implemented**:
+
 - Verification: `verifications_success_total`, `verifications_failure_total`, `verification_time` (histogram)
 - Storage Gauges: `storage_bytes_undecided`, `storage_bytes_decided`, `undecided_blob_count`
 - Lifecycle Counters: `lifecycle_promoted_total`, `lifecycle_dropped_total`, `lifecycle_pruned_total`
 - Consensus: `blobs_per_block` (gauge), `restream_rebuilds_total`, `sync_failures_total`
 
 **Code Review Findings & Fixes**:
+
 1. 🔧 Performance: Replaced gauge loops with bulk operations (`inc_by`/`dec_by`)
    - Before: 131k+ operations per blob
    - After: Single operation per batch
@@ -335,12 +360,14 @@ spammer()
 4. 🔧 Types: Corrected gauge API usage (`i64` vs `u64`)
 
 **Architecture Decisions**:
+
 - ✅ Metrics module follows `DbMetrics` pattern exactly
 - ✅ `BlobEngineMetrics::new()` for tests, `::register()` for production (matches codebase pattern)
 - ✅ Best-effort delete semantics in `mark_archived` (gauge decrements even if blob missing)
 - ✅ Phase A.1 scope: BlobEngine surface only; State hooks deferred to A.2
 
 **Next Steps** (from Phase A.1):
+
 - ✅ **Phase A.2**: Wire metrics into `State` for consensus hooks — **COMPLETED same day**
   - See Phase A.2 section below for full details
 - ✅ **Integration Testing**: Metrics endpoint validated during Tier 1 runs (event-driven harness, 2025-11-18)
@@ -350,6 +377,7 @@ spammer()
 ### 2025-11-04 (Tuesday, continued) — Phase A.2 + Encapsulation: Complete
 
 **Completed**:
+
 - ✅ **Phase A.2: State/Consensus Hooks** — Full implementation
 - ✅ Added `pub(crate) blob_metrics` field to `State` struct
 - ✅ Fixed missing `set_blobs_per_block()` call in `BlobEngine::mark_decided()`
@@ -372,33 +400,39 @@ pub fn record_sync_failure(&self) {
 ```
 
 Benefits:
+
 - ✅ State owns its instrumentation surface
 - ✅ Metrics API changes stay localized within State
 - ✅ External crates use clean, documented methods
 - ✅ Internal consensus code retains direct access for flexibility
 
 **Critical Fix**:
+
 - Discovered `blobs_per_block` gauge was defined but never updated
 - Added `self.metrics.set_blobs_per_block(blob_count)` in `BlobEngine::mark_decided()`
 - This gauge now correctly tracks blobs in the last finalized block
 
 **Test Results**:
+
 - ✅ 25 consensus tests passing
 - ✅ 11 blob_engine tests passing
 - ✅ Full codebase builds successfully
 - ✅ Zero regressions
 
 **Files Modified**:
+
 - `crates/consensus/src/state.rs` (metrics field, helper method, restream instrumentation)
 - `crates/node/src/node.rs` (pass metrics to State)
 - `crates/node/src/app.rs` (sync failure via helper)
 - `crates/blob_engine/src/engine.rs` (fixed set_blobs_per_block)
 
 **Next Steps**:
+
 - ⏳ **Phase B**: Integration tests (in progress - beta team)
 - ⏳ **Phase C**: Start testnet, validate metrics endpoint
 
 **Files Modified**:
+
 - `crates/blob_engine/src/metrics.rs` (new, 235 lines)
 - `crates/blob_engine/src/engine.rs` (instrumentation)
 - `crates/blob_engine/src/store/mod.rs` (API extensions)
@@ -411,6 +445,7 @@ Benefits:
 ### 2025-11-05 (Wednesday) – Phase B Kickoff (Team Beta)
 
 **Completed**:
+
 - ✅ Shared harness module (`tests/common/mod.rs`) with deterministic genesis/key fixtures, blob-engine builders, and metrics snapshots.
 - ✅ `tests/blob_state/blob_roundtrip.rs`: full proposer→commit lifecycle, blob import verification, and metric assertions.
 - ✅ `tests/blob_state/restart_hydrate.rs`: commits a blobbed block, restarts, hydrates parent root, and validates metadata persistence across process restarts.
@@ -421,10 +456,12 @@ Benefits:
 - ✅ `serial_test` wiring to keep integration suites deterministic.
 
 **In Progress**:
+
 - Broader failure-mode coverage (pruning, sync error paths, negative tests).
 - Integrating execution mock into proposer pipelines once payload generation paths require it.
 
 **Next Steps**:
+
 - Incorporate execution-client mock into tests that drive payload generation.
 - Expand metric assertions once consensus hooks (`set_blobs_per_block`, restream counters) are fully wired.
 - Layer in multi-validator scenarios and failure paths (drops, pruning, sync failures).
@@ -434,11 +471,13 @@ Benefits:
 ### 2025-11-06 (Thursday) – Restream & Mock Execution Integration
 
 **Completed**:
+
 - ✅ Refactored integration tests to pull payloads/blobs from `MockEngineApi` so proposer flows mimic ExecutionClient usage (`blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`, `blob_restream`).
 - ✅ Added `tests/blob_state/blob_restream_multi_round.rs` covering multi-round restream cleanup (promotion vs. drop metrics, undecided pruning).
 - ✅ Hardened test harness with reusable base58 peer IDs and metric snapshots for assertions (`tests/common/mod.rs`, `tests/common/mocks.rs`).
 
 **Pending**:
+
 - Exercise sync failure paths (invalid sidecars) to tick `sync_failures_total` and verify `record_sync_failure()` wiring.
 - Integrate the mock Execution API with the real ExecutionClient bridge once that work lands so proposer pipelines are covered end-to-end.
 - Introduce pruning-focused tests once Phase 6 work starts.
@@ -448,15 +487,18 @@ Benefits:
 ### 2025-11-07 (Friday) – Phase 5B Harness Activation Kickoff
 
 **Completed**:
+
 - 🔎 Revalidated integration gaps: root `tests/` directory is excluded from workspace, no `make itest` target exists, and placeholder blob fixtures fail BlobEngine’s KZG verification path.
 - 🗺️ Drafted execution plan to stand up a dedicated `crates/test` package (mirroring malachite’s pattern) so integration suites are visible to Cargo.
 - 🧪 Materialised `crates/test` harness: migrated integration suites, hooked into workspace members, wired `make itest` targets, and replaced dummy blob fixtures with real KZG commitments/proofs (trusted setup cached once per run).
 - ✅ `cargo test -p ultramarine-test -- --nocapture` now exercises all ten Phase 5B scenarios successfully; Team Beta signed off Phase 5B integration validation.
 
 **In Progress**:
+
 - Documenting harness usage in developer guides and aligning remaining TODO tests/failure modes with Phase 5B checklist.
 
 **Next Steps**:
+
 1. Capture harness invocation guidance in README/TESTNET docs (link `make itest` command).
 2. Add negative-path/failure-mode coverage (sync failures, pruning once Phase 6 starts).
 3. Integrate harness into CI workflow so Phase 5B becomes a gate on PRs.
@@ -468,12 +510,14 @@ Benefits:
 Phase 5 Testnet is complete when:
 
 ### Metrics & Observability
+
 - ✅ BlobEngine exposes 12+ Prometheus metrics (verification, storage, lifecycle)
 - ✅ Grafana dashboard has 10+ blob-specific panels
 - ✅ All blob operations visible in real-time (verification rate, latency, failures)
 - ✅ Cross-layer correlation: Blob activity → consensus height → execution import
 
 ### Spam Tool (Phase E)
+
 - ✅ Generates real blob data (131KB per blob)
 - ✅ Computes valid KZG commitments and proofs
 - ✅ Computes correct versioned hashes from commitments
@@ -482,11 +526,11 @@ Phase 5 Testnet is complete when:
 - ✅ Blob transactions successfully included in consensus blocks
 
 ### Integration Testing
+
 - ✅ In-process integration suite passes (`blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`, `blob_restream_multi_validator`, `blob_restream_multi_round`, `blob_new_node_sync`, `blob_blobless_sequence`, `blob_sync_failure_rejects_invalid_proof`, `blob_sync_commitment_mismatch_rejected`, `blob_sync_across_restart_multiple_heights`, `blob_restart_hydrates_multiple_heights`, `blob_pruning_retains_recent_heights`) via `make itest` (`cargo test -p ultramarine-test -- --nocapture`).
 - ✅ Optional Docker smoke (`make all` + `make spam-blobs`) still validates the full network path when needed.
 - ✅ No verification failures during normal operation.
 - ✅ No memory leaks or unbounded storage growth observed during harness + smoke runs.
-
 
 - ✅ `DEV_WORKFLOW.md` documents all testing procedures
 - ✅ `README.md` updated with blob testing quick start
@@ -494,6 +538,7 @@ Phase 5 Testnet is complete when:
 - ✅ Troubleshooting guide covers common issues
 
 ### Operational Readiness
+
 - ✅ Testnet can run for 24+ hours without issues
 - ✅ Restart survival validated (blobs persist, no corruption)
 - ✅ Multi-validator sync validated (all nodes agree on blob state)
@@ -542,14 +587,14 @@ Phase 5 Testnet is complete when:
 
 ## Risks & Mitigations
 
-| Risk | Impact | Mitigation | Status |
-|------|--------|------------|--------|
-| ~~Spam tool non-functional~~ | ~~CRITICAL~~ | ~~Implement Phase E~~ | ✅ **RESOLVED** - Tool works correctly |
-| ~~Blob RPC submission method unknown~~ | ~~HIGH~~ | ~~Research load-reth/Reth APIs~~ | ✅ **RESOLVED** - Standard RPC works |
-| Blob spam causes consensus slowdown | MEDIUM | Load test at increasing rates, identify bottleneck | ⏳ Ongoing monitoring |
-| Storage grows unbounded without pruning | MEDIUM | Monitor `storage_size_bytes` metric, defer pruning to Phase 6 |
-| Integration tests flaky (timing-dependent) | LOW | Use retries, generous timeouts, deterministic test data |
-| Grafana dashboard too complex | LOW | Group panels logically, provide simple "Overview" section |
+| Risk                                       | Impact       | Mitigation                                                    | Status                                 |
+| ------------------------------------------ | ------------ | ------------------------------------------------------------- | -------------------------------------- |
+| ~~Spam tool non-functional~~               | ~~CRITICAL~~ | ~~Implement Phase E~~                                         | ✅ **RESOLVED** - Tool works correctly |
+| ~~Blob RPC submission method unknown~~     | ~~HIGH~~     | ~~Research load-reth/Reth APIs~~                              | ✅ **RESOLVED** - Standard RPC works   |
+| Blob spam causes consensus slowdown        | MEDIUM       | Load test at increasing rates, identify bottleneck            | ⏳ Ongoing monitoring                  |
+| Storage grows unbounded without pruning    | MEDIUM       | Monitor `storage_size_bytes` metric, defer pruning to Phase 6 |                                        |
+| Integration tests flaky (timing-dependent) | LOW          | Use retries, generous timeouts, deterministic test data       |                                        |
+| Grafana dashboard too complex              | LOW          | Group panels logically, provide simple "Overview" section     |                                        |
 
 ---
 

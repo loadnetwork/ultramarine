@@ -325,7 +325,7 @@ pub async fn run(
                                         locator_count = %locators.len(),
                                         "Blobs pruned for restream; sending metadata-only with archive notices"
                                     );
-                                    if let Some(first) = locators.get(0) {
+                                    if let Some(first) = locators.first() {
                                         debug!(
                                             %height,
                                             %proposal_round,
@@ -364,7 +364,7 @@ pub async fn run(
                         if round != proposal_round {
                             let mut restreamed_value = proposal.clone();
                             restreamed_value.round = round;
-                            restreamed_value.proposer = address.clone();
+                            restreamed_value.proposer = address;
 
                             if let Err(e) = state.store_synced_proposal(restreamed_value).await {
                                 error!(
@@ -407,20 +407,19 @@ pub async fn run(
                                 continue;
                             }
 
-                            if let Some(ref sidecars) = restream_blob_sidecars {
-                                if let Err(e) = state
+                            if let Some(ref sidecars) = restream_blob_sidecars &&
+                                let Err(e) = state
                                     .blob_engine()
                                     .verify_and_store(height, round.as_i64(), sidecars)
                                     .await
-                                {
-                                    error!(
-                                        %height,
-                                        %round,
-                                        "Failed to store restreamed blob sidecars: {}",
-                                        e
-                                    );
-                                    continue;
-                                }
+                            {
+                                error!(
+                                    %height,
+                                    %round,
+                                    "Failed to store restreamed blob sidecars: {}",
+                                    e
+                                );
+                                continue;
                             }
                         }
 
@@ -484,25 +483,25 @@ pub async fn run(
             // have all its constituent parts. Then we send that value back to consensus for it to
             // consider and vote for or against it (ie. vote `nil`), depending on its validity.
             AppMsg::ReceivedProposalPart { from, part, reply } => {
-                if let Some(proposal_part) = part.content.as_data() {
-                    if let Some(notice) = proposal_part.as_archive_notice() {
-                        match state.handle_archive_notice(notice.clone()).await {
-                            Ok(_) => {
-                                debug!(
-                                    height = %notice.body.height,
-                                    index = %notice.body.blob_index,
-                                    "Processed ArchiveNotice"
-                                );
-                            }
-                            Err(e) => {
-                                error!("Error processing ArchiveNotice: {}", e);
-                            }
+                if let Some(proposal_part) = part.content.as_data() &&
+                    let Some(notice) = proposal_part.as_archive_notice()
+                {
+                    match state.handle_archive_notice(notice.clone()).await {
+                        Ok(_) => {
+                            debug!(
+                                height = %notice.body.height,
+                                index = %notice.body.blob_index,
+                                "Processed ArchiveNotice"
+                            );
                         }
-                        if reply.send(None).is_err() {
-                            error!("Failed to send reply for ArchiveNotice");
+                        Err(e) => {
+                            error!("Error processing ArchiveNotice: {}", e);
                         }
-                        continue;
                     }
+                    if reply.send(None).is_err() {
+                        error!("Failed to send reply for ArchiveNotice");
+                    }
+                    continue;
                 }
                 let (part_type, part_size) = match &part.content {
                     StreamContent::Data(part) => (part.get_type(), part.size_bytes()),
@@ -549,27 +548,27 @@ pub async fn run(
 
                 // Realign latest execution block from disk so parent-hash checks
                 // stay in sync after restarts/replays.
-                if let Some(prev_height) = height.decrement() {
-                    if let Ok(Some(prev_meta)) = state.get_blob_metadata(prev_height).await {
-                        let prev_header = prev_meta.execution_payload_header();
-                        let prev_block = ExecutionBlock {
-                            block_hash: prev_header.block_hash,
-                            block_number: prev_header.block_number,
-                            parent_hash: prev_header.parent_hash,
-                            timestamp: prev_header.timestamp,
-                            prev_randao: load_prev_randao(),
-                        };
-                        let needs_realignment = state
-                            .latest_block
-                            .map(|blk| blk.block_number != prev_block.block_number)
-                            .unwrap_or(true);
-                        if needs_realignment {
-                            debug!(
-                                "[DIAG] Realigning latest execution block to height {} ({:?})",
-                                prev_height, prev_block.block_hash
-                            );
-                            state.latest_block = Some(prev_block);
-                        }
+                if let Some(prev_height) = height.decrement() &&
+                    let Ok(Some(prev_meta)) = state.get_blob_metadata(prev_height).await
+                {
+                    let prev_header = prev_meta.execution_payload_header();
+                    let prev_block = ExecutionBlock {
+                        block_hash: prev_header.block_hash,
+                        block_number: prev_header.block_number,
+                        parent_hash: prev_header.parent_hash,
+                        timestamp: prev_header.timestamp,
+                        prev_randao: load_prev_randao(),
+                    };
+                    let needs_realignment = state
+                        .latest_block
+                        .map(|blk| blk.block_number != prev_block.block_number)
+                        .unwrap_or(true);
+                    if needs_realignment {
+                        debug!(
+                            "[DIAG] Realigning latest execution block to height {} ({:?})",
+                            prev_height, prev_block.block_hash
+                        );
+                        state.latest_block = Some(prev_block);
                     }
                 }
 
@@ -740,7 +739,7 @@ pub async fn run(
                     }
                 };
 
-                match state.process_synced_package(height, round, proposer.clone(), package).await {
+                match state.process_synced_package(height, round, proposer, package).await {
                     Ok(Some(proposed_value)) => {
                         if reply.send(Some(proposed_value)).is_err() {
                             error!("Failed to send ProcessSyncedValue success reply");

@@ -1,0 +1,3 @@
+[default.extend-words]
+# Common shorthand used to avoid the Rust keyword `type`.
+typ = "typ"

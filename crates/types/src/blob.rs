@@ -328,7 +328,7 @@ impl Protobuf for KzgCommitment {
     type Proto = proto::KzgCommitment;
 
     fn from_proto(proto: Self::Proto) -> Result<Self, ProtoError> {
-        KzgCommitment::from_slice(&proto.data).map_err(|e| ProtoError::Other(e))
+        KzgCommitment::from_slice(&proto.data).map_err(ProtoError::Other)
     }
 
     fn to_proto(&self) -> Result<Self::Proto, ProtoError> {

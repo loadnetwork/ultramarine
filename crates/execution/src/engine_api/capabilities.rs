@@ -92,7 +92,7 @@ impl EngineCapabilities {
     }
 }
 
-// Capabilities from lighthouse, full implememntation reference:
+// Capabilities from lighthouse, full implementation reference:
 //
 // pub const ENGINE_NEW_PAYLOAD_V1: &str = "engine_newPayloadV1";
 // pub const ENGINE_NEW_PAYLOAD_V2: &str = "engine_newPayloadV2";

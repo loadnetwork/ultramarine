@@ -3,6 +3,8 @@
 //! These mocks allow the harness to exercise consensus logic without
 //! maintaining live execution-layer connections.
 
+#![allow(dead_code)]
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -24,6 +26,11 @@ use ultramarine_types::{
     blob::BlobsBundle,
 };
 
+type PayloadEntry = (ExecutionPayloadV3, Option<BlobsBundle>);
+type SharedPayloads = Arc<Mutex<HashMap<PayloadId, PayloadEntry>>>;
+type SharedForkchoiceUpdates = Arc<Mutex<Vec<BlockHash>>>;
+type SharedNewBlockCalls = Arc<Mutex<Vec<(ExecutionPayloadV3, Vec<Bytes>, Vec<BlockHash>)>>>;
+
 fn empty_execution_requests(_: &ExecutionPayloadV3) -> Vec<Bytes> {
     Vec::new()
 }
@@ -34,8 +41,8 @@ fn empty_execution_requests(_: &ExecutionPayloadV3) -> Vec<Bytes> {
 /// interface minimal. Methods can be extended as coverage grows.
 #[derive(Clone)]
 pub(crate) struct MockEngineApi {
-    pub forkchoice_updates: Arc<Mutex<Vec<BlockHash>>>,
-    payloads: Arc<Mutex<HashMap<PayloadId, (ExecutionPayloadV3, Option<BlobsBundle>)>>>,
+    pub forkchoice_updates: SharedForkchoiceUpdates,
+    payloads: SharedPayloads,
     request_generator: Arc<dyn ExecutionRequestGenerator>,
 }
 
@@ -151,8 +158,8 @@ impl EngineApi for MockEngineApi {
 /// configure the payload status or force failures.
 #[derive(Clone)]
 pub(crate) struct MockExecutionNotifier {
-    pub new_block_calls: Arc<Mutex<Vec<(ExecutionPayloadV3, Vec<Bytes>, Vec<BlockHash>)>>>,
-    pub forkchoice_calls: Arc<Mutex<Vec<BlockHash>>>,
+    pub new_block_calls: SharedNewBlockCalls,
+    pub forkchoice_calls: SharedForkchoiceUpdates,
     payload_status: Arc<Mutex<PayloadStatus>>,
 }
 

@@ -93,9 +93,8 @@ fn generate_test_blob(blob_index: usize) -> Result<CKzgBlob> {
 /// Generate blobs with KZG commitments and proofs
 ///
 /// Returns: (blobs, commitments, proofs, versioned_hashes)
-fn generate_blobs_with_kzg(
-    blob_count: usize,
-) -> Result<(Vec<CKzgBlob>, Vec<KzgCommitment>, Vec<KzgProof>, Vec<B256>)> {
+type BlobKzgBundle = (Vec<CKzgBlob>, Vec<KzgCommitment>, Vec<KzgProof>, Vec<B256>);
+fn generate_blobs_with_kzg(blob_count: usize) -> Result<BlobKzgBundle> {
     let kzg = get_kzg_settings();
 
     let mut blobs = Vec::new();
@@ -207,8 +206,8 @@ pub(crate) fn make_eip4844_tx(
     to: Address,
     chain_id: u64,
     blob_count: usize,
-) -> Result<(TxEip4844, Vec<CKzgBlob>, Vec<KzgCommitment>, Vec<KzgProof>)> {
-    if blob_count < 1 || blob_count > 1024 {
+) -> Result<Eip4844TxWithSidecar> {
+    if !(1..=1024).contains(&blob_count) {
         return Err(eyre!("blob_count must be between 1 and 1024"));
     }
 
@@ -231,6 +230,8 @@ pub(crate) fn make_eip4844_tx(
 
     Ok((tx, blobs, commitments, proofs))
 }
+
+type Eip4844TxWithSidecar = (TxEip4844, Vec<CKzgBlob>, Vec<KzgCommitment>, Vec<KzgProof>);
 
 pub(crate) async fn make_signed_eip4844_tx(
     signer: &PrivateKeySigner,

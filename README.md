@@ -60,7 +60,7 @@ make release-dry        # cargo publish dry-run
 
 ### Local Testnet
 
-The Makefile includes targets for running a complete local testnet with either an HTTP or IPC based Engine API.  
+The Makefile includes targets for running a complete local testnet with either an HTTP or IPC based Engine API.\
 Before starting the stack, copy `.env.example` → `.env`, set `ULTRAMARINE_ARCHIVER_BEARER_TOKEN` to your Load Cloud Platform (load_acc) API key (see the [LS3 with load_acc docs](https://docs.load.network/load-cloud-platform-lcp/ls3-with-load_acc)), and run `make` from the `ultramarine/` directory so Docker Compose automatically loads the file.
 
 ```bash

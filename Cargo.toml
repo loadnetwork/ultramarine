@@ -8,8 +8,8 @@ members = [
   "crates/consensus",
   "crates/execution",
   "crates/node",
-  "crates/test_support",
   "crates/test",
+  "crates/test_support",
   "crates/types",
   "crates/utils",
 ]
@@ -41,14 +41,14 @@ unnameable-types = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 
 [workspace.dependencies]
-ultramarine-cli = { path = "crates/cli" }
 # ultramarine dependencies
 ultramarine-blob-engine = { path = "crates/blob_engine" }
+ultramarine-cli = { path = "crates/cli" }
 ultramarine-consensus = { path = "crates/consensus" }
 ultramarine-execution = { path = "crates/execution" }
 ultramarine-node = { path = "crates/node" }
-ultramarine-types = { path = "crates/types" }
 ultramarine-test-support = { path = "crates/test_support" }
+ultramarine-types = { path = "crates/types" }
 # eth types
 
 alloy-consensus = { version = "1.0.23", default-features = false }
@@ -59,12 +59,8 @@ alloy-primitives = { version = "1.3.0", default-features = false }
 alloy-provider = "1.0.23"
 alloy-rlp = "0.3.1"
 alloy-rpc-client = "1.0.23"
-alloy-rpc-types = { version = "1.0.23", features = [
-  "eth",
-], default-features = false }
-alloy-rpc-types-engine = { version = "1.0.23", features = [
-  "ssz",
-], default-features = false }
+alloy-rpc-types = { version = "1.0.23", features = ["eth"], default-features = false }
+alloy-rpc-types-engine = { version = "1.0.23", features = ["ssz"], default-features = false }
 alloy-rpc-types-eth = { version = "1.0.23", default-features = false }
 alloy-rpc-types-txpool = { version = "1.0.23" }
 alloy-signer = { version = "1.0.23" }
@@ -90,34 +86,34 @@ derive-where = "1.6.0"
 directories = "6.0.0"
 ethereum_serde_utils = "0.8.0"
 fixed_bytes = { git = "https://github.com/sigp/lighthouse.git", package = "fixed_bytes", rev = "v8.0.0-rc.1" }
+getrandom = { version = "0.2.14", features = ["std"] }
 hex = { version = "0.4.3", features = ["serde"] }
 itertools = "0.14.0"
-merkle_proof = { git = "https://github.com/sigp/lighthouse.git", package = "merkle_proof", rev = "v8.0.0-rc.1" }
-tree_hash = "0.10.0"
-tree_hash_derive = "0.10.0"
 itf = "0.4.0"
 jsonwebtoken = "9"
+merkle_proof = { git = "https://github.com/sigp/lighthouse.git", package = "merkle_proof", rev = "v8.0.0-rc.1" }
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"
 rand = { version = "0.8.5", features = ["std_rng"] }
 redb = "3.0.0"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
+safe_arith = { git = "https://github.com/sigp/lighthouse.git", package = "safe_arith", rev = "v7.1.0" }
 serde = "1.0.219"
 serde_json = "1.0.142"
-safe_arith = { git = "https://github.com/sigp/lighthouse.git", package = "safe_arith", rev = "v7.1.0" }
+serial_test = "2.0"
 sha2 = "0.10.8"
 sha3 = "0.10.8"
 signature = "2.2.0"
+tempfile = "3.13.0"
 thiserror = { version = "2.0.14", default-features = false }
 toml = "0.9.5"
 tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tree_hash = "0.10.0"
+tree_hash_derive = "0.10.0"
 url = "2"
-getrandom = { version = "0.2.14", features = ["std"] }
-tempfile = "3.13.0"
-serial_test = "2.0"
 
 [workspace.dependencies.malachitebft-app]
 package = "informalsystems-malachitebft-app"
@@ -134,11 +130,6 @@ package = "informalsystems-malachitebft-codec"
 rev = "b205f4252f3064d9a74716056f63834ff33f2de9"
 git = "https://github.com/circlefin/malachite.git"
 
-[workspace.dependencies.malachitebft-engine]
-package = "informalsystems-malachitebft-engine"
-rev = "b205f4252f3064d9a74716056f63834ff33f2de9"
-git = "https://github.com/circlefin/malachite.git"
-
 [workspace.dependencies.malachitebft-config]
 package = "informalsystems-malachitebft-config"
 rev = "b205f4252f3064d9a74716056f63834ff33f2de9"
@@ -151,6 +142,11 @@ git = "https://github.com/circlefin/malachite.git"
 
 [workspace.dependencies.malachitebft-core-types]
 package = "informalsystems-malachitebft-core-types"
+rev = "b205f4252f3064d9a74716056f63834ff33f2de9"
+git = "https://github.com/circlefin/malachite.git"
+
+[workspace.dependencies.malachitebft-engine]
+package = "informalsystems-malachitebft-engine"
 rev = "b205f4252f3064d9a74716056f63834ff33f2de9"
 git = "https://github.com/circlefin/malachite.git"
 

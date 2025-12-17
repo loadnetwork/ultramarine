@@ -16,7 +16,6 @@ async fn blob_pruning_retains_recent_heights() -> color_eyre::Result<()> {
         propose_with_optional_blobs, sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::{CommitCertificate, Round};
-    use ssz::Encode;
     use ultramarine_blob_engine::BlobEngine;
     use ultramarine_types::{blob::BYTES_PER_BLOB, height::Height};
 

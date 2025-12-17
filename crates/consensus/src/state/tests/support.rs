@@ -166,7 +166,7 @@ pub fn build_state(
     let validator_set = ValidatorSet::new(vec![validator.clone()]);
     let genesis = Genesis { validator_set };
     let provider = Ed25519Provider::new(private_key);
-    let address = validator.address.clone();
+    let address = validator.address;
 
     let blob_metrics = ultramarine_blob_engine::BlobEngineMetrics::new();
     let archive_metrics = crate::archive_metrics::ArchiveMetrics::new();
@@ -223,7 +223,7 @@ impl ultramarine_blob_engine::BlobEngine for MockBlobEngine {
     ) -> Result<(), BlobEngineError> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_calls.push((height, round, sidecars.len()));
-        inner.undecided_blobs.insert((height, round), sidecars.iter().cloned().collect());
+        inner.undecided_blobs.insert((height, round), sidecars.to_vec());
         Ok(())
     }
 

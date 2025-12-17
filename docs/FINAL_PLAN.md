@@ -3,11 +3,11 @@
 **Project**: Integrate blob sidecars into Ultramarine consensus client
 **Timeline**: 10-15 days (2-3 weeks with focused effort)
 **Architecture**: Channel-based approach using existing Malachite patterns
-**Status**: 🟢 **Phase 5 Complete – Preparing Pruning Policy (Phase 6)**
-**Progress**: **Phases 1-5C delivered + Prague/V4 rollout validated** (blob integration, metrics, harness, testnet validation, critical bug fix, Engine API v4 migration)
+**Status**: 🟡 **Phase 6 Implemented (V0) – hardening + coverage**
+**Progress**: **Phases 1-6 delivered (V0)** (blob integration, metrics, harness, testnet validation, Engine API v4 migration, archive→prune pipeline + operator strictness)
 **Implementation**: Live consensus + state sync fully operational with blob transfer, metadata-only storage, production metrics, validated Prague execution-requests, and verified cleanup symmetry
-**Current Focus**: Define Phase 6 pruning policy + negative-path harness coverage (see [PHASE5_PROGRESS.md](../PHASE5_PROGRESS.md) for the full log)
-**Last Updated**: 2025-12-05 (afternoon)
+**Current Focus**: Phase 6 hardening (ops UX + multi-node coverage + negative-paths) (see [PHASE5_PROGRESS.md](../PHASE5_PROGRESS.md) for the full log)
+**Last Updated**: 2025-12-17
 **Review Status**: ✅ Comprehensive code review completed, all critical bugs resolved
 **Malachite Version**: b205f4252f3064d9a74716056f63834ff33f2de9 (upgraded ✅)
 
@@ -26,28 +26,30 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 ### Current Status (2025-11-07)
 
 **Completed** ✅:
-- **Phase 1 – Execution Bridge** *(2025-10-27)*: Engine API v3 wired end-to-end with blob bundle retrieval (upgraded to v4 in Dec 2025); execution payload header extraction added to `ValueMetadata`.
-- **Phase 2 – Three-Layer Metadata Architecture** *(2025-10-27)*: Introduced `ConsensusBlockMetadata`, `BlobMetadata`, and blob-engine persistence (Layer 1/2/3) with redb tables and protobuf encoding.
-- **Phase 3 – Proposal Streaming** *(2025-10-28)*: Extended `ProposalPart` with `BlobSidecar`, enabled streaming of blobs via `/proposal_parts` with commitment/proof payloads.
-- **Phase 4 – Cleanup & Storage Finalisation** *(2025-10-28)*: Removed legacy header tables/APIs, made `BlobMetadata` the single source of truth, updated parent-root validation and restream rebuilds. See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for full log.
-- **Phase 5 (5.1/5.2) – Live Consensus + Sync Fixes** *(2025-10-23)*: Delivered proposer blob storage, restream sealing, synced-value protobuf path corrections (tracked separately in `STATUS_UPDATE_2025-10-21.md`).
-- **Phase 5A – Metrics Instrumentation** *(2025-11-04)*: Added 12 blob metrics, wired through node startup/state helpers, updated dashboards and docs.
-- **Phase 5B – Integration Harness** *(2025-11-08)*: Thirteen deterministic blob scenarios now pass via `make itest`, covering proposer/follower commit, sync ingestion, restart hydration, pruning retention, and execution-layer rejection (see [Testing Strategy](./PHASE5_TESTNET.md#testing-strategy) for the full matrix).
-- **Phase 5C – Testnet Validation** *(2025-11-07)*: Docker harness exercised 1,158 real blobs; metrics and dashboards verified against live runs.
-- **Prague / Engine API v4 upgrade** *(2025-12-05)*: Consensus/execution bridge now uses `forkchoiceUpdated/getPayload/newPayload V4`, deterministic execution-request helpers are shared across harnesses, and the load-reth genesis enforces Prague at timestamp 0 so EL and CL compute the same `requests_hash`.
-- **Quality Gates**: 23/23 consensus unit tests plus 13/13 integration tests (`cargo test -p ultramarine-test -- --nocapture`); `cargo fmt --all` and `cargo clippy -p ultramarine-consensus` run clean for the consensus crate.
+
+- **Phase 1 – Execution Bridge** _(2025-10-27)_: Engine API v3 wired end-to-end with blob bundle retrieval (upgraded to v4 in Dec 2025); execution payload header extraction added to `ValueMetadata`.
+- **Phase 2 – Three-Layer Metadata Architecture** _(2025-10-27)_: Introduced `ConsensusBlockMetadata`, `BlobMetadata`, and blob-engine persistence (Layer 1/2/3) with redb tables and protobuf encoding.
+- **Phase 3 – Proposal Streaming** _(2025-10-28)_: Extended `ProposalPart` with `BlobSidecar`, enabled streaming of blobs via `/proposal_parts` with commitment/proof payloads.
+- **Phase 4 – Cleanup & Storage Finalisation** _(2025-10-28)_: Removed legacy header tables/APIs, made `BlobMetadata` the single source of truth, updated parent-root validation and restream rebuilds. See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for full log.
+- **Phase 5 (5.1/5.2) – Live Consensus + Sync Fixes** _(2025-10-23)_: Delivered proposer blob storage, restream sealing, synced-value protobuf path corrections (tracked separately in `STATUS_UPDATE_2025-10-21.md`).
+- **Phase 5A – Metrics Instrumentation** _(2025-11-04)_: Added 12 blob metrics, wired through node startup/state helpers, updated dashboards and docs.
+- **Phase 5B – Integration Harness** _(2025-11-08)_: Fourteen deterministic full-node scenarios pass via `make itest-node`, covering proposer/follower commit, sync ingestion, restart hydration, decided-history pruning (`Store::prune()`), and execution-layer rejection (see [Testing Strategy](./PHASE5_TESTNET.md#testing-strategy) for the full matrix).
+- **Phase 6 – Archiving & Pruning (V0)** _(2025-12-17)_: Archive notices + proposer-only verification + archive→finality→prune flow implemented. Tier‑1 harness defaults `archiver.enabled=false` (to avoid accidental pruning), and archiver/prune scenarios opt in with explicit provider+token configuration.
+- **Phase 5C – Testnet Validation** _(2025-11-07)_: Docker harness exercised 1,158 real blobs; metrics and dashboards verified against live runs.
+- **Prague / Engine API v4 upgrade** _(2025-12-05)_: Consensus/execution bridge now uses `forkchoiceUpdated/getPayload/newPayload V4`, deterministic execution-request helpers are shared across harnesses, and the load-reth genesis enforces Prague at timestamp 0 so EL and CL compute the same `requests_hash`.
+- **Quality Gates**: 23/23 consensus unit tests plus 14/14 Tier‑1 full-node scenarios (`make itest-node`); `make pr` (fmt + `cargo clippy --workspace --all-targets -- -D warnings`) runs clean.
 
 **Up Next** 🟡:
+
 - Phase 6 pruning policy: configurable retention for decided blobs + harness coverage.
 - Negative-path integration (e.g. invalid sidecars) to exercise `blob_engine_sync_failures_total`.
-- Optional: promote `make itest` to CI and expand operator docs for pruning.
+- Optional: expand Phase 6 negative-path coverage (invalid signature, conflicting notices) and add multi-node sign-off scenarios.
 
 ---
 
 ## Architecture Overview
 
 ```
-
 ---
 
 ## Appendix: Blob Chunking & File Reconstruction Notes (to think)
@@ -83,6 +85,7 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 ```
 
 **Network Flow**:
+
 ```
 Proposer                           Validators
    │                                   │
@@ -110,16 +113,17 @@ Proposer                           Validators
 
 **Payload Attributes**: When calling `engine_forkchoiceUpdatedV4`, Ultramarine supplies:
 
-| Field | Value | Rationale |
-|-------|-------|-----------|
-| `timestamp` | `latest_block.timestamp + 1` | Monotonically increasing block time |
-| **`prev_randao`** | **Constant `0x01`** | **Arbitrum pattern** - explicit signal that block-based randomness is unavailable. Forces dApps to use proper VRF oracles. |
-| `suggested_fee_recipient` | Placeholder `0x2a...2a` | TODO: Make validator-configurable |
-| `withdrawals` | Empty array `[]` | No withdrawals on Load Network |
-| `parent_beacon_block_root` | Previous `block_hash` | For EIP-4788 compatibility |
-| `execution_requests` | Deterministic helper derived from payload height | Required since Prague so EL/CL agree on `requests_hash` |
+| Field                      | Value                                            | Rationale                                                                                                                  |
+| -------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `timestamp`                | `latest_block.timestamp + 1`                     | Monotonically increasing block time                                                                                        |
+| **`prev_randao`**          | **Constant `0x01`**                              | **Arbitrum pattern** - explicit signal that block-based randomness is unavailable. Forces dApps to use proper VRF oracles. |
+| `suggested_fee_recipient`  | Placeholder `0x2a...2a`                          | TODO: Make validator-configurable                                                                                          |
+| `withdrawals`              | Empty array `[]`                                 | No withdrawals on Load Network                                                                                             |
+| `parent_beacon_block_root` | Previous `block_hash`                            | For EIP-4788 compatibility                                                                                                 |
+| `execution_requests`       | Deterministic helper derived from payload height | Required since Prague so EL/CL agree on `requests_hash`                                                                    |
 
 **prevRandao Design Decision**:
+
 - ✅ **Constant `0x01`** chosen over derived values (timestamp hash, commit hash, etc.)
 - ✅ **Identity property**: `1 × x = x` means accidental use in multiplication is harmless
 - ✅ **Fail-fast**: Contracts expecting randomness break obviously in testing
@@ -127,6 +131,7 @@ Proposer                           Validators
 - ✅ **Non-manipulatable**: Unlike Ethereum's RANDAO (validators can bias ~1 bit)
 
 **Enforcement**:
+
 - **Generation**: `ultramarine/crates/execution/src/client.rs:190,359` - always sends constant and emits Prague execution requests via shared helpers
 - **Validation**: `ultramarine/crates/consensus/src/state.rs:1026-1034,1859` - rejects mismatches and enforces EIP-7685 ordering/uniqueness before persisting requests
 - **Normalization**: `ultramarine/crates/execution/src/eth_rpc/alloy_impl.rs:95` - RPC client returns constant
@@ -139,13 +144,16 @@ Proposer                           Validators
 ## Phase 1: Execution ↔ Consensus Bridge ✅ COMPLETED (2025-10-27; updated for Engine API v4 on 2025-12-05)
 
 ### Goal
+
 Extend execution client interface to support Engine API v3 with blob bundle retrieval (upgraded to Engine API v4 + execution-request handling on 2025-12-05).
 
 ### Files to Modify
+
 - `ultramarine/crates/execution/src/client.rs`
 - `ultramarine/crates/execution/src/types.rs`
 
 ### Implementation References
+
 - `crates/types/src/blob.rs` – blob/commitment/proof types (MAX_BLOBS_PER_BLOCK = 1024)
 - `crates/types/src/blob.rs::BlobsBundle` – validation, versioned hashes
 - `crates/execution/src/client.rs` – Engine API v3/v4 integration (`generate_block_with_blobs`, Alloy conversions, execution requests)
@@ -156,6 +164,7 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 ## Phase 2: Three-Layer Metadata Architecture ✅ COMPLETED (2025-10-27)
 
 ### Outcome (2025-10-27)
+
 - Established the **three-layer metadata architecture**:
   1. `ConsensusBlockMetadata` (Layer 1) – pure Malachite/Tendermint terms (height/round/proposer) with SSZ tree-hash validator set.
   2. `BlobMetadata` (Layer 2) – Ethereum compatibility shim storing execution payload headers, KZG commitments, proposer hints.
@@ -167,17 +176,20 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 ## Phase 3: Proposal Streaming ✅ COMPLETED (2025-10-28)
 
 ### Outcome (2025-10-28)
+
 - Added `ProposalPart::BlobSidecar` plus protobuf codecs so blobs stream on `/proposal_parts` without new topics.
 - Updated consensus state to assemble/disseminate proposals with optional blob bundles; proposer/receiver flows store undecided metadata only.
 - Added restream helpers that rebuild sidecars/signatures from stored metadata (see Phase 4 for final cleanup).
 - Size budgeting validated (~131 KB per blob sidecar) and covered by unit tests in `ultramarine-types` and `ultramarine-consensus`.
 
 ### Files Modified
+
 - `ultramarine/crates/types/src/proposal_part.rs` ✅
 - `ultramarine/crates/types/src/blob.rs` ✅
 - `ultramarine/crates/proto/src/ultramarine.proto` ✅
 
 ### Implementation References
+
 - `crates/types/src/proposal_part.rs` – `ProposalPart::BlobSidecar`, serde/protobuf conversions
 - `crates/types/src/blob.rs` – blob bundle utilities used during streaming
 - `crates/types/proto/consensus.proto` – BlobSidecar schema (fields 5 & 6)
@@ -187,6 +199,7 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 ## Phase 4: Cleanup & Storage Finalisation ✅ COMPLETED (2025-10-28)
 
 ### Outcome (2025-10-28)
+
 - Removed all legacy header persistence: `BLOCK_HEADERS_TABLE`, low-level insert/get helpers, and state/store/node methods that wrote beacon headers.
 - Consensus relies solely on `BlobMetadata` (Layer 2) for header reconstruction; parent-root verification loads previous decided metadata and restream rebuilds signed headers at broadcast time.
 - Strengthened round hygiene (`commit_cleans_failed_round_blob_metadata`) and metadata fallback logic (`load_blob_metadata_for_round_falls_back_to_decided`).
@@ -197,6 +210,7 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 ## Phase 5: Block Import / EL Interaction (Days 8-9) ✅ COMPLETED
 
 ### Goal
+
 Modify `Decided` handler to validate blob availability before block import.
 
 **Status**: ✅ **Complete - All Critical Paths Working**
@@ -204,6 +218,7 @@ Modify `Decided` handler to validate blob availability before block import.
 **Date Completed**: 2025-10-23 (live consensus + state sync)
 
 **✅ Completed**:
+
 - Blob lifecycle (mark_decided, drop_round, pruning)
 - Error handling fixes (#1, #2, #3)
 - Blob availability validation in Decided handler
@@ -215,16 +230,19 @@ Modify `Decided` handler to validate blob availability before block import.
 - Integration harness exercises proposer and follower commit paths as well as EL rejection via the shared helper (see new `blob_decided_el_rejection` regression test).
 
 **Recent Enhancement**:
+
 - RestreamProposal - ✅ Implemented (network partition recovery edge case resolved)
 
 **Key Discovery**: Engine API v3 was already fully implemented; the Dec 2025 Prague work upgraded that same surface to v4 (execution requests + `requests_hash`). No extra business logic was required beyond blob availability validation and versioned hash verification. Initial code review identified gaps in state synchronization, which have been **fully resolved** with SyncedValuePackage implementation.
 
 **See**:
+
 - `docs/PHASE_5_COMPLETION.md` - Live consensus completion details
 - `docs/LIGHTHOUSE_PARITY_COMPLETE.md` - Versioned hash verification
 - `docs/BLOB_SYNC_GAP_ANALYSIS.md` - **Critical sync gaps and fixes**
 
 ### Files to Modify
+
 - `ultramarine/crates/node/src/app.rs`
 - `ultramarine/crates/consensus/src/state.rs`
 - `ultramarine/crates/execution/src/client.rs`
@@ -233,18 +251,20 @@ Modify `Decided` handler to validate blob availability before block import.
 - `ultramarine/crates/test/tests/blob_state/blob_decided_el_rejection.rs`
 
 ### Implementation References
+
 - `crates/node/src/app.rs` – App handler delegates to `process_decided_certificate`
 - `crates/consensus/src/state.rs` – shared helper (`process_decided_certificate`) + blob tracking/pruning
 - `crates/execution/src/notifier.rs` & `crates/execution/src/client.rs` – Execution notifier trait and adapter
 - `crates/blob_engine/src/engine.rs` – promotion + pruning used during commit
 - `crates/blob_engine/src/store/rocksdb.rs` – undecided/decided storage semantics
-- Tests/validation: `make itest` (13 scenarios), targeted negative coverage `cargo test -p ultramarine-test blob_decided_el_rejection`
+- Tests/validation: Tier‑0 `make itest` + Tier‑1 `make itest-node` (14 scenarios), targeted negative coverage `cargo test -p ultramarine-test blob_decided_el_rejection`
 
 ### Phase 5.1: State Sync Implementation ✅ COMPLETED (2025-10-23)
 
 **Status**: ✅ **Complete - All Sync Paths Working**
 
 **Completed Fixes** (~1.5 days):
+
 1. ✅ ProcessSyncedValue blob sync with all 6 reply paths (app.rs:574-709)
 2. ✅ GetDecidedValue blob bundling with SyncedValuePackage (app.rs:711-829)
 3. ✅ RestreamProposal implemented (original proposer restreams blobs + payload)
@@ -272,6 +292,7 @@ Following the initial implementation completion, a comprehensive code audit reve
 **Severity**: 🔴 **Critical** - Block import failure
 
 **Issue**:
+
 - Proposer generated blobs and streamed them to validators
 - Validators received blobs via ProposalPart stream and stored them
 - **Proposer never called `blob_engine.verify_and_store()` for own blobs**
@@ -281,6 +302,7 @@ Following the initial implementation completion, a comprehensive code audit reve
 **Root Cause**: GetValue handler (app.rs) only stored undecided proposal data, never stored blobs
 
 **Fix Applied** (app.rs:145-189):
+
 ```rust
 // CRITICAL FIX: Store blobs locally for our own proposal
 if let Some(ref bundle) = blobs_bundle {
@@ -304,6 +326,7 @@ if let Some(ref bundle) = blobs_bundle {
 ```
 
 **Helper Added** (proposal_part.rs:163-202):
+
 - Created `BlobSidecar::from_bundle_item()` for initial bundle conversions; later Phase 4 rebuild logic re-signs headers from stored metadata during restream.
 
 **Result**: ✅ Proposer now stores own blobs with UNDECIDED state, promoted to DECIDED on finalization
@@ -315,6 +338,7 @@ if let Some(ref bundle) = blobs_bundle {
 **Severity**: 🟡 **Medium** - Sync recovery failure
 
 **Issue**:
+
 - `make_proposal_parts()` hardcoded `self.address` at line 551
 - During RestreamProposal, this put wrong proposer in ProposalInit
 - Validators receiving restreamed proposal saw incorrect proposer attribution
@@ -323,6 +347,7 @@ if let Some(ref bundle) = blobs_bundle {
 **Fix Applied** (state.rs:518-558):
 
 1. **Modified `stream_proposal()` signature**:
+
 ```rust
 pub fn stream_proposal(
     &mut self,
@@ -338,6 +363,7 @@ pub fn stream_proposal(
 ```
 
 2. **Modified `make_proposal_parts()` signature**:
+
 ```rust
 fn make_proposal_parts(
     &self,
@@ -356,6 +382,7 @@ fn make_proposal_parts(
 ```
 
 3. **Implemented RestreamProposal handler** (app.rs:335-444):
+
 ```rust
 AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
     // Guard: Only original proposer handles (see Finding #2.1)
@@ -387,6 +414,7 @@ AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
 ```
 
 4. **Added `get_undecided_blobs()` to BlobEngine** (engine.rs:135-139, 273-288):
+
 ```rust
 async fn get_undecided_blobs(
     &self,
@@ -406,6 +434,7 @@ async fn get_undecided_blobs(
 **Severity**: 🔴 **CRITICAL** - Signature verification failure, all restreamed proposals rejected
 
 **Issue Discovered During Cross-Reference**:
+
 - Consensus engine broadcasts `RestreamProposal` to **ALL validators** (not just proposer)
 - Every validator tried to handle the message
 - **Signature mismatch**:
@@ -414,6 +443,7 @@ async fn get_undecided_blobs(
   - Verification: Looks up Alice's public key, checks against Bob's signature → **FAILS**
 
 **Signature Verification Flow** (state.rs:720-765):
+
 ```rust
 fn verify_proposal_signature(&self, parts: &ProposalParts) -> Result<(), SignatureVerificationError> {
     // Line 755: Get public key for proposer from Init
@@ -429,6 +459,7 @@ fn verify_proposal_signature(&self, parts: &ProposalParts) -> Result<(), Signatu
 ```
 
 **Critical Fix Applied** (app.rs:341-348):
+
 ```rust
 AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
     // CRITICAL: Only the original proposer should handle RestreamProposal.
@@ -451,6 +482,7 @@ AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
 ```
 
 **Why This Works**:
+
 - ✅ Only original proposer (Alice) handles RestreamProposal
 - ✅ Init has `proposer = self.address` (Alice's address)
 - ✅ Fin signed with `self.signing_provider` (Alice's key)
@@ -458,11 +490,11 @@ AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
 
 **Comparison with Reference Implementations**:
 
-| Implementation | Has Proposer Guard? | Signature Correct? |
-|---------------|---------------------|-------------------|
-| Malachite example | ❌ No | ❌ No (uses self.address always) |
-| Snapchain | ❌ No | ⚠️ Single-blob approach |
-| **Ultramarine** | ✅ **Yes (341-348)** | ✅ **Yes (None → self.address)** |
+| Implementation    | Has Proposer Guard?  | Signature Correct?               |
+| ----------------- | -------------------- | -------------------------------- |
+| Malachite example | ❌ No                | ❌ No (uses self.address always) |
+| Snapchain         | ❌ No                | ⚠️ Single-blob approach           |
+| **Ultramarine**   | ✅ **Yes (341-348)** | ✅ **Yes (None → self.address)** |
 
 **Result**: 🛡️ **Security vulnerability eliminated** - Only original proposer restreams, signatures verify correctly
 
@@ -473,12 +505,14 @@ AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
 **Severity**: 🟡 **Medium** - Forward compatibility risk
 
 **Issue**:
+
 - Initial implementation used bincode + version byte for `SyncedValuePackage` serialization
 - Inconsistent with rest of codebase (all consensus types use protobuf)
 - Manual versioning error-prone
 - No forward/backward compatibility guarantees
 
 **Protobuf is Idiomatic for Malachite Clients**:
+
 - All consensus messages use protobuf
 - Built-in versioning via field numbers
 - Forward/backward compatible schema evolution
@@ -487,6 +521,7 @@ AppMsg::RestreamProposal { height, round, valid_round, address, value_id } => {
 **Fix Applied**:
 
 1. **Added protobuf schema** (sync.proto:69-88):
+
 ```protobuf
 message SyncedValuePackage {
   oneof package {
@@ -507,6 +542,7 @@ message MetadataOnlyPackage {
 ```
 
 2. **Implemented Protobuf trait** (sync.rs:259-332):
+
 ```rust
 impl Protobuf for SyncedValuePackage {
     type Proto = proto::SyncedValuePackage;
@@ -542,6 +578,7 @@ impl Protobuf for SyncedValuePackage {
 ```
 
 3. **Added Protobuf trait for BlobSidecar** (proposal_part.rs:219-312):
+
 ```rust
 impl Protobuf for BlobSidecar {
     type Proto = crate::proto::BlobSidecar;
@@ -572,6 +609,7 @@ impl Protobuf for BlobSidecar {
 ```
 
 4. **Updated RocksDB blob storage** (blob_engine/src/store/rocksdb.rs:73-102):
+
 ```rust
 fn serialize_blob(blob: &BlobSidecar) -> Result<Vec<u8>, BlobStoreError> {
     let proto = blob.to_proto()?;
@@ -593,11 +631,13 @@ fn deserialize_blob(bytes: &[u8]) -> Result<BlobSidecar, BlobStoreError> {
 #### Bincode Cleanup ✅ COMPLETED
 
 **Removed bincode dependencies**:
+
 - ❌ Removed from workspace `Cargo.toml` (line 80)
 - ❌ Removed from `crates/types/Cargo.toml` (line 27)
 - ❌ Removed from `crates/blob_engine/Cargo.toml`
 
 **Replaced with protobuf**:
+
 - ✅ Added `malachitebft-proto` to blob_engine
 - ✅ Added `prost` to blob_engine
 - ✅ All serialization now uses protobuf
@@ -609,6 +649,7 @@ fn deserialize_blob(bytes: &[u8]) -> Result<BlobSidecar, BlobStoreError> {
 #### Summary of Files Modified
 
 **Core Implementation**:
+
 - `crates/node/src/app.rs` (145-189, 335-444)
   - Finding #1 fix: Proposer blob storage
   - Finding #2 fix: RestreamProposal implementation
@@ -636,6 +677,7 @@ fn deserialize_blob(bytes: &[u8]) -> Result<BlobSidecar, BlobStoreError> {
   - Finding #3 fix: Protobuf serialization for blobs
 
 **Dependency Updates**:
+
 - `Cargo.toml` (removed bincode)
 - `crates/types/Cargo.toml` (removed bincode)
 - `crates/blob_engine/Cargo.toml` (removed bincode, added protobuf)
@@ -645,10 +687,12 @@ fn deserialize_blob(bytes: &[u8]) -> Result<BlobSidecar, BlobStoreError> {
 #### Cross-Reference with Reference Implementations
 
 Our fixes were validated against:
+
 1. **Malachite examples/channel** (b205f4252f3064d9a74716056f63834ff33f2de9)
 2. **Snapchain client** (LoadNetwork internal)
 
 **Findings**:
+
 - ✅ Our RestreamProposal is **more correct** (has proposer guard + blob support)
 - ✅ Our serialization is **more consistent** (100% protobuf)
 - ✅ Our proposer blob storage is **complete** (reference impls don't handle blobs)
@@ -677,6 +721,7 @@ Our fixes were validated against:
 ## Phase 5 Testnet: Integration Testing & Observability ✅ COMPLETED
 
 ### Goal
+
 Validate blob sidecar integration end-to-end with comprehensive metrics, integration tests, and testnet workflows.
 
 **Status**: ✅ **Metrics, Harness, and Testnet Validation Complete**
@@ -686,14 +731,17 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 ### Scope
 
 **Metrics Instrumentation**:
+
 - Added 12 Prometheus metrics to BlobEngine (verification latency, storage size, lifecycle transitions)
 - Instrumented verification (KZG proof validation), storage (undecided/decided), and lifecycle (promotions, imports, cleanup)
 
 **Grafana Dashboard**:
+
 - Added blob-specific panels (verification rate, P99 latency, storage by state, failures, lifecycle transitions)
 - Added cross-layer correlation panels (blob imports vs consensus height, blobs per block)
 
 **Integration Tests**:
+
 - Blob lifecycle E2E (`blob_roundtrip`)
 - Restart survival (`restart_hydrate`)
 - Multi-validator sync (`blob_restream_multi_validator`)
@@ -701,6 +749,7 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 - Sync package ingestion (`sync_package_roundtrip`)
 
 **Testnet Workflow**:
+
 - Documented blob testing procedures in `DEV_WORKFLOW.md`
 - Validated spam tool blob support (`--blobs` flag, 1–6 blobs per tx)
 - Established performance baselines (1,158 blobs verified; P99 verification < 50 ms)
@@ -708,6 +757,7 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 ### Current State (2025-11-07)
 
 **Infrastructure** ✅:
+
 - 3-node testnet with Docker Compose (load-reth + Ultramarine)
 - Prometheus scraping 6 targets (3 EL + 3 CL) every 1s
 - Grafana dashboard with 18 panels (5 Malachite, 13 Reth)
@@ -715,8 +765,9 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 - Automated setup (`make all`, `make spam`, `make clean-net`)
 
 **Observability Milestones (2025-11-07)** ✅:
+
 - BlobEngine exposes 12 Prometheus metrics (verification/storage/lifecycle) and dashboards include 9 blob panels.
-- In-process integration harness (`crates/test`) runs all Phase 5B scenarios with real KZG proofs via `make itest` (~17 s).
+- Full-node integration harness (`crates/test`) runs all Phase 5B scenarios with real KZG proofs via `make itest-node` (Tier‑0 still runs via `make itest`).
 - Docker smoke tests exercised 1,158 blobs; harness provides fast deterministic coverage.
 
 ### Implementation Plan
@@ -730,7 +781,7 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 
 - ✅ BlobEngine exposes 12+ Prometheus metrics
 - ✅ Grafana dashboard has 10+ blob-specific panels
-- ✅ Integration harness (`make itest`) passes all Phase 5B scenarios (lifecycle, restart, multi-validator, multi-round)
+- ✅ Integration harness (`make itest-node`) passes all Phase 5B scenarios (lifecycle, restart, multi-validator, multi-round)
 - ✅ Load testing validates 100 blob tx/sec performance
 - ✅ Documentation covers testnet workflows
 - ✅ Performance baselines established (P99 < 50ms, no failures)
@@ -740,17 +791,33 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 - [PHASE5_TESTNET.md](./PHASE5_TESTNET.md) - Complete implementation plan with daily progress log
 - [PHASE4_PROGRESS.md](./PHASE4_PROGRESS.md) - Phase 1-4 completion log
 - Makefile:427-550 - Testnet automation targets
-- `docs/DEV_WORKFLOW.md` – integration harness command reference (`make itest`, `make itest-list`)
+- `docs/DEV_WORKFLOW.md` – integration harness command reference (`make itest`, `make itest-node`)
 
 ---
 
-### Phase 6: Pruning Policy ⏳ PENDING
+### Phase 6: Archiving & Pruning ✅ COMPLETE (2025-12-17)
 
-**Status**: Ready to start
+**Status**: Implemented and code-audited
 
-**Dependencies**: Phase 5 Testnet completed (observability and integration tests in place)
+**Outcome**:
 
-**Estimated Time**: 1 day
+- Safe, deterministic archive→notice→verify→finality-gated prune pipeline for blob bytes.
+- Proposer-only upload duty with proposer-only notice acceptance enforced by validators.
+- Pruning eligibility is **only**: complete set of verified proposer `ArchiveNotice`s at a height + “finalized/decided” (V0).
+- Archiver configuration is strict when enabled: missing provider/id/token fails fast.
+- Tier‑0 + Tier‑1 tests cover archive notice handling, multi-node follower pruning, retries, auth propagation, and restart recovery.
+
+**Docs**:
+
+- `docs/PHASE6_ARCHIVE_PRUNE_FINAL.md` (source-linked, “what’s implemented” spec)
+- `docs/PHASE6_ARCHIVE_PRUNE.md` (human-friendly overview)
+- `docs/ARCHIVER_OPS.md` (operator runbook)
+
+**Test targets**:
+
+- Tier‑0: `make itest`
+- Tier‑1 full-node suite: `make itest-node`
+- Tier‑1 archiver/prune suite: `make itest-node-archiver`
 
 ---
 
@@ -768,4 +835,5 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 
 **Dependencies**: Phases 5-6 must be completed first (Phase 7 is optional)
 
+```
 ```

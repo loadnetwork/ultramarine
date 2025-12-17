@@ -156,6 +156,11 @@ impl Db {
         Ok(Self { db, metrics })
     }
 
+    fn open_existing(path: impl AsRef<Path>, metrics: DbMetrics) -> Result<Self, StoreError> {
+        let db = redb::Database::open(path).map_err(StoreError::Database)?;
+        Ok(Self { db, metrics })
+    }
+
     fn get_decided_value(&self, height: Height) -> Result<Option<DecidedValue>, StoreError> {
         let start = Instant::now();
         let mut read_bytes = 0;
@@ -987,6 +992,15 @@ impl Store {
         let db = Db::new(path, metrics)?;
         db.create_tables()?;
 
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Open an existing store without creating or mutating any tables.
+    ///
+    /// This is intended for read-only consumers (tests, diagnostics) that want to
+    /// avoid taking write locks at open time.
+    pub fn open_read_only(path: impl AsRef<Path>, metrics: DbMetrics) -> Result<Self, StoreError> {
+        let db = Db::open_existing(path, metrics)?;
         Ok(Self { db: Arc::new(db) })
     }
 

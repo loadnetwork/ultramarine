@@ -32,11 +32,13 @@ This repository includes `make` targets to quickly stand up a complete local tes
 This setup uses the standard HTTP transport for the Engine API.
 
 **Start the testnet:**
+
 ```bash
 make all
 ```
 
 This command will:
+
 - Build Ultramarine (debug).
 - Generate a genesis file.
 - Bring up a Docker stack with 3 Reth nodes, Prometheus, and Grafana.
@@ -49,9 +51,11 @@ This command will:
 This setup uses the more performant IPC (Unix sockets) transport for the Engine API.
 
 **Start the testnet:**
+
 ```bash
 make all-ipc
 ```
+
 This command performs the same steps as `make all`, but uses `compose.ipc.yaml` to configure the Docker containers for IPC communication.
 
 ### Stopping and Cleaning
@@ -61,22 +65,27 @@ This command performs the same steps as `make all`, but uses `compose.ipc.yaml` 
 
 ## Core Flow (How It Works)
 
-1) ConsensusReady → StartHeight
+1. ConsensusReady → StartHeight
+
 - App checks EL capabilities, reads EL head, tells Malachite to start at current height.
 
-2) Proposer path
+2. Proposer path
+
 - On `GetValue`, app asks EL to build a block (`getPayloadV4`), stores block bytes + Prague execution requests, replies with a proposal, and streams proposal parts to peers.
 - We respect Malachite’s `timeout`: if block build exceeds the timeout, we do not reply and let consensus take the propose timeout path to prevote‑nil.
 
-3) Non‑proposer path
+3. Non‑proposer path
+
 - Receives proposal parts, verifies signature, reassembles payload, stores undecided proposal + bytes, and replies to consensus.
 
-4) Decide/Commit
+4. Decide/Commit
+
 - On `Decided`, app submits block to EL (`newPayloadV4`) and updates forkchoice; commits value + block bytes + execution requests to the store; starts next height.
 
 Notes:
+
 - “nil” in Tendermint is a vote target, not a proposal. The app must not fabricate an “empty” proposal; silence on timeout is correct.
-- For sync, values should be stored before replying; this is being hardened.
+- For sync, values are stored before replying so `commit()` always has the necessary local data.
 
 ### Prague / Engine API v4 Expectations
 
@@ -139,21 +148,25 @@ Ultramarine includes comprehensive blob sidecar support (EIP-4844) with full obs
 All metrics are exposed at each node's metrics endpoint (`:29000`, `:29001`, `:29002`) with the `blob_engine_` prefix:
 
 **Verification Metrics:**
+
 - `blob_engine_verifications_success_total` - KZG proof verifications that succeeded
 - `blob_engine_verifications_failure_total` - KZG proof verifications that failed
 - `blob_engine_verification_time` - Histogram of KZG verification duration (seconds)
 
 **Storage Metrics:**
+
 - `blob_engine_storage_bytes_undecided` - Bytes used by undecided blobs
 - `blob_engine_storage_bytes_decided` - Bytes used by decided blobs
 - `blob_engine_undecided_blob_count` - Current count of undecided blobs
 
 **Lifecycle Metrics:**
+
 - `blob_engine_lifecycle_promoted_total` - Blobs promoted from undecided to decided
 - `blob_engine_lifecycle_dropped_total` - Blobs dropped from undecided pool
 - `blob_engine_lifecycle_pruned_total` - Decided blobs pruned/archived
 
 **Consensus Integration:**
+
 - `blob_engine_blobs_per_block` - Number of blobs in the last finalized block
 - `blob_engine_restream_rebuilds_total` - Blob metadata rebuilds during restream
 - `blob_engine_sync_failures_total` - Blob sync/fetch failures
@@ -163,6 +176,7 @@ All metrics are exposed at each node's metrics endpoint (`:29000`, `:29001`, `:2
 The Grafana dashboard at http://localhost:3000 includes a **Blob Engine** section (CL) with 9 panels, plus a **Load Engine** section (EL) with 4 panels:
 
 **Load Engine (EL - load_reth metrics):**
+
 1. **Engine API P95 Latency** - forkchoice/getPayload/newPayload histograms
 2. **engine_getBlobs Hit/Miss** - Blob retrieval success vs. cache misses
 3. **Blob Cache Occupancy** - Items and bytes in EL blob cache
@@ -195,6 +209,7 @@ curl -s http://localhost:29000/metrics | grep "blob_engine_storage_bytes"
 ```
 
 Expected behavior:
+
 - Verification success count increases with each blob transaction
 - Undecided blobs appear briefly, then get promoted to decided
 - Storage gauges reflect blob activity
@@ -212,9 +227,10 @@ Ultramarine uses a two-tier test strategy for comprehensive blob integration cov
 **Tier 0: Fast Component Smoke Tests (3 scenarios, ~8-10 seconds)**
 
 Located in `crates/consensus/tests/`, these tests provide rapid feedback during consensus/blob engine development:
+
 - `blob_roundtrip` – Happy path baseline: verify blob storage, KZG verification, and promotion
 - `blob_sync_commitment_mismatch` – Negative path validation: reject tampered commitments (2 tests)
-- `blob_pruning` – Retention logic: verify pruning respects configured retention window
+- `blob_pruning` – Archive/prune gating: verify decided blob bytes are retained until archival (no pruning without real notices)
 
 **When to run:** After changes to blob engine, consensus state, or metrics
 **Command:** `make itest` or individual test via `cargo test -p ultramarine-consensus --test blob_roundtrip -- --nocapture`
@@ -256,20 +272,21 @@ Located in `crates/test/tests/full_node.rs`, these tests provide comprehensive e
 To avoid shared process state between scenarios, the Makefile invokes each Tier 1 test via its own `cargo test` invocation. Running `cargo test -p ultramarine-test --test full_node -- --ignored` directly is still useful for local exploration, but the reproducible path is `make itest-node`.
 
 The suite currently contains:
-  - `full_node_blob_quorum_roundtrip` – three validators finalize two blobbed blocks
-  - `full_node_validator_restart_recovers` – 4-validator cluster where node 0 is stopped immediately at test start, forcing it to ValueSync heights 1 and 2 from peers when restarted, then verify it can participate in height 3
-  - `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
-  - `full_node_new_node_sync` – run a 4-validator cluster, take the fourth validator offline for the first two heights, then bring it back and ensure ValueSync fetches the missing blobs/metadata
-  - `full_node_multi_height_valuesync_restart` – keep validator 3 offline through heights 1–3, let ValueSync import a 1/0/2 blob mix, then restart and inspect the on-disk metadata + parent-root cache
-  - `full_node_restart_multi_height_rebuilds` – drive a 1/0/2 blob mix to height 3, then restart a validator and assert it can rebuild blob sidecars + parent roots solely from disk
-  - `full_node_restream_multiple_rounds_cleanup` – reproduce the multi-round proposer/follower flow with real stores and ensure losing-round blobs are dropped after commit
-  - `full_node_value_sync_commitment_mismatch` – feed a tampered ValueSync package (mismatched commitments vs. blobs) through a full-node state and assert it is rejected with proper metrics/cleanup
-  - `full_node_restream_multi_validator` – end-to-end restream between two real validators to ensure sidecar transmission, metrics, and commit bookkeeping match the state-level harness
-  - `full_node_value_sync_inclusion_proof_failure` – corrupt a blob inclusion proof inside a ValueSync package and verify the full-node state rejects it, records the sync failure, and leaves no blobs behind
-  - `full_node_blob_blobless_sequence_behaves` – commit a blobbed → blobless → blobbed sequence in the real state and assert metrics/blobs match expectations
-  - `full_node_blob_pruning_retains_recent_heights` – override the retention window, commit eight blobbed heights, and ensure pruning + metrics reflect the configured window
-  - `full_node_sync_package_roundtrip` – ingest a synthetic `SyncedValuePackage::Full` and confirm the node promotes blobs/metadata immediately before commit
-  - `full_node_value_sync_proof_failure` – tamper with blob proofs (not commitments/inclusion proofs) to cover the remaining sync failure path
+
+- `full_node_blob_quorum_roundtrip` – three validators finalize two blobbed blocks
+- `full_node_validator_restart_recovers` – 4-validator cluster where node 0 is stopped immediately at test start, forcing it to ValueSync heights 1 and 2 from peers when restarted, then verify it can participate in height 3
+- `full_node_restart_mid_height` – crash a follower mid-stream while height 2 is streaming, then ensure it catches up to height 3
+- `full_node_new_node_sync` – run a 4-validator cluster, take the fourth validator offline for the first two heights, then bring it back and ensure ValueSync fetches the missing blobs/metadata
+- `full_node_multi_height_valuesync_restart` – keep validator 3 offline through heights 1–3, let ValueSync import a 1/0/2 blob mix, then restart and inspect the on-disk metadata + parent-root cache
+- `full_node_restart_multi_height_rebuilds` – drive a 1/0/2 blob mix to height 3, then restart a validator and assert it can rebuild blob sidecars + parent roots solely from disk
+- `full_node_restream_multiple_rounds_cleanup` – reproduce the multi-round proposer/follower flow with real stores and ensure losing-round blobs are dropped after commit
+- `full_node_value_sync_commitment_mismatch` – feed a tampered ValueSync package (mismatched commitments vs. blobs) through a full-node state and assert it is rejected with proper metrics/cleanup
+- `full_node_restream_multi_validator` – end-to-end restream between two real validators to ensure sidecar transmission, metrics, and commit bookkeeping match the state-level harness
+- `full_node_value_sync_inclusion_proof_failure` – corrupt a blob inclusion proof inside a ValueSync package and verify the full-node state rejects it, records the sync failure, and leaves no blobs behind
+- `full_node_blob_blobless_sequence_behaves` – commit a blobbed → blobless → blobbed sequence in the real state and assert metrics/blobs match expectations
+- `full_node_store_pruning_retains_recent_heights` – override the decided-history retention window (`Store::prune()`), commit eight blobbed heights, and ensure decided values are pruned while blob bytes remain (no blob-byte retention window)
+- `full_node_sync_package_roundtrip` – ingest a synthetic `SyncedValuePackage::Full` and confirm the node promotes blobs/metadata immediately before commit
+- `full_node_value_sync_proof_failure` – tamper with blob proofs (not commitments/inclusion proofs) to cover the remaining sync failure path
 
 Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are actionable, and they all share the new builder harness (`FullNodeTestBuilder`) located in `crates/test/tests/full_node/node_harness.rs`.
 
@@ -278,12 +295,14 @@ Each scenario dumps store/WAL diagnostics if a timeout occurs so failures are ac
 ### What the test suites provide
 
 **Tier 0 (consensus crate):**
+
 - Tests consensus state with integrated blob engine
 - Shared helpers in `crates/consensus/tests/common` (test setup, mocks, sample data)
 - Uses production RocksDB storage and real KZG verification
 - Isolated, fast execution (~3s per test)
 
 **Tier 1 (test crate):**
+
 - Spins real consensus + blob engine + networking inside the current Tokio runtime (no Docker)
 - Loads the Ethereum mainnet trusted setup once and generates **real** KZG commitments/proofs with `c-kzg`
 - Provides full-node test harness with WAL, libp2p, and Engine API stubs
@@ -338,11 +357,12 @@ cargo run --bin ultramarine-utils -- spam \
 ```
 
 Blob spam generates deterministic 131,072-byte blobs with valid KZG commitments and proofs. Blob lifecycle:
+
 1. Transactions submitted to Reth txpool
 2. Consensus proposes blocks with blob transactions
 3. Blobs verified (KZG proof check) and stored as "undecided"
 4. Upon block finalization, blobs promoted to "decided"
-5. Blobs pruned/archived after serving their purpose
+5. Blobs are pruned only after a verified proposer `ArchiveNotice` set arrives for the height (there is no blob-byte retention window in V0)
 
 ### Convenience Make Targets
 
@@ -352,6 +372,7 @@ Blob spam generates deterministic 131,072-byte blobs with valid KZG commitments 
 ## Quick EL Sanity Checks
 
 Using Foundry `cast`:
+
 - `cast block-number`
 - `cast block 3`
 - `cast rpc txpool_status`
@@ -373,6 +394,7 @@ curl -s http://127.0.0.1:8545 \
 - Docker image: `make docker-build`
 
 Recommended cadence:
+
 - Use `make all` to bootstrap once; iterate by rebuilding the node (`make build-debug`) and restarting specific tmux panes, or re‑run `scripts/spawn.bash`.
 
 ## Verifying Health
@@ -443,6 +465,7 @@ Ultramarine supports both HTTP and IPC for the Engine API, and an HTTP Eth1 RPC 
   - `--jwt-path ./assets/jwtsecret`
 
 Priority and defaults:
+
 - CLI flags (above) take precedence.
 - If not provided, Ultramarine derives “development defaults” from the node moniker (`test-0/1/2`) to match the docker compose mapping:
   - test-0 → http://localhost:8545 (Eth) and http://localhost:8551 (Engine)
@@ -451,4 +474,5 @@ Priority and defaults:
 - JWT defaults to `./assets/jwtsecret` which `make all` creates if missing.
 
 IPC notes:
+
 - Ensure your EL exposes an IPC socket (`--ipcpath`) and that it’s available on the host (via volume mount). Then start Ultramarine with `--engine-ipc-path`.

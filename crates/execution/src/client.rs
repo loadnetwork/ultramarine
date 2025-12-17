@@ -60,7 +60,7 @@ impl ExecutionClient {
     /// to the execution node to initialize the EthRpc1 client.
     pub async fn new(config: ExecutionConfig) -> eyre::Result<Self> {
         info!("Creating new ExecutionClient");
-        // 1. Craete the Engine API client using its specific endpoint from the config.
+        // 1. Create the Engine API client using its specific endpoint from the config.
         let engine_client: Arc<dyn EngineApi> = match config.engine_api_endpoint {
             EngineApiEndpoint::Http(url) => {
                 info!("Using HTTP transport for Engine API");
@@ -74,7 +74,7 @@ impl ExecutionClient {
             }
         };
 
-        // 2. Craete the standard Eth1 RPC client using its dedicated HTTP Url from the config.
+        // 2. Create the standard Eth1 RPC client using its dedicated HTTP URL from the config.
         info!("Creating Eth1 RPC client");
         let eth_client: Arc<dyn EthRpc> = {
             let rpc_client = AlloyEthRpc::new(config.eth1_rpc_url);
@@ -478,6 +478,7 @@ impl ExecutionClient {
 }
 
 /// Adapter that exposes `ExecutionClient` functionality via the `ExecutionNotifier` trait.
+#[derive(Debug)]
 pub struct ExecutionClientNotifier<'a> {
     client: &'a ExecutionClient,
 }

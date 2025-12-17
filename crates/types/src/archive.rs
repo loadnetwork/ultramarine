@@ -20,6 +20,7 @@ const ARCHIVE_NOTICE_DOMAIN: &[u8] = b"ArchiveNoticeV0";
 
 /// Represents the archiving status for an individual blob index.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum BlobArchivalStatus {
     /// Blob is still stored locally and awaiting archival.
     Pending,
@@ -159,7 +160,7 @@ impl ArchiveNoticeBody {
                 ProtoError::Other(format!("blob_index {} does not fit in u16", proto.blob_index))
             })?,
             kzg_commitment: KzgCommitment::from_slice(&proto.kzg_commitment)
-                .map_err(|e| ProtoError::Other(e))?,
+                .map_err(ProtoError::Other)?,
             blob_keccak: B256::from_slice(&proto.blob_keccak),
             provider_id: proto.provider_id,
             locator: proto.locator,

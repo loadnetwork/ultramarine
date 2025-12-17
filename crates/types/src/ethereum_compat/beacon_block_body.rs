@@ -440,7 +440,7 @@ pub(crate) fn tree_hash_variable_bytes_ssz(data: &[u8]) -> Result<Hash256, Strin
         return Ok(tree_hash_empty_list());
     }
 
-    let chunk_count = (data.len() + BYTES_PER_CHUNK - 1) / BYTES_PER_CHUNK;
+    let chunk_count = data.len().div_ceil(BYTES_PER_CHUNK);
     let mut hasher = MerkleHasher::with_leaves(chunk_count);
     for chunk in data.chunks(BYTES_PER_CHUNK) {
         let mut padded = [0u8; BYTES_PER_CHUNK];
@@ -516,7 +516,7 @@ fn tree_hash_fixed_vector(data: &[u8]) -> Result<Hash256, String> {
         return Ok(Hash256::from_slice(&[0u8; 32]));
     }
 
-    if data.len() % BYTES_PER_CHUNK != 0 {
+    if !data.len().is_multiple_of(BYTES_PER_CHUNK) {
         return Err(format!("Expected fixed vector length multiple of 32, got {}", data.len()));
     }
 

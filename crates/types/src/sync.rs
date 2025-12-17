@@ -398,10 +398,7 @@ impl Protobuf for SyncedValuePackage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        aliases::Bytes as AlloyBytes,
-        blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof},
-    };
+    use crate::blob::{BYTES_PER_BLOB, Blob, KzgCommitment, KzgProof};
 
     #[test]
     fn test_synced_value_package_full_is_full() {

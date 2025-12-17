@@ -162,6 +162,7 @@ pub trait BlobEngine: Send + Sync {
 ///
 /// Uses RocksDB for storage and c-kzg for verification.
 /// Generic over storage backend to allow testing with in-memory stores.
+#[derive(Debug)]
 pub struct BlobEngineImpl<S>
 where
     S: BlobStore,

@@ -34,20 +34,20 @@
 
 ### Metric Table
 
-| Name | Type | Help Text | Units | Instrumentation Point |
-|------|------|-----------|-------|----------------------|
-| `blob_engine_verifications_success_total` | Counter | Successful blob KZG proof verifications | count | `verify_and_store` (success path) |
-| `blob_engine_verifications_failure_total` | Counter | Failed blob KZG proof verifications | count | `verify_and_store` (error path) |
-| `blob_engine_verification_time` | Histogram | Time taken to verify blob KZG proofs | seconds | `verify_and_store` (timed) |
-| `blob_engine_storage_bytes_undecided` | Gauge | Storage size of undecided blobs | bytes | `BlobStore::put_undecided_blobs` (+), `mark_decided`/`drop_round` (-) |
-| `blob_engine_storage_bytes_decided` | Gauge | Storage size of decided blobs | bytes | `BlobStore::mark_decided` (+), `prune_archived_before` (-) |
-| `blob_engine_undecided_blob_count` | Gauge | Current number of undecided blobs | count | `BlobStore::put_undecided_blobs` (+), `mark_decided`/`drop_round` (-) |
-| `blob_engine_blobs_per_block` | Gauge | Number of blobs in last finalized block | count | `BlobEngineImpl::mark_decided` |
-| `blob_engine_lifecycle_promoted_total` | Counter | Blobs promoted to decided state | count | `mark_decided` |
-| `blob_engine_lifecycle_dropped_total` | Counter | Blobs dropped from undecided state | count | `drop_round` |
-| `blob_engine_lifecycle_pruned_total` | Counter | Decided blobs pruned/archived | count | `prune_archived_before` |
-| `blob_engine_restream_rebuilds_total` | Counter | Blob metadata rebuilds during restream | count | `State::rebuild_blob_sidecars_for_restream` |
-| `blob_engine_sync_failures_total` | Counter | Blob sync/fetch failures | count | `AppMsg::ProcessSyncedValue` error path (app.rs) |
+| Name                                      | Type      | Help Text                               | Units   | Instrumentation Point                                                 |
+| ----------------------------------------- | --------- | --------------------------------------- | ------- | --------------------------------------------------------------------- |
+| `blob_engine_verifications_success_total` | Counter   | Successful blob KZG proof verifications | count   | `verify_and_store` (success path)                                     |
+| `blob_engine_verifications_failure_total` | Counter   | Failed blob KZG proof verifications     | count   | `verify_and_store` (error path)                                       |
+| `blob_engine_verification_time`           | Histogram | Time taken to verify blob KZG proofs    | seconds | `verify_and_store` (timed)                                            |
+| `blob_engine_storage_bytes_undecided`     | Gauge     | Storage size of undecided blobs         | bytes   | `BlobStore::put_undecided_blobs` (+), `mark_decided`/`drop_round` (-) |
+| `blob_engine_storage_bytes_decided`       | Gauge     | Storage size of decided blobs           | bytes   | `BlobStore::mark_decided` (+), `prune_archived_before` (-)            |
+| `blob_engine_undecided_blob_count`        | Gauge     | Current number of undecided blobs       | count   | `BlobStore::put_undecided_blobs` (+), `mark_decided`/`drop_round` (-) |
+| `blob_engine_blobs_per_block`             | Gauge     | Number of blobs in last finalized block | count   | `BlobEngineImpl::mark_decided`                                        |
+| `blob_engine_lifecycle_promoted_total`    | Counter   | Blobs promoted to decided state         | count   | `mark_decided`                                                        |
+| `blob_engine_lifecycle_dropped_total`     | Counter   | Blobs dropped from undecided state      | count   | `drop_round`                                                          |
+| `blob_engine_lifecycle_pruned_total`      | Counter   | Decided blobs pruned/archived           | count   | `prune_archived_before`                                               |
+| `blob_engine_restream_rebuilds_total`     | Counter   | Blob metadata rebuilds during restream  | count   | `State::rebuild_blob_sidecars_for_restream`                           |
+| `blob_engine_sync_failures_total`         | Counter   | Blob sync/fetch failures                | count   | `AppMsg::ProcessSyncedValue` error path (app.rs)                      |
 
 ### Key Design Decisions
 
@@ -138,6 +138,7 @@ impl DbMetrics {
 ```
 
 **Key Patterns**:
+
 - ✅ `Arc<Inner>` wrapper with `Deref`
 - ✅ `register()` method takes `&SharedRegistry`
 - ✅ `with_prefix()` for namespace
@@ -631,6 +632,7 @@ watch -n 1 'curl -s http://localhost:29000/metrics | grep blob_engine_verificati
 ### Step 5: Verify Metric Behavior
 
 **Test Cases**:
+
 1. ✅ `verifications_success_total` increments on valid blobs
 2. ✅ `storage_bytes_undecided` increases when storing blobs
 3. ✅ `undecided_blob_count` matches number of stored blobs
@@ -834,6 +836,7 @@ This plan focuses on **BlobEngine** (storage layer) metrics. The following **con
 ### Why Deferred
 
 **Rationale**:
+
 - BlobEngine metrics provide 80% of observability value
 - Node-level metrics require understanding consensus flow patterns
 - Can be added incrementally after BlobEngine metrics proven working
@@ -882,6 +885,7 @@ impl AppBlobMetrics {
 **Scope**: BlobEngine (storage layer) only - node-level metrics deferred to Phase A.2
 
 #### Task A.1: Create Metrics Module
+
 - [x] Create `crates/blob_engine/src/metrics.rs`
 - [x] Add `BlobEngineMetrics` struct with 12 metrics
 - [x] Add `register()` method using `SharedRegistry`
@@ -892,12 +896,14 @@ impl AppBlobMetrics {
 **Reference**: Lines 128-358 in this document (complete code provided)
 
 #### Task A.2: Add Dependencies
+
 - [x] Add `malachitebft-app-channel` to `blob_engine/Cargo.toml`
 - [x] Verify `cargo build -p ultramarine-blob-engine` succeeds
 
 **Estimated Time**: 5 minutes
 
 #### Task A.3: Add Metrics Field to BlobEngine
+
 - [x] Add `metrics: BlobEngineMetrics` to `BlobEngineImpl` (required parameter, not Optional)
 - [x] Update constructor to require metrics parameter
 - [x] Update all test call sites (4 tests) and node initialization
@@ -906,6 +912,7 @@ impl AppBlobMetrics {
 **Note**: Implemented as required parameter for simplicity - matches DbMetrics pattern
 
 #### Task A.4: Extend BlobStore API
+
 - [x] Update `put_undecided_blobs` to return `usize` (blob count)
 - [x] Update `mark_decided` to return `(usize, usize)` (blob count, total bytes)
 - [x] Update `drop_round` to return `(usize, usize)` (blob count, total bytes)
@@ -915,6 +922,7 @@ impl AppBlobMetrics {
 **Note**: Focused on methods that needed metrics; prune_before already returned count
 
 #### Task A.5: Instrument BlobEngine Methods
+
 - [x] Instrument `verify_and_store` (verification counters + histogram + storage gauges)
 - [x] Instrument `mark_decided` (promotion counters + gauge adjustments)
 - [x] Instrument `drop_round` (drop counters + gauge decrements)
@@ -925,6 +933,7 @@ impl AppBlobMetrics {
 **Note**: Used bulk gauge operations (inc_by/dec_by) instead of loops for performance
 
 #### Task A.6: Register in Node Startup
+
 - [x] Find blob engine initialization in `crates/node/src/node.rs` (line 168)
 - [x] Create `BlobEngineMetrics::register(&registry)` (line 159)
 - [x] Pass metrics to `BlobEngineImpl::new(store, blob_metrics)` (line 169)
@@ -933,6 +942,7 @@ impl AppBlobMetrics {
 **Estimated Time**: 30 minutes
 
 #### Task A.7: Wire Consensus Hooks
+
 - [x] Add `blob_metrics: BlobEngineMetrics` field to `State`
 - [x] Pass metrics clone into `State::new` (node startup)
 - [x] Increment restream/rebuild counters in `State::rebuild_blob_sidecars_for_restream`
@@ -942,6 +952,7 @@ impl AppBlobMetrics {
 **Note**: Per-block gauges are updated in `BlobEngineImpl::mark_decided`; consensus-owned metrics cover restream and sync paths.
 
 #### Task A.8: Test Metrics Endpoint
+
 - [x] **COMPLETE** - `make all` (start testnet)
 - [x] **COMPLETE** - `curl http://localhost:29000/metrics | grep blob_engine` (verified 12 metrics)
 - [x] **COMPLETE** - Verify Prometheus scrapes targets successfully
@@ -951,6 +962,7 @@ impl AppBlobMetrics {
 **Status**: ✅ Completed 2025-11-04 (Phase C)
 
 #### Task A.9: Validate Metric Behavior (Optional, requires blob spam)
+
 - [x] **COMPLETE** - Run blob spam tool (193 txs, 1,158 blobs)
 - [x] **COMPLETE** - Verify `verifications_success_total` increments (1,158 successes)
 - [x] **COMPLETE** - Verify `storage_bytes_undecided` increases (dynamic during proposals)
@@ -1014,16 +1026,19 @@ impl AppBlobMetrics {
    - Changed all casts from `as u64` to `as i64`
 
 **Test Results:**
+
 - ✅ 11 unit tests passing, 2 ignored (require valid KZG proofs)
 - ✅ Full codebase builds successfully
 - ✅ All doc tests compile
 
 **Deferred to Phase A.2:**
+
 - State/consensus hooks (`set_blobs_per_block`, restream counters)
 - Integration testing with live testnet
 - Grafana dashboard validation
 
 **Files Modified (Phase A.1):**
+
 - `crates/blob_engine/src/metrics.rs` (new)
 - `crates/blob_engine/src/engine.rs`
 - `crates/blob_engine/src/store/mod.rs`
@@ -1066,18 +1081,21 @@ impl AppBlobMetrics {
 **Architectural Rationale:**
 
 The `pub(crate)` + helper method pattern provides:
+
 - ✅ **Encapsulation**: State owns its instrumentation surface, metrics changes stay localized
 - ✅ **Maintainability**: Future metrics API changes don't ripple across crate boundaries
 - ✅ **Clean API**: External callers use documented, semantic methods
 - ✅ **Flexibility**: Internal consensus code can access metrics directly when needed
 
 **Files Modified (Phase A.2):**
+
 - `crates/consensus/src/state.rs` (metrics field, helper method, restream instrumentation)
 - `crates/node/src/node.rs` (pass metrics to State)
 - `crates/node/src/app.rs` (sync failure instrumentation)
 - `crates/blob_engine/src/engine.rs` (fixed set_blobs_per_block call)
 
 **Test Results:**
+
 - ✅ 25 consensus tests passing
 - ✅ 11 blob_engine tests passing
 - ✅ Full codebase builds successfully
@@ -1117,6 +1135,7 @@ The `pub(crate)` + helper method pattern provides:
 ## Notes
 
 ### What to Avoid
+
 - ❌ Using `prometheus` crate directly (use `malachitebft-app-channel` instead)
 - ❌ `CounterVec`/`GaugeVec` with labels (use separate metrics like DbMetrics)
 - ❌ Complex dashboard queries (no `max by`, no filters initially)
@@ -1124,6 +1143,7 @@ The `pub(crate)` + helper method pattern provides:
 - ❌ Following other plan documents (BLOB_METRICS_MINIMAL_PLAN.md, PHASE5_ACTION_PLAN.md are archived)
 
 ### What to Do
+
 - ✅ Follow `DbMetrics` pattern exactly (`crates/consensus/src/metrics.rs`)
 - ✅ Use `SharedRegistry::with_prefix("blob_engine", ...)`
 - ✅ Test metrics endpoint BEFORE adding dashboard panels
@@ -1131,6 +1151,7 @@ The `pub(crate)` + helper method pattern provides:
 - ✅ Use this document (METRICS_PROGRESS.md) as single source of truth
 
 ### Dependencies
+
 - `malachitebft-app-channel` workspace dependency ✅ **Already in workspace**
 - Existing `SharedRegistry` in node startup ✅ **Available**
 - Working Prometheus/Grafana setup ✅ **Functional** (verified 2025-11-03)
@@ -1138,6 +1159,7 @@ The `pub(crate)` + helper method pattern provides:
 ### Architecture Validation ✅
 
 **This plan has been reviewed against the codebase and confirmed:**
+
 - ✅ Follows exact pattern from `consensus/src/metrics.rs` (DbMetrics)
 - ✅ Uses correct dependency (`malachitebft-app-channel`)
 - ✅ Constructor pattern matches codebase (metrics passed directly to `BlobEngineImpl::new`)
@@ -1165,12 +1187,14 @@ Both Phase A.1 (BlobEngine surface) and Phase A.2 (State/consensus hooks) are no
 **Upcoming Phases:**
 
 ### **Phase B: In-Process Integration Tests** (6-8 hours) — ✅ **Complete (event-driven harness, 2025-11-18 refresh)**
+
 - Implement test harness with `TempDir` isolation
 - Add 3 integration tests: `blob_roundtrip`, `restart_hydrate`, `sync_package_roundtrip`
 - Mock Execution client, use real blob engine/KZG
 - Target: ~2-5 seconds per test
 
 ### **Phase C: Full-Stack Smoke & Observability** (4-6 hours) — ⏳ **Pending**
+
 - Boot Docker testnet (`make all`)
 - Run blob spam tool (after Phase E fixes)
 - Verify metrics endpoint exposes all 12 `blob_engine_*` metrics
@@ -1178,11 +1202,13 @@ Both Phase A.1 (BlobEngine surface) and Phase A.2 (State/consensus hooks) are no
 - Document testnet workflow
 
 ### **Phase E: Fix Spam Tool** (4-6 hours) — ⏳ **Pending**
+
 - Generate real 131KB blobs with KZG commitments/proofs
 - Use Alloy/Reth blob transaction helpers
 - Required for end-to-end validation
 
 **Immediate Action Items:**
+
 1. ⏳ Wait for Phase B integration tests from beta team
 2. ✅ Start testnet to validate metrics endpoint (`curl /metrics | grep blob_engine`)
 3. ⏳ Begin Grafana dashboard panel design (see GRAFANA_WORKING_STATE.md)

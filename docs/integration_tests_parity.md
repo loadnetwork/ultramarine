@@ -13,16 +13,16 @@ The parity target remains aligned with Malachite and Snapchain: multi-validator,
 
 ## 1. Current Coverage Snapshot
 
-| Layer / Component                    | Exercised Today? | Notes |
-|-------------------------------------|------------------|-------|
-| Consensus `State` + BlobEngine      | ✅ (Tier 0)      | 3 smokes with real RocksDB + KZG in `crates/consensus/tests`. |
-| Execution payload + blob verifier   | ✅ (Tier 0/1)    | Deterministic payloads, real KZG commitments/proofs via `c-kzg`. |
-| Engine API bridge (generate block)  | ⚠️ Stubbed       | Tier 0 mocks; Tier 1 uses Engine RPC stub (HTTP ExecutionClient wiring still pending). |
-| Execution notifier (FCU / payload)  | ⚠️ Stubbed       | Tier 0 uses `MockExecutionNotifier`; Tier 1 uses stubbed Execution client. |
-| Malachite channel actors            | ✅ (Tier 1)      | Full-node harness boots channel actors/WAL/libp2p. |
-| libp2p gossip transport             | ✅ (Tier 1)      | `/proposal_parts` streaming exercised end-to-end. |
+| Layer / Component                   | Exercised Today? | Notes                                                                                   |
+| ----------------------------------- | ---------------- | --------------------------------------------------------------------------------------- |
+| Consensus `State` + BlobEngine      | ✅ (Tier 0)      | 3 smokes with real RocksDB + KZG in `crates/consensus/tests`.                           |
+| Execution payload + blob verifier   | ✅ (Tier 0/1)    | Deterministic payloads, real KZG commitments/proofs via `c-kzg`.                        |
+| Engine API bridge (generate block)  | ⚠️ Stubbed        | Tier 0 mocks; Tier 1 uses Engine RPC stub (HTTP ExecutionClient wiring still pending).  |
+| Execution notifier (FCU / payload)  | ⚠️ Stubbed        | Tier 0 uses `MockExecutionNotifier`; Tier 1 uses stubbed Execution client.              |
+| Malachite channel actors            | ✅ (Tier 1)      | Full-node harness boots channel actors/WAL/libp2p.                                      |
+| libp2p gossip transport             | ✅ (Tier 1)      | `/proposal_parts` streaming exercised end-to-end.                                       |
 | WAL / timers / crash recovery paths | ✅ (Tier 1)      | Restart/ValueSync paths deterministic via `StartedHeight` gating + `wait_for_nodes_at`. |
-| CI signal                           | ✅               | Tier 0 in `make test`; Tier 1 in `itest-tier1` (20m timeout, artifacts on failure). |
+| CI signal                           | ✅               | Tier 0 in `make test`; Tier 1 in `itest-tier1` (20m timeout, artifacts on failure).     |
 
 ---
 
@@ -35,11 +35,11 @@ The parity target remains aligned with Malachite and Snapchain: multi-validator,
 
 ## 3. Risk & Mitigation
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| libp2p flakiness / port conflicts | Medium | High | Deterministic ports + per-scenario process isolation; artifacts uploaded on CI failure. |
-| Tier 1 runtime on PRs | Medium | Medium | Keep Tier 0 in `make test`; Tier 1 runs as a separate CI job (`itest-tier1`, 20m timeout, artifacts). |
-| Execution bridge parity | Medium | Medium | Follow-up to replace the stub with HTTP `ExecutionClient`. |
+| Risk                              | Likelihood | Impact | Mitigation                                                                                            |
+| --------------------------------- | ---------- | ------ | ----------------------------------------------------------------------------------------------------- |
+| libp2p flakiness / port conflicts | Medium     | High   | Deterministic ports + per-scenario process isolation; artifacts uploaded on CI failure.               |
+| Tier 1 runtime on PRs             | Medium     | Medium | Keep Tier 0 in `make test`; Tier 1 runs as a separate CI job (`itest-tier1`, 20m timeout, artifacts). |
+| Execution bridge parity           | Medium     | Medium | Follow-up to replace the stub with HTTP `ExecutionClient`.                                            |
 
 ---
 

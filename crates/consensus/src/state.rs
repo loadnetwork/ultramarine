@@ -196,6 +196,7 @@ where
     /// * `blob_metrics` - Metrics for blob operations (cloneable, shared via Arc)
     /// * `archive_metrics` - Metrics for archive/prune operations
     /// * Other parameters remain the same
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         genesis: Genesis,
         ctx: LoadContext,
@@ -285,29 +286,28 @@ where
         &self,
         height: Height,
     ) -> Result<Vec<BlobSidecar>, BlobEngineError> {
-        // Check if blobs have been pruned
-        if let Ok(Some(metadata)) = self.store.get_blob_metadata(height).await {
-            if metadata.is_pruned() {
-                // Collect locators from archive records
-                let locators: Vec<String> = (0..usize::from(metadata.blob_count()))
-                    .filter_map(|idx| {
-                        if let BlobArchivalStatus::Archived(record) = metadata.archival_status(idx)
-                        {
-                            Some(record.body.locator.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        // Check if blobs have been pruned.
+        if let Ok(Some(metadata)) = self.store.get_blob_metadata(height).await &&
+            metadata.is_pruned()
+        {
+            // Collect locators from archive records
+            let locators: Vec<String> = (0..usize::from(metadata.blob_count()))
+                .filter_map(|idx| {
+                    if let BlobArchivalStatus::Archived(record) = metadata.archival_status(idx) {
+                        Some(record.body.locator.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                self.archive_metrics.record_served_archived(locators.len());
+            self.archive_metrics.record_served_archived(locators.len());
 
-                return Err(BlobEngineError::BlobsPruned {
-                    height,
-                    blob_count: locators.len(),
-                    locators,
-                });
-            }
+            return Err(BlobEngineError::BlobsPruned {
+                height,
+                blob_count: locators.len(),
+                locators,
+            });
         }
 
         // Not pruned - serve from local storage
@@ -326,27 +326,27 @@ where
         height: Height,
         round: Round,
     ) -> Result<Vec<BlobSidecar>, BlobEngineError> {
-        if let Ok(Some(metadata)) = self.store.get_blob_metadata(height).await {
-            if metadata.is_pruned() && metadata.blob_count() > 0 {
-                let locators: Vec<String> = (0..usize::from(metadata.blob_count()))
-                    .filter_map(|idx| {
-                        if let BlobArchivalStatus::Archived(record) = metadata.archival_status(idx)
-                        {
-                            Some(record.body.locator.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        if let Ok(Some(metadata)) = self.store.get_blob_metadata(height).await &&
+            metadata.is_pruned() &&
+            metadata.blob_count() > 0
+        {
+            let locators: Vec<String> = (0..usize::from(metadata.blob_count()))
+                .filter_map(|idx| {
+                    if let BlobArchivalStatus::Archived(record) = metadata.archival_status(idx) {
+                        Some(record.body.locator.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                self.archive_metrics.record_served_archived(locators.len());
+            self.archive_metrics.record_served_archived(locators.len());
 
-                return Err(BlobEngineError::BlobsPruned {
-                    height,
-                    blob_count: locators.len(),
-                    locators,
-                });
-            }
+            return Err(BlobEngineError::BlobsPruned {
+                height,
+                blob_count: locators.len(),
+                locators,
+            });
         }
 
         let blobs = self.blob_engine.get_undecided_blobs(height, round.as_i64()).await?;
@@ -360,12 +360,6 @@ where
         }
         self.pending_prune_heights.clear();
         self.pending_archive_heights.clear();
-        if !self.archiver_enabled {
-            debug!(
-                "Archiver disabled; skipping pending archive/prune hydration (blobs stay local)"
-            );
-            return Ok(());
-        }
         let heights = self.store.decided_heights().await?;
         for height in heights {
             let Some(mut metadata) = self.store.get_blob_metadata(height).await? else {
@@ -378,7 +372,16 @@ where
                 matches!(metadata.archival_status(idx), BlobArchivalStatus::Archived(_))
             });
             if !all_archived {
-                self.pending_archive_heights.insert(height);
+                // Only proposers upload in V0, so only the proposer needs to track pending
+                // archival work. Followers may be missing notices but have no duty to upload.
+                if self.archiver_enabled {
+                    let proposer_hint = metadata.proposer_index_hint();
+                    if self.proposer_address_for_height(height, proposer_hint).await? ==
+                        Some(self.address)
+                    {
+                        self.pending_archive_heights.insert(height);
+                    }
+                }
                 continue;
             }
             if self.is_height_finalized(height) {
@@ -391,14 +394,22 @@ where
     }
 
     fn is_height_finalized(&self, height: Height) -> bool {
-        height <= self.latest_finalized_height
+        // "Finality" in V0 is "decided". During normal operation, `current_height` is always the
+        // next height to propose, so any height `< current_height` is decided locally.
+        //
+        // On restarts, we also track `latest_finalized_height` via store hydration / WAL replay.
+        // Use the max of both signals to avoid foot-guns where one lags behind the other.
+        let by_progress = self.current_height.decrement().unwrap_or(Height::new(0));
+        let effective = by_progress.max(self.latest_finalized_height);
+        height <= effective
     }
 
     async fn flush_pending_prunes(&mut self) -> eyre::Result<()> {
         if self.pending_prune_heights.is_empty() {
             return Ok(());
         }
-        let finalized = self.latest_finalized_height;
+        let by_progress = self.current_height.decrement().unwrap_or(Height::new(0));
+        let finalized = by_progress.max(self.latest_finalized_height);
         let ready: Vec<_> =
             self.pending_prune_heights.iter().copied().filter(|h| *h <= finalized).collect();
         for height in ready {
@@ -591,13 +602,19 @@ where
                 continue;
             }
 
-            // Get the decided value to find the round
-            let decided_value = match self.store.get_decided_value(height).await? {
-                Some(dv) => dv,
-                None => continue,
+            // Determine the decided round for this height.
+            //
+            // Prefer consensus metadata (kept forever) so recovery still works even if the
+            // decided-value retention window has pruned historical decided values.
+            let round = if let Some(consensus_meta) =
+                self.store.get_consensus_block_metadata(height).await?
+            {
+                consensus_meta.round
+            } else if let Some(decided_value) = self.store.get_decided_value(height).await? {
+                decided_value.certificate.round
+            } else {
+                continue;
             };
-
-            let round = decided_value.certificate.round;
 
             // **Critical**: Only recover jobs for heights where WE were the proposer.
             // This matches the check in commit() - only proposers upload blobs.
@@ -683,10 +700,10 @@ where
         height: Height,
         proposer_hint: Option<u64>,
     ) -> eyre::Result<Option<Address>> {
-        if let Some(index) = proposer_hint {
-            if let Some(validator) = self.genesis.validator_set.get_by_index(index as usize) {
-                return Ok(Some(validator.address));
-            }
+        if let Some(index) = proposer_hint &&
+            let Some(validator) = self.genesis.validator_set.get_by_index(index as usize)
+        {
+            return Ok(Some(validator.address));
         }
 
         match self.store.get_consensus_block_metadata(height).await {
@@ -1670,15 +1687,8 @@ where
             None
         };
 
-        if blob_count > 0 {
-            if self.archiver_enabled {
-                self.pending_archive_heights.insert(height);
-            } else {
-                debug!(
-                    height = %height,
-                    "Archiver disabled; skipping pending archive tracking for blobbed height"
-                );
-            }
+        if blob_count > 0 && self.archiver_enabled && archive_job.is_some() {
+            self.pending_archive_heights.insert(height);
         }
 
         Ok(DecidedOutcome {
@@ -1815,8 +1825,6 @@ where
 
         // Only perform persistence and metadata operations on first commit (not WAL replay)
         if !is_idempotent_replay {
-            let local_proposer = proposal.proposer == self.address;
-            let has_blobs = proposal.value.metadata.blob_count > 0;
             self.store.store_decided_value(&certificate, proposal.value.clone()).await?;
 
             // Phase 4: Three-layer metadata promotion (Layer 1 → Layer 2 → Layer 3)
@@ -1971,15 +1979,15 @@ where
             let window = self.blob_retention_window.max(1);
             let retain_floor = certificate.height.as_u64().saturating_sub(window - 1);
             let mut retain_height = Height::new(retain_floor);
-            if let Some(&pending_height) = self.pending_archive_heights.iter().next() {
-                if pending_height < retain_height {
-                    tracing::debug!(
-                        retain = %retain_height,
-                        pending = %pending_height,
-                        "Adjusting prune floor to protect pending archive height"
-                    );
-                    retain_height = pending_height;
-                }
+            if let Some(&pending_height) = self.pending_archive_heights.iter().next() &&
+                pending_height < retain_height
+            {
+                tracing::debug!(
+                    retain = %retain_height,
+                    pending = %pending_height,
+                    "Adjusting prune floor to protect pending archive height"
+                );
+                retain_height = pending_height;
             }
             self.store.prune(retain_height).await?;
 
@@ -2139,8 +2147,13 @@ where
         }
         self.flush_pending_prunes().await?;
 
-        // Move to next height
-        self.current_height = self.current_height.increment();
+        // Move to next height.
+        //
+        // Use the committed height as the source of truth to avoid drift when `commit()` is
+        // invoked while `current_height` is temporarily out of sync (e.g., tests, restream, or
+        // WAL replay edge cases). Keep monotonicity by taking the max.
+        let next_height = certificate.height.increment();
+        self.current_height = self.current_height.max(next_height);
         self.current_round = Round::new(0);
 
         Ok(())

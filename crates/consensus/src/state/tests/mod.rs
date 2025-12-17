@@ -333,7 +333,7 @@ async fn commit_promotes_metadata_and_updates_parent_root() {
     assert!(state.store.get_blob_metadata_undecided(height, round).await.expect("get").is_none());
     assert!(state.store.get_blob_metadata(height).await.expect("get").is_some());
 
-    let proposer = state.address.clone();
+    let proposer = state.address;
     let consensus = state
         .store
         .get_consensus_block_metadata(height)
@@ -383,12 +383,12 @@ async fn commit_promotes_blobless_metadata_updates_parent_root() {
 
     let value_metadata = ValueMetadata::new(header.clone(), Vec::new());
     let value = Value::new(value_metadata.clone());
-    let proposer = state.address.clone();
+    let proposer = state.address;
     let proposal = ProposedValue {
         height,
         round,
         valid_round: Round::Nil,
-        proposer: proposer.clone(),
+        proposer,
         value: value.clone(),
         validity: Validity::Valid,
     };
@@ -514,7 +514,7 @@ async fn process_decided_certificate_rejects_mismatched_prev_randao() {
     let header = ExecutionPayloadHeader::from_payload(&payload, None);
     let value_metadata = ValueMetadata::new(header.clone(), Vec::new());
     let value = Value::new(value_metadata.clone());
-    let proposer = state.address.clone();
+    let proposer = state.address;
     let proposal = ProposedValue {
         height,
         round,
@@ -589,13 +589,13 @@ async fn commit_cleans_failed_round_blob_metadata() {
 
     let value_metadata = sample_value_metadata(metadata_decided.blob_count() as usize);
     let value = Value::new(value_metadata.clone());
-    let proposer = state.address.clone();
+    let proposer = state.address;
 
     let proposal = ProposedValue {
         height,
         round: decided_round,
         valid_round: Round::Nil,
-        proposer: proposer.clone(),
+        proposer,
         value: value.clone(),
         validity: Validity::Valid,
     };
@@ -686,7 +686,7 @@ async fn multi_round_proposal_isolation_and_commit() {
         height,
         round: Round::new(1),
         valid_round: Round::Nil,
-        proposer: state.address.clone(),
+        proposer: state.address,
         value: value.clone(),
         validity: Validity::Valid,
     };
@@ -835,7 +835,7 @@ async fn commit_fails_fast_if_blob_metadata_missing() {
         height,
         round,
         valid_round: Round::Nil,
-        proposer: state.address.clone(),
+        proposer: state.address,
         value: value.clone(),
         validity: Validity::Valid,
     };
@@ -906,7 +906,7 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
         height: Height::new(1),
         round: Round::new(0),
         valid_round: Round::Nil,
-        proposer: state.address.clone(),
+        proposer: state.address,
         value: value_h1.clone(),
         validity: Validity::Valid,
     };
@@ -969,7 +969,7 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
         height: Height::new(2),
         round: Round::new(0),
         valid_round: Round::Nil,
-        proposer: state.address.clone(),
+        proposer: state.address,
         value: value_h2.clone(),
         validity: Validity::Valid,
     };
@@ -1057,7 +1057,7 @@ async fn proposer_rotation_updates_metadata_hint() {
             genesis.clone(),
             LoadContext::new(),
             Ed25519Provider::new(key.clone()),
-            validators[idx].address.clone(),
+            validators[idx].address,
             Height::new(0),
             store,
             std::sync::Arc::new(engine.clone()),
@@ -1106,7 +1106,7 @@ async fn proposer_rotation_updates_metadata_hint() {
                     .process_synced_package(
                         height,
                         round,
-                        validators[proposer_idx].address.clone(),
+                        validators[proposer_idx].address,
                         package,
                     )
                     .await
@@ -1158,66 +1158,66 @@ async fn proposer_rotation_updates_metadata_hint() {
             );
         }
     }
+}
 
-    #[tokio::test]
-    async fn get_blobs_with_status_check_returns_pruned_error() {
-        let mock_engine = MockBlobEngine::default();
-        let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
-        let height = Height::new(1);
-        let round = Round::new(0);
+#[tokio::test]
+async fn get_blobs_with_status_check_returns_pruned_error() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+    let height = Height::new(1);
+    let round = Round::new(0);
 
-        let commitments = vec![KzgCommitment::new([0x11; 48]), KzgCommitment::new([0x22; 48])];
-        let blob_hashes = vec![B256::from([0xAA; 32]), B256::from([0xBB; 32])];
-        let header = sample_execution_payload_header();
-        let metadata = BlobMetadata::new(
+    let commitments = vec![KzgCommitment::new([0x11; 48]), KzgCommitment::new([0x22; 48])];
+    let blob_hashes = vec![B256::from([0xAA; 32]), B256::from([0xBB; 32])];
+    let header = sample_execution_payload_header();
+    let metadata = BlobMetadata::new(
+        height,
+        B256::ZERO,
+        commitments.clone(),
+        blob_hashes.clone(),
+        header,
+        Some(0),
+    );
+    state
+        .store
+        .put_blob_metadata_undecided(height, round, &metadata)
+        .await
+        .expect("store undecided metadata");
+    state.store.mark_blob_metadata_decided(height, round).await.expect("promote metadata");
+
+    let signer = Ed25519Provider::new(state.signing_provider.private_key().clone());
+    for (idx, commitment) in commitments.iter().enumerate() {
+        let body = ArchiveNoticeBody {
             height,
-            B256::ZERO,
-            commitments.clone(),
-            blob_hashes.clone(),
-            header,
-            Some(0),
-        );
-        state
-            .store
-            .put_blob_metadata_undecided(height, round, &metadata)
-            .await
-            .expect("store undecided metadata");
-        state.store.mark_blob_metadata_decided(height, round).await.expect("promote metadata");
+            round,
+            blob_index: idx as u16,
+            kzg_commitment: *commitment,
+            blob_keccak: blob_hashes[idx],
+            provider_id: "test-provider".to_string(),
+            locator: format!("test://{}", idx),
+            archived_by: state.address,
+            archived_at: 42,
+        };
+        let notice = ArchiveNotice::sign(body, &signer);
+        state.handle_archive_notice(notice).await.expect("handle archive notice");
+    }
 
-        let signer = Ed25519Provider::new(state.signing_provider.private_key().clone());
-        for (idx, commitment) in commitments.iter().enumerate() {
-            let body = ArchiveNoticeBody {
-                height,
-                round,
-                blob_index: idx as u16,
-                kzg_commitment: *commitment,
-                blob_keccak: blob_hashes[idx],
-                provider_id: "test-provider".to_string(),
-                locator: format!("test://{}", idx),
-                archived_by: state.address,
-                archived_at: 42,
-            };
-            let notice = ArchiveNotice::sign(body, &signer);
-            state.handle_archive_notice(notice).await.expect("handle archive notice");
+    let mut decided_metadata = state
+        .store
+        .get_blob_metadata(height)
+        .await
+        .expect("load metadata")
+        .expect("metadata present");
+    state
+        .prune_archived_height(height, &mut decided_metadata)
+        .await
+        .expect("prune archived height");
+
+    match state.get_blobs_with_status_check(height).await {
+        Err(BlobEngineError::BlobsPruned { blob_count, locators, .. }) => {
+            assert_eq!(blob_count, 2);
+            assert_eq!(locators, vec!["test://0".to_string(), "test://1".to_string()]);
         }
-
-        let mut decided_metadata = state
-            .store
-            .get_blob_metadata(height)
-            .await
-            .expect("load metadata")
-            .expect("metadata present");
-        state
-            .prune_archived_height(height, &mut decided_metadata)
-            .await
-            .expect("prune archived height");
-
-        match state.get_blobs_with_status_check(height).await {
-            Err(BlobEngineError::BlobsPruned { blob_count, locators, .. }) => {
-                assert_eq!(blob_count, 2);
-                assert_eq!(locators, vec!["test://0".to_string(), "test://1".to_string()]);
-            }
-            other => panic!("expected BlobsPruned error, got {:?}", other),
-        }
+        other => panic!("expected BlobsPruned error, got {:?}", other),
     }
 }

@@ -9,6 +9,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Enables test-harness behavior in the node crate when used from integration
+# harnesses (e.g., `ultramarine-test`). This should never be enabled in
+# production binaries.
+test-harness = []
+
 [dependencies]
 ultramarine-blob-engine.workspace = true
 ultramarine-cli.workspace = true
@@ -21,9 +27,9 @@ malachitebft-engine.workspace = true
 malachitebft-proto.workspace = true
 
 alloy-consensus = { workspace = true }
+alloy-primitives = { workspace = true }
 alloy-rpc-types-engine = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
-alloy-primitives = { workspace = true }
 async-trait.workspace = true
 bytes.workspace = true
 color-eyre.workspace = true
