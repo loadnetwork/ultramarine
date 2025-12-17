@@ -41,14 +41,6 @@ unnameable-types = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 
 [workspace.dependencies]
-# ultramarine dependencies
-ultramarine-blob-engine = { path = "crates/blob_engine" }
-ultramarine-cli = { path = "crates/cli" }
-ultramarine-consensus = { path = "crates/consensus" }
-ultramarine-execution = { path = "crates/execution" }
-ultramarine-node = { path = "crates/node" }
-ultramarine-test-support = { path = "crates/test_support" }
-ultramarine-types = { path = "crates/types" }
 # eth types
 
 alloy-consensus = { version = "1.0.23", default-features = false }
@@ -67,13 +59,6 @@ alloy-signer = { version = "1.0.23" }
 alloy-signer-local = { version = "1.0.23", features = ["keystore", "mnemonic"] }
 alloy-transport-http = { version = "1.0.23", features = ["jwt-auth"] }
 
-ethereum_hashing = "0.7.0"
-ethereum_ssz = "0.9.0"
-
-color-eyre = "0.6.5"
-
-tokio = "1.47.1"
-
 async-trait = "0.1.85"
 axum = "0.8.4"
 bytes = { version = "1.10.1", default-features = false }
@@ -81,10 +66,15 @@ bytesize = "2.0.1"
 c-kzg = { version = "2.1.0", default-features = false }
 chrono = "0.4.38"
 clap = "4.5.44"
+
+color-eyre = "0.6.5"
 config = { version = "0.15.3", features = ["toml"], default-features = false }
 derive-where = "1.6.0"
 directories = "6.0.0"
+
+ethereum_hashing = "0.7.0"
 ethereum_serde_utils = "0.8.0"
+ethereum_ssz = "0.9.0"
 fixed_bytes = { git = "https://github.com/sigp/lighthouse.git", package = "fixed_bytes", rev = "v8.0.0-rc.1" }
 getrandom = { version = "0.2.14", features = ["std"] }
 hex = { version = "0.4.3", features = ["serde"] }
@@ -107,12 +97,21 @@ sha3 = "0.10.8"
 signature = "2.2.0"
 tempfile = "3.13.0"
 thiserror = { version = "2.0.14", default-features = false }
+tokio = "1.47.1"
 toml = "0.9.5"
 tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 tree_hash = "0.10.0"
 tree_hash_derive = "0.10.0"
+# ultramarine dependencies
+ultramarine-blob-engine = { path = "crates/blob_engine" }
+ultramarine-cli = { path = "crates/cli" }
+ultramarine-consensus = { path = "crates/consensus" }
+ultramarine-execution = { path = "crates/execution" }
+ultramarine-node = { path = "crates/node" }
+ultramarine-test-support = { path = "crates/test_support" }
+ultramarine-types = { path = "crates/types" }
 url = "2"
 
 [workspace.dependencies.malachitebft-app]

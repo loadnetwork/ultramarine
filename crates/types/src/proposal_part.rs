@@ -180,7 +180,7 @@ impl BlobSidecar {
     /// updated to use `new()` with proper header and inclusion proof.
     ///
     /// TODO: Remove this method once Phase 4 is fully implemented
-    /// https://github.com/loadnetwork/ultramarine/issues/TBD
+    /// <https://github.com/loadnetwork/ultramarine/issues/TBD>
     pub fn from_bundle_item(
         index: u16,
         blob: Blob,

@@ -11,7 +11,7 @@ pub struct ArchiverConfig {
     /// Whether archiving is enabled.
     pub enabled: bool,
 
-    /// Provider URL for uploads (e.g., "https://s3-node-1.load.network").
+    /// Provider URL for uploads (e.g., <https://s3-node-1.load.network>).
     pub provider_url: String,
 
     /// Upload path appended to `provider_url` for blob archival.

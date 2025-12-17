@@ -188,7 +188,7 @@ const KZG_COMMITMENT_INCLUSION_PROOF_DEPTH: usize = 17;
 /// ## Algorithm
 ///
 /// 1. Build Merkle tree for the commitments list
-/// 2. Generate proof from commitment[index] to list root (variable depth)
+/// 2. Generate proof from `commitment\[index\]` to list root (variable depth)
 /// 3. Generate proof from list root to body_root (fixed depth)
 /// 4. Concatenate both proofs → total 17 branches
 ///

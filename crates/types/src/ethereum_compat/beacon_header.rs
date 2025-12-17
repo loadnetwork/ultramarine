@@ -80,7 +80,7 @@ impl BeaconBlockHeader {
     /// Uses proper SSZ merkleization as defined in the Ethereum consensus spec.
     /// This is the value that gets signed by the proposer.
     ///
-    /// https://github.com/ethereum/consensus-specs/blob/dev/ssz/simple-serialize.md#merkleization
+    /// <https://github.com/ethereum/consensus-specs/blob/dev/ssz/simple-serialize.md#merkleization>
     pub fn hash_tree_root(&self) -> B256 {
         use tree_hash::TreeHash;
 
