@@ -54,7 +54,7 @@
 //! ## References
 //!
 //! - FINAL_PLAN.md Phase 2: Value Refactor
-//! - EIP-4844: https://eips.ethereum.org/EIPS/eip-4844
+//! - EIP-4844: <https://eips.ethereum.org/EIPS/eip-4844>
 
 use core::{convert::TryFrom, fmt};
 

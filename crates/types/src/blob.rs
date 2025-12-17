@@ -33,9 +33,9 @@
 //!
 //! ## References
 //!
-//! - EIP-4844: https://eips.ethereum.org/EIPS/eip-4844
-//! - Consensus specs: https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/
-//! - Polynomial commitments: https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/polynomial-commitments.md
+//! - EIP-4844: <https://eips.ethereum.org/EIPS/eip-4844>
+//! - Consensus specs: <https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/>
+//! - Polynomial commitments: <https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/polynomial-commitments.md>
 
 // Use Alloy's versioned hash calculation (uses SHA-256 per EIP-4844 spec)
 // Re-export so other crates can depend on ultramarine_types instead of alloy directly.

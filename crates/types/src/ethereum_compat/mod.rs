@@ -31,7 +31,7 @@
 //! References:
 //! - Ethereum Consensus Specs: `consensus-specs/specs/deneb/`
 //! - Lighthouse: `lighthouse/consensus/types/src/`
-//! - EIP-4844: https://eips.ethereum.org/EIPS/eip-4844
+//! - EIP-4844: <https://eips.ethereum.org/EIPS/eip-4844>
 
 pub mod beacon_block_body;
 pub mod beacon_header;
