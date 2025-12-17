@@ -31,7 +31,7 @@ async fn archive_notices_stored_and_loadable() -> Result<()> {
     let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
 
     // Propose and commit a height with blobs
-    let height = Height::new(0);
+    let height = Height::new(1);
     let round = Round::new(0);
     let bundle = sample_blob_bundle(2);
 
@@ -60,7 +60,7 @@ async fn archive_notices_stored_and_loadable() -> Result<()> {
             height,
             round,
             blob_index: idx as u16,
-            kzg_commitment: sidecar.kzg_commitment.clone(),
+            kzg_commitment: sidecar.kzg_commitment,
             blob_keccak: sidecar.blob.keccak_hash(),
             provider_id: "test-provider".to_string(),
             locator: format!("test://height_{}/blob_{}", height.as_u64(), idx),
@@ -99,7 +99,7 @@ async fn archive_notices_reject_non_proposer() -> Result<()> {
 
     let mut node = build_seeded_state(&dirs, &genesis, proposer, Height::new(0)).await?;
 
-    let height = Height::new(0);
+    let height = Height::new(1);
     let round = Round::new(0);
     let bundle = sample_blob_bundle(1);
 
@@ -125,7 +125,7 @@ async fn archive_notices_reject_non_proposer() -> Result<()> {
         height,
         round,
         blob_index: 0,
-        kzg_commitment: sidecars[0].kzg_commitment.clone(),
+        kzg_commitment: sidecars[0].kzg_commitment,
         blob_keccak: sidecars[0].blob.keccak_hash(),
         provider_id: "test-provider".to_string(),
         locator: "test://reject".to_string(),
@@ -195,6 +195,89 @@ async fn archiver_enabled_gates_sync_notices() -> Result<()> {
     assert!(job.is_some(), "build_archive_job should return a job");
     let job = job.unwrap();
     assert_eq!(job.blob_indices.len(), 1);
+
+    Ok(())
+}
+
+/// Test that pruning is independent from running the archiver worker:
+/// a node can have uploads disabled (archiver worker off) but still prune local blob bytes
+/// when it receives valid archive notices.
+#[tokio::test]
+async fn archiver_worker_disabled_still_prunes_on_notices() -> Result<()> {
+    use ultramarine_types::{
+        archive::{ArchiveNotice, ArchiveNoticeBody},
+        signing::Ed25519Provider,
+    };
+
+    let (genesis, validators) = make_genesis(1);
+    let validator = &validators[0];
+    let dirs = TestDirs::new();
+
+    let mut node = build_seeded_state(&dirs, &genesis, validator, Height::new(0)).await?;
+    node.state.set_archiver_enabled(false); // uploads disabled
+
+    let height = Height::new(1);
+    let round = Round::new(0);
+    let bundle = sample_blob_bundle(2);
+
+    let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+    let (proposed, bytes, maybe_sidecars) =
+        propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle))
+            .await?;
+    let sidecars = maybe_sidecars.expect("blobbed proposal should yield sidecars");
+
+    node.state.blob_engine().verify_and_store(height, round.as_i64(), &sidecars).await?;
+    node.state.store_undecided_block_data(height, round, bytes.clone(), Vec::new()).await?;
+
+    let certificate = CommitCertificate {
+        height,
+        round,
+        value_id: proposed.value.id(),
+        commit_signatures: Vec::new(),
+    };
+    let mut notifier = MockExecutionNotifier::default();
+    node.state.process_decided_certificate(&certificate, bytes, &mut notifier).await?;
+
+    // Simulate receiving valid proposer-signed archive notices (as a follower would).
+    let signer = Ed25519Provider::new(validator.private_key());
+    for (idx, sidecar) in sidecars.iter().enumerate() {
+        let body = ArchiveNoticeBody {
+            height,
+            round,
+            blob_index: idx as u16,
+            kzg_commitment: sidecar.kzg_commitment,
+            blob_keccak: sidecar.blob.keccak_hash(),
+            provider_id: "test-provider".to_string(),
+            locator: format!("test://retain/height_{}/blob_{}", height.as_u64(), idx),
+            archived_by: validator.address(),
+            archived_at: 12345,
+        };
+        let notice = ArchiveNotice::sign(body, &signer);
+        node.state.handle_archive_notice(notice).await?;
+    }
+
+    let notices = node.state.load_archive_notices(height).await?;
+    assert_eq!(notices.len(), 2, "expected one persisted notice per blob");
+
+    // All notices verified + finalized => prune eligible.
+    let metadata =
+        node.state.get_blob_metadata(height).await?.expect("metadata should exist after commit");
+    assert_eq!(metadata.blob_count(), 2, "expected blob metadata to reflect committed blob count");
+    for idx in 0..usize::from(metadata.blob_count()) {
+        assert!(
+            matches!(
+                metadata.archival_status(idx),
+                ultramarine_types::archive::BlobArchivalStatus::Archived(_)
+            ),
+            "expected blob index {} to be archived after notices",
+            idx
+        );
+    }
+    assert!(metadata.is_pruned(), "expected blobs to be pruned after all notices verified");
+
+    // Blob bytes should be deleted locally.
+    let remaining = node.state.blob_engine().get_for_import(height).await?;
+    assert_eq!(remaining.len(), 0, "expected blob bytes deleted after pruning");
 
     Ok(())
 }

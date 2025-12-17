@@ -15,6 +15,7 @@ Phase 5 delivered end-to-end blob sidecar support for Ultramarine while keeping 
 3. **Observability & validation** – new metrics, dashboards, load tooling, and an in-process harness prove the system under both single-node and multi-node scenarios.
 
 **Key Achievements**:
+
 - ✅ 12 Prometheus metrics tracking complete blob lifecycle
 - ✅ 9 Grafana dashboard panels for real-time observability
 - ✅ 17 integration tests (3 Tier 0 + 14 Tier 1) with real KZG cryptography, including negative-path coverage
@@ -28,39 +29,42 @@ Phase 5 delivered end-to-end blob sidecar support for Ultramarine while keeping 
 Phase 5 was organized into three sequential sub-phases:
 
 ### Phase 5A: Metrics Instrumentation
+
 **Goal**: Instrument blob engine with Prometheus metrics and Grafana dashboards
 **Status**: ✅ COMPLETE (November 4, 2025)
 
 ### Phase 5B: Integration Tests
+
 **Goal**: Build integration test harness with 3+ E2E scenarios
 **Status**: ✅ COMPLETE (November 5, 2025)
 **Delivered**: 13 E2E tests (430% of goal)
 
 ### Phase 5C: Testnet Validation
+
 **Goal**: Validate blob lifecycle on live 3-node testnet
 **Status**: ✅ COMPLETE (November 4, 2025)
 
 ## What We Built
 
-- **Execution bridge** `crates/execution/src/client.rs:349`  
+- **Execution bridge** `crates/execution/src/client.rs:349`\
   `generate_block_with_blobs` fetches payloads + blob bundles and returns `ExecutionPayloadV3` plus converted `BlobsBundle`.
 
-- **Consensus state updates** `crates/consensus/src/state.rs`  
-  - `propose_value_with_blobs` stores metadata + undecided `BlobMetadata` before streaming (`1034` onwards).  
-  - Commit path refuses to finalize without blob promotion and keeps the parent blob root updated (`840` onwards).  
+- **Consensus state updates** `crates/consensus/src/state.rs`
+  - `propose_value_with_blobs` stores metadata + undecided `BlobMetadata` before streaming (`1034` onwards).
+  - Commit path refuses to finalize without blob promotion and keeps the parent blob root updated (`840` onwards).
   - Restream logic rebuilds Deneb-compatible sidecars on demand (`333-420`, `452-557`).
 
-- **Blob engine** `crates/blob_engine/src`  
-  - `BlobVerifier` loads the embedded Ethereum trusted setup and batch-verifies KZG proofs.  
-  - `BlobEngineImpl::verify_and_store` and `mark_decided` manage lifecycle; the latter is now idempotent, preserving metrics on duplicate promotion (`270-305`).  
+- **Blob engine** `crates/blob_engine/src`
+  - `BlobVerifier` loads the embedded Ethereum trusted setup and batch-verifies KZG proofs.
+  - `BlobEngineImpl::verify_and_store` and `mark_decided` manage lifecycle; the latter is now idempotent, preserving metrics on duplicate promotion (`270-305`).
   - RocksDB store moves blobs between undecided/decided columns without iterator invalidation (`store/rocksdb.rs:218`).
 
-- **Metrics & dashboards**  
-  - `BlobEngineMetrics` exports 12 metrics and hooks into the node registry (`metrics.rs:23-175`, `crates/node/src/node.rs:157-180`).  
-  - Grafana dashboard references the new metric names (`monitoring/config-grafana/.../default.json:534-1291`).  
+- **Metrics & dashboards**
+  - `BlobEngineMetrics` exports 12 metrics and hooks into the node registry (`metrics.rs:23-175`, `crates/node/src/node.rs:157-180`).
+  - Grafana dashboard references the new metric names (`monitoring/config-grafana/.../default.json:534-1291`).
   - Developer workflow doc explains how to interpret blob panels (`docs/DEV_WORKFLOW.md:120-200`).
 
-- **Load tooling** `crates/utils/src/tx.rs:72-200`  
+- **Load tooling** `crates/utils/src/tx.rs:72-200`\
   Spam utility now generates real blobs, commitments, proofs, and versioned hashes using the shared trusted setup.
 
 - **Integration harness**
@@ -68,6 +72,7 @@ Phase 5 was organized into three sequential sub-phases:
   - **Tier 1 (full-node)** lives in `crates/test/tests/full_node` and boots Malachite channel actors, WAL, libp2p, and the application loop for 14 scenarios (quorum blob roundtrip, restream, restarts, ValueSync failures, pruning, etc.). Run via `make itest-node`; wired into CI in `itest-tier1` with failure artifacts.
 
 **Key Design Decisions**:
+
 - Consensus messages contain only blob metadata (commitments/hashes), never full blob bytes
 - Blobs stored separately with two-stage lifecycle: undecided → decided → pruned
 - Real KZG cryptography in tests (c-kzg library with Ethereum mainnet trusted setup)
@@ -80,6 +85,7 @@ Phase 5 was organized into three sequential sub-phases:
 - **Tier 1 (full-node harness)**: 14 scenarios cover quorum blob roundtrip, restream across validators/rounds, multi-height restarts, ValueSync (happy and failure: commitment mismatch, inclusion proof failure), blobless sequences, pruning, sync package roundtrip, and EL rejection. Run via `make itest-node` (process-isolated) and in CI’s `itest-tier1` lane with artifacts on failure.
 
 **Integration Test Results** (Phase 5B):
+
 - ✅ Tier 0: 3/3 passing with real KZG
 - ✅ Tier 1: 14/14 passing with real KZG, libp2p, WAL, channel actors
 - ✅ Metrics accurately track operations (verifications, storage, lifecycle)
@@ -112,6 +118,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 ```
 
 **Key Findings**:
+
 - 100% KZG verification success rate (1,158/1,158)
 - Zero verification failures
 - All blobs promoted from undecided → decided
@@ -137,6 +144,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **User Feedback**: "Why it's a fix? Why do we need it? Pruning is phase 6 thing"
 
 **Lesson**:
+
 - Clearly distinguish "completion criteria" from "future improvements"
 - Pruning/archiving are Phase 6/7 scope, not Phase 5 requirements
 - Test coverage gaps are acceptable if acknowledged and documented
@@ -151,6 +159,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Solution**: Run actual tests (`make itest`) to determine ground truth.
 
 **Lesson**:
+
 - Documentation can drift from reality during rapid development
 - Code and passing tests are source of truth
 - Simple validation (just run tests) beats extensive analysis
@@ -164,6 +173,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Fix**: Made `mark_decided()` idempotent (lines 270-305 in `blob_engine.rs`)
 
 **Lesson**:
+
 - State transitions in distributed systems often happen multiple times
 - Metrics must handle idempotent operations correctly
 - Gauges should reflect actual state, not duplicate counts
@@ -175,6 +185,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Decision**: Use real c-kzg library with Ethereum mainnet trusted setup in integration tests (not mocks)
 
 **Trade-offs**:
+
 - ✅ **Pro**: Validates actual cryptographic correctness
 - ✅ **Pro**: Catches real-world KZG proof issues
 - ✅ **Pro**: Tests are higher confidence
@@ -189,6 +200,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Approach**: Cache trusted setup once, generate real blobs inside harness
 
 **Benefits**:
+
 - No external tooling required for test execution
 - Tests are reproducible across machines
 - Developers can run `make itest` without Docker/Reth/network setup
@@ -201,6 +213,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Observation**: 12 Prometheus metrics provided 10× visibility compared to logs alone
 
 **Impact**:
+
 - Grafana dashboard enabled real-time health monitoring
 - Metrics caught issues logs would miss (e.g., undecided blob leaks)
 - Performance characteristics immediately visible
@@ -211,11 +224,13 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 ### 7. Simple Plans Ship Faster
 
 **Pattern**: User consistently pushed for simpler approaches:
+
 - "Just run `make itest` and see if tests pass"
 - "Don't overthink it"
 - "Gaps are future improvements, not blockers"
 
 **Lesson**:
+
 - Avoid over-engineering validation plans
 - Start with simplest validation approach
 - "Good enough and shipped" > "perfect and incomplete"
@@ -245,6 +260,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 ### Test Coverage Gaps
 
 **Not Covered**:
+
 - Error path testing (invalid KZG proofs, corrupted blobs)
 - Edge cases (empty blob bundles, duplicate blobs)
 - Concurrency stress testing (race conditions)
@@ -257,6 +273,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Current**: Hardcoded 5-block retention in `blob_engine.rs`
 
 **Not Implemented**:
+
 - Configurable retention policies (block count, time-based)
 - Archiving to cold storage
 - Selective pruning (keep blobs for certain heights)
@@ -270,6 +287,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 **Current**: Blobs stored in local RocksDB only
 
 **Not Implemented**:
+
 - Multi-node blob gossip for sync
 - Blob fetching from peers if missing locally
 - Erasure coding or redundancy
@@ -282,14 +300,14 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 
 ### Original Goals vs. Actual Delivery
 
-| Goal | Target | Actual | Status |
-|------|--------|--------|--------|
-| Metrics instrumentation | 10+ metrics | 12 metrics | ✅ 120% |
-| Grafana panels | 6+ panels | 9 panels | ✅ 150% |
-| Integration tests | 3+ tests | Tier 0: 3 smokes (`crates/consensus/tests`), Tier 1: 14 full-node | ✅ |
-| Test execution time | < 30s | Tier 0: ~8–10 s (current); Tier 1 runs separately | ✅ |
-| Testnet validation | 500+ blobs | 1,158 blobs | ✅ 232% |
-| KZG verification rate | > 95% | 100% | ✅ 105% |
+| Goal                    | Target      | Actual                                                            | Status  |
+| ----------------------- | ----------- | ----------------------------------------------------------------- | ------- |
+| Metrics instrumentation | 10+ metrics | 12 metrics                                                        | ✅ 120% |
+| Grafana panels          | 6+ panels   | 9 panels                                                          | ✅ 150% |
+| Integration tests       | 3+ tests    | Tier 0: 3 smokes (`crates/consensus/tests`), Tier 1: 14 full-node | ✅      |
+| Test execution time     | < 30s       | Tier 0: ~8–10 s (current); Tier 1 runs separately                 | ✅      |
+| Testnet validation      | 500+ blobs  | 1,158 blobs                                                       | ✅ 232% |
+| KZG verification rate   | > 95%       | 100%                                                              | ✅ 105% |
 
 **Overall**: All goals met or exceeded
 
@@ -300,6 +318,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 ### Phase 6: Configurable Pruning
 
 **Goals**:
+
 - CLI flags for retention policy (`--blob-retention-blocks`, `--blob-retention-time`)
 - Config file support for pruning parameters
 - Metrics for pruning operations
@@ -308,16 +327,19 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 ### Future Phases
 
 **Phase 7+**: Archiving and availability
+
 - Archive old blobs to cold storage (S3, disk)
 - Blob fetching from peers during sync
 - Retention policies (keep recent, archive old)
 
 **CI Integration**:
+
 - Wire `make itest` into CI pipeline
 - Run Phase 5B tests on every PR to catch regressions
 - Add error-path tests incrementally
 
 **Production Hardening**:
+
 - Error path testing (invalid proofs, missing metadata)
 - Large-scale sync scenarios (100+ validators)
 - Concurrency stress testing
@@ -329,6 +351,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 Phase 5 successfully delivered a production-ready EIP-4844 blob sidecar implementation for Ultramarine. All three sub-phases (Metrics, Integration Tests, Testnet Validation) completed successfully and exceeded original goals.
 
 **Validation Summary**:
+
 - ✅ 6/6 integration tests passing with real KZG cryptography
 - ✅ 1,158 blobs processed successfully on live testnet
 - ✅ 100% KZG verification success rate
@@ -336,6 +359,7 @@ Phase 5 successfully delivered a production-ready EIP-4844 blob sidecar implemen
 - ✅ Full blob lifecycle validated (undecided → decided → pruned)
 
 **Key Achievements**:
+
 - Exceeded integration test goal by 100% (6 tests vs. 3 target)
 - Real c-kzg cryptography validates correctness, not just happy paths
 - Comprehensive observability enables production monitoring
@@ -348,6 +372,7 @@ Phase 5 successfully delivered a production-ready EIP-4844 blob sidecar implemen
 **Phase 5 Status**: ✅ **COMPLETE** (November 5, 2025)
 
 **References**:
+
 - Progress tracking: `PHASE5_PROGRESS.md`
 - Developer workflow: `docs/DEV_WORKFLOW.md`
 - Testnet results: `docs/PHASE5_TESTNET.md`

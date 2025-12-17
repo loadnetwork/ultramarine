@@ -34,7 +34,6 @@ use ultramarine_blob_engine::{
 use ultramarine_consensus::{
     archive_metrics::ArchiveMetrics, metrics::DbMetrics, state::State, store::Store,
 };
-pub(crate) use ultramarine_test_support::execution_requests::sample_execution_requests_for_height;
 use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
@@ -109,7 +108,7 @@ impl ValidatorKey {
 
     /// Shortcut accessor for the validator address.
     pub(crate) fn address(&self) -> Address {
-        self.validator.address.clone()
+        self.validator.address
     }
 }
 
@@ -254,6 +253,7 @@ pub(crate) fn sample_execution_payload_v3_for_height(
 }
 
 /// Helper to construct deterministic [`PayloadId`] values.
+#[allow(dead_code)]
 pub(crate) fn payload_id(byte: u8) -> PayloadId {
     PayloadId::from(FixedBytes::<8>::from([byte; 8]))
 }
@@ -290,6 +290,7 @@ pub(crate) fn sample_blob_bundle(count: usize) -> BlobsBundle {
 }
 
 /// Deterministic peer identifier for harness usage.
+#[allow(dead_code)]
 pub(crate) fn test_peer_id(index: u8) -> PeerId {
     const PEER_IDS: &[&str] = &[
         "12D3KooWHRyfTBKcjkqjNk5UZarJhzT7rXZYfr4DmaCWJgen62Xk",

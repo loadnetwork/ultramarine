@@ -71,8 +71,7 @@ use crate::{
 /// - blob_count: 2 bytes
 /// - execution_payload_header: ~516 bytes
 /// - proposer_index_hint: 8 bytes
-/// - protobuf overhead: ~60 bytes
-/// **Total: ~900 bytes (6 blobs), ~600 bytes (0 blobs)**
+/// - protobuf overhead: ~60 bytes **Total: ~900 bytes (6 blobs), ~600 bytes (0 blobs)**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobMetadata {
     /// Block height (maps to Ethereum slot)

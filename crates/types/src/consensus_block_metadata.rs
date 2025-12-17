@@ -80,8 +80,7 @@ use crate::{address::Address, aliases::B256, height::Height, proto};
 /// - execution_block_hash: 32 bytes
 /// - gas_limit: 8 bytes
 /// - gas_used: 8 bytes
-/// - protobuf overhead: ~80 bytes
-/// **Total: ~200 bytes**
+/// - protobuf overhead: ~80 bytes **Total: ~200 bytes**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsensusBlockMetadata {
     /// Block height (NOT "slot")
@@ -122,6 +121,7 @@ impl ConsensusBlockMetadata {
     /// * `execution_block_hash` - Execution block hash
     /// * `gas_limit` - Gas limit
     /// * `gas_used` - Gas used
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         height: Height,
         round: Round,

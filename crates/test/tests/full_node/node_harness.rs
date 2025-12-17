@@ -10,11 +10,11 @@ use std::{
     fs::{self, File},
     future::Future,
     io::IsTerminal,
-    net::{SocketAddr, TcpListener as StdTcpListener},
+    net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, Once},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -179,8 +179,46 @@ impl FullNodeTestBuilder {
     where
         F: Fn(usize, &mut Config) + Send + Sync + 'static,
     {
-        self.node_config_hook = Some(Arc::new(hook));
+        let hook: NodeConfigHook = Arc::new(hook);
+        self.node_config_hook = Some(match self.node_config_hook.take() {
+            Some(previous) => Arc::new(move |index, cfg| {
+                (previous)(index, cfg);
+                (hook)(index, cfg);
+            }),
+            None => hook,
+        });
         self
+    }
+
+    /// Enable the archiver worker and configure provider + auth for the test harness.
+    ///
+    /// Most Tier‑1 tests should keep `archiver.enabled=false` to avoid pruning blob bytes
+    /// that are asserted on disk; only archiver/prune scenario tests should opt-in.
+    #[allow(dead_code)]
+    fn with_archiver(
+        self,
+        provider_url: impl Into<String>,
+        provider_id: impl Into<String>,
+        bearer_token: impl Into<String>,
+    ) -> Self {
+        let provider_url = provider_url.into();
+        let provider_id = provider_id.into();
+        let bearer_token = bearer_token.into();
+        self.with_node_config(move |_, cfg| {
+            cfg.archiver.enabled = true;
+            cfg.archiver.provider_url = provider_url.clone();
+            cfg.archiver.provider_id = provider_id.clone();
+            cfg.archiver.bearer_token = Some(bearer_token.clone());
+        })
+    }
+
+    /// Configure the built-in in-process mock archiver backend (`mock://`).
+    ///
+    /// This avoids binding any HTTP listener and is useful for tests that only need
+    /// to exercise archive/prune plumbing (not HTTP/auth semantics).
+    #[allow(dead_code)]
+    fn with_mock_archiver(self) -> Self {
+        self.with_archiver("mock://ultramarine-test", "mock-provider", "test-token")
     }
 
     fn with_payload_plan<F>(mut self, plan: F) -> Self
@@ -251,10 +289,10 @@ fn build_test_filter() -> EnvFilter {
 fn default_test_filter() -> EnvFilter {
     let mut filter = EnvFilter::new("warn,ultramarine=info");
 
-    if std::env::var_os("ULTRAMARINE_FULL_NODE_KEEP_P2P_ERRORS").is_none() {
-        if let Ok(directive) = "informalsystems_malachitebft_network=off".parse::<Directive>() {
-            filter = filter.add_directive(directive);
-        }
+    if std::env::var_os("ULTRAMARINE_FULL_NODE_KEEP_P2P_ERRORS").is_none() &&
+        let Ok(directive) = "informalsystems_malachitebft_network=off".parse::<Directive>()
+    {
+        filter = filter.add_directive(directive);
     }
 
     if let Ok(directive) = "libp2p=warn".parse::<Directive>() {
@@ -720,15 +758,7 @@ async fn full_node_archiver_mock_provider_smoke() -> Result<()> {
     FullNodeTestBuilder::new()
         .node_count(1)
         .with_payload_plan(|_| 1)
-        .with_node_config({
-            let provider_url = provider_url.clone();
-            move |_, cfg| {
-                cfg.archiver.enabled = true;
-                cfg.archiver.provider_url = provider_url.clone();
-                cfg.archiver.provider_id = "mock-provider".to_string();
-                cfg.archiver.bearer_token = Some("test-token".to_string());
-            }
-        })
+        .with_archiver(provider_url.clone(), "mock-provider", "test-token")
         .run(move |network| {
             let provider = provider_clone.clone();
             Box::pin(async move {
@@ -830,6 +860,115 @@ async fn full_node_archiver_mock_provider_smoke() -> Result<()> {
     Ok(())
 }
 
+/// Followers prune blob bytes after receiving proposer archive notices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_followers_prune_after_proposer_notices() -> Result<()> {
+    init_test_logging();
+    let provider = Arc::new(MockBlobProvider::start().await?);
+    let provider_url = provider.url();
+    let provider_clone = provider.clone();
+
+    FullNodeTestBuilder::new()
+        .node_count(3)
+        .with_payload_plan(|_| 1)
+        .with_archiver(provider_url.clone(), "mock-provider", "test-token")
+        .run(move |network| {
+            let provider = provider_clone.clone();
+            Box::pin(async move {
+                let target_height = Height::new(9);
+                for idx in 0..3 {
+                    network.wait_for_height(idx, target_height).await?;
+                }
+
+                let uploads = provider.wait_for_uploads(3, Duration::from_secs(30)).await?;
+                let follower_addr = network.node_ref(1)?.validator_address;
+                let upload = uploads
+                    .iter()
+                    .find(|u| u.proposer != follower_addr)
+                    .ok_or_else(|| eyre::eyre!("expected an upload from a proposer != node1"))?
+                    .clone();
+                let archived_height = Height::new(upload.height);
+
+                // Wait (bounded) until the follower marks the height as pruned before stopping it.
+                // Use the consensus store only (no blob store) to avoid file-lock flakiness.
+                let follower_node = network.node_ref(1)?;
+                let store_path = follower_node.home.path().join("store.db");
+                let store = timeout(Duration::from_secs(5), async {
+                    loop {
+                        match Store::open_read_only(&store_path, DbMetrics::new()) {
+                            Ok(store) => return Ok::<Store, eyre::Report>(store),
+                            Err(_) => sleep(Duration::from_millis(100)).await,
+                        }
+                    }
+                })
+                .await
+                .wrap_err("timed out opening follower store")??;
+
+                timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let Some(metadata) = store.get_blob_metadata(archived_height).await? &&
+                            metadata.is_pruned()
+                        {
+                            return Ok::<(), eyre::Report>(());
+                        }
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await
+                .wrap_err("timed out waiting for follower prune after proposer notices")??;
+
+                network.stop_node(1).await?;
+                let node = network.node_ref(1)?;
+                let state = open_state_read_only(node).await?;
+
+                let metadata =
+                    state.get_blob_metadata(archived_height).await?.ok_or_else(|| {
+                        eyre::eyre!("missing BlobMetadata for height {archived_height}")
+                    })?;
+                assert!(
+                    metadata.is_pruned(),
+                    "expected follower to prune height {} after proposer notice",
+                    archived_height
+                );
+
+                let notices = state.load_archive_notices(archived_height).await?;
+                assert_eq!(notices.len(), 1, "expected one archive notice for the height");
+                assert_eq!(
+                    notices[0].body.archived_by, upload.proposer,
+                    "follower should store proposer archived_by"
+                );
+
+                match state.get_blobs_with_status_check(archived_height).await {
+                    Err(BlobEngineError::BlobsPruned { locators, blob_count, .. }) => {
+                        assert_eq!(blob_count, notices.len(), "locator count mismatch");
+                        assert_eq!(locators.len(), notices.len(), "expected locator per blob");
+                    }
+                    Err(other) => {
+                        return Err(eyre::eyre!(
+                            "expected BlobsPruned error for height {}, got {other:?}",
+                            archived_height
+                        ));
+                    }
+                    Ok(blobs) => {
+                        return Err(eyre::eyre!(
+                            "expected BlobsPruned error for height {}, got {} blobs",
+                            archived_height,
+                            blobs.len()
+                        ));
+                    }
+                }
+
+                Ok(())
+            })
+        })
+        .await?;
+
+    provider.shutdown().await;
+    Ok(())
+}
+
 /// Tests that the archiver correctly retries uploads when the provider returns errors.
 ///
 /// The mock provider is configured to fail the first N requests with 500 errors,
@@ -849,15 +988,10 @@ async fn full_node_archiver_provider_failure_retries() -> Result<()> {
     FullNodeTestBuilder::new()
         .node_count(1)
         .with_payload_plan(|_| 1)
-        .with_node_config({
-            let provider_url = provider_url.clone();
-            move |_, cfg| {
-                cfg.archiver.enabled = true;
-                cfg.archiver.provider_url = provider_url.clone();
-                cfg.archiver.provider_id = "mock-provider".to_string();
-                cfg.archiver.retry_attempts = 5;
-                cfg.archiver.retry_backoff_ms = 100;
-            }
+        .with_archiver(provider_url.clone(), "mock-provider", "test-token")
+        .with_node_config(|_, cfg| {
+            cfg.archiver.retry_attempts = 5;
+            cfg.archiver.retry_backoff_ms = 100;
         })
         .run(move |network| {
             let provider = provider_clone.clone();
@@ -925,12 +1059,7 @@ async fn full_node_archiver_recover_pending_jobs_api() -> Result<()> {
         .node_count(1)
         .start_height(Some(Height::new(0)))
         .with_payload_plan(|_| 1)
-        .with_node_config(|_, cfg| {
-            // Enable archiver but use mock:// so no real uploads happen
-            cfg.archiver.enabled = true;
-            cfg.archiver.provider_url = "mock://test".to_string();
-            cfg.archiver.provider_id = "mock-provider".to_string();
-        })
+        .with_mock_archiver()
         .run(|network| {
             Box::pin(async move {
                 // Stop the node so we can inspect state directly
@@ -1010,16 +1139,7 @@ async fn full_node_archiver_auth_token_transmitted() -> Result<()> {
     FullNodeTestBuilder::new()
         .node_count(1)
         .with_payload_plan(|_| 1)
-        .with_node_config({
-            let provider_url = provider_url.clone();
-            let token = expected_token.to_string();
-            move |_, cfg| {
-                cfg.archiver.enabled = true;
-                cfg.archiver.provider_url = provider_url.clone();
-                cfg.archiver.provider_id = "mock-provider".to_string();
-                cfg.archiver.bearer_token = Some(token.clone());
-            }
-        })
+        .with_archiver(provider_url.clone(), "mock-provider", expected_token)
         .run(move |network| {
             let provider = provider_clone.clone();
             Box::pin(async move {
@@ -1054,80 +1174,6 @@ async fn full_node_archiver_auth_token_transmitted() -> Result<()> {
 
     provider.shutdown().await;
     Ok(())
-}
-
-/// Tests that blobs are NOT pruned when archiver is disabled.
-///
-/// When archiver is disabled, blobs should remain in local storage indefinitely
-/// and be served normally via get_blobs_with_status_check().
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires full-node harness; run via make itest-node"]
-#[serial(full_node)]
-async fn full_node_archiver_disabled_no_pruning() -> Result<()> {
-    init_test_logging();
-
-    FullNodeTestBuilder::new()
-        .node_count(1)
-        .with_payload_plan(|_| 1)
-        .with_node_config(|_, cfg| {
-            cfg.archiver.enabled = false;
-        })
-        .run(|network| {
-            Box::pin(async move {
-                // Run to height 5 to ensure multiple blobbed blocks
-                let target_height = Height::new(5);
-                network.wait_for_height(0, target_height).await?;
-
-                // Give time for any pruning that might (incorrectly) occur
-                sleep(Duration::from_secs(1)).await;
-
-                // Stop and verify NO pruning occurred
-                network.stop_node(0).await?;
-                let node = network.node_ref(0)?;
-                let state = open_state_read_only(node).await?;
-
-                // Check heights 1-4 (height 0 may be genesis, height 5 may not be finalized)
-                for h in 1..=4 {
-                    let height = Height::new(h);
-                    if let Some(metadata) = state.get_blob_metadata(height).await? {
-                        if metadata.blob_count() > 0 {
-                            assert!(
-                                !metadata.is_pruned(),
-                                "height {} should NOT be pruned when archiver is disabled",
-                                h
-                            );
-
-                            // Verify blobs are still servable
-                            match state.get_blobs_with_status_check(height).await {
-                                Ok(blobs) => {
-                                    assert!(
-                                        !blobs.is_empty(),
-                                        "expected blobs at height {} to be servable",
-                                        h
-                                    );
-                                }
-                                Err(BlobEngineError::BlobsPruned { .. }) => {
-                                    return Err(eyre::eyre!(
-                                        "height {} unexpectedly pruned when archiver disabled",
-                                        h
-                                    ));
-                                }
-                                Err(e) => {
-                                    return Err(eyre::eyre!(
-                                        "unexpected error at height {}: {:?}",
-                                        h,
-                                        e
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Ok(())
-            })
-        })
-        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1329,7 +1375,7 @@ async fn full_node_value_sync_commitment_mismatch() -> Result<()> {
 
                 let metadata = node_state.load_blob_metadata_for_round(height, round).await?;
                 assert!(
-                    metadata.map_or(true, |m| m.blob_count() == 0),
+                    metadata.is_none_or(|m| m.blob_count() == 0),
                     "fake metadata should not be stored"
                 );
 
@@ -1660,13 +1706,13 @@ async fn full_node_execution_requests_signature_protection() -> Result<()> {
 
                 let mut tampered = false;
                 for msg in &mut stream_messages {
-                    if let StreamContent::Data(ProposalPart::Data(data)) = &mut msg.content {
-                        if data.has_execution_requests() {
-                            data.execution_requests =
-                                vec![AlloyBytes::copy_from_slice(&[0x02, 0xFF, 0xEE])];
-                            tampered = true;
-                            break;
-                        }
+                    if let StreamContent::Data(ProposalPart::Data(data)) = &mut msg.content &&
+                        data.has_execution_requests()
+                    {
+                        data.execution_requests =
+                            vec![AlloyBytes::copy_from_slice(&[0x02, 0xFF, 0xEE])];
+                        tampered = true;
+                        break;
                     }
                 }
                 assert!(tampered, "expected to tamper with execution requests");
@@ -1694,7 +1740,7 @@ async fn full_node_execution_requests_signature_protection() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
-async fn full_node_blob_pruning_retains_recent_heights() -> Result<()> {
+async fn full_node_store_pruning_retains_recent_heights() -> Result<()> {
     init_test_logging();
     const TOTAL_HEIGHTS: usize = 8;
     const RETENTION: u64 = 5;
@@ -1743,25 +1789,34 @@ async fn full_node_blob_pruning_retains_recent_heights() -> Result<()> {
                 let retention_window = RETENTION as usize;
                 let expected_pruned = TOTAL_HEIGHTS.saturating_sub(retention_window);
                 assert_eq!(metrics_snapshot.lifecycle_promoted, TOTAL_HEIGHTS as u64);
-                assert_eq!(metrics_snapshot.lifecycle_pruned, expected_pruned as u64);
+                assert_eq!(
+                    metrics_snapshot.lifecycle_pruned, 0,
+                    "blob bytes have no retention window; pruning is archive-notice driven"
+                );
                 assert_eq!(
                     metrics_snapshot.storage_bytes_decided,
-                    ((TOTAL_HEIGHTS - expected_pruned) * BYTES_PER_BLOB) as i64
+                    (TOTAL_HEIGHTS * BYTES_PER_BLOB) as i64
                 );
 
+                // The retention window applies to the consensus store (`Store::prune()`), not blob
+                // bytes. Old decided values should be removed from the store...
                 for height in 0..expected_pruned {
-                    let decided =
-                        state.blob_engine().get_for_import(Height::new(height as u64)).await?;
-                    assert!(
-                        decided.is_empty(),
-                        "height {} should be pruned beyond retention window",
-                        height
-                    );
+                    let height = Height::new(height as u64);
+                    let decided = state.get_decided_value(height).await;
+                    assert!(decided.is_none(), "decided value at height {height} should be pruned");
                 }
+                // ...while the most recent decided values are retained.
                 for height in expected_pruned..TOTAL_HEIGHTS {
+                    let height = Height::new(height as u64);
+                    let decided = state.get_decided_value(height).await;
+                    assert!(decided.is_some(), "expected decided value at height {height}");
+                }
+                // Blob bytes themselves remain available locally unless an archive notice triggers
+                // pruning.
+                for height in 0..TOTAL_HEIGHTS {
                     let decided =
                         state.blob_engine().get_for_import(Height::new(height as u64)).await?;
-                    assert_eq!(decided.len(), 1, "height {} should retain blob", height);
+                    assert_eq!(decided.len(), 1, "height {} should retain blob bytes", height);
                 }
                 assert_eq!(state.current_height, Height::new(TOTAL_HEIGHTS as u64));
                 drop(state);
@@ -1810,7 +1865,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                 let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
                 let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
 
-                let proposer = state.validator_address().clone();
+                let proposer = *state.validator_address();
                 let proposed_value = state
                     .process_synced_package(height, round, proposer, decoded)
                     .await?
@@ -1933,7 +1988,7 @@ impl NodeProcess {
             return Ok(());
         }
         let resume = self.compute_resume_info().await?;
-        if let Some(block) = resume.last_decided_block.clone() {
+        if let Some(block) = resume.last_decided_block {
             self.align_stub_head(block).await;
         }
         let stub_latest = {
@@ -1982,6 +2037,15 @@ impl NodeProcess {
         Ok(())
     }
 
+    fn force_abort(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.app.abort();
+            handle.engine.handle.abort();
+        }
+        self.engine_stub.handle.abort();
+        self.running = false;
+    }
+
     async fn align_stub_head(&self, latest_block: ExecutionBlock) {
         let mut guard = self.stub_state.lock().await;
         if latest_block.block_number <= guard.latest_block.block_number {
@@ -2011,7 +2075,7 @@ impl NodeProcess {
                 derived_from_store: false,
             });
         }
-        let store = Store::open(store_path, DbMetrics::new())
+        let store = Store::open_read_only(store_path, DbMetrics::new())
             .wrap_err("open store to compute resume height")?;
         let decided = store.max_decided_value_height().await;
         let resume = decided.map(|h| Height::new(h.as_u64() + 1)).unwrap_or(fallback);
@@ -2063,98 +2127,171 @@ impl NetworkHarness {
     async fn start(config: &HarnessConfig) -> Result<Self> {
         eyre::ensure!(config.node_count > 0, "at least one node required");
         let (genesis, validator_keys) = make_genesis(config.node_count);
-        let addresses: Vec<NodeAddrs> = (0..config.node_count).map(|_| NodeAddrs::new()).collect();
-        let mut nodes = Vec::with_capacity(config.node_count);
 
-        for index in 0..config.node_count {
-            let payload_plan = config.payload_plan();
-            let stub_state = Arc::new(TokioMutex::new(StubState::new(payload_plan.clone())));
-            let engine_stub = EngineRpcStub::start(stub_state.clone()).await?;
-            let home = TempDir::new().wrap_err("create node tempdir")?;
-            let validator = &validator_keys[index];
-            let validator_address = validator.address();
-            let genesis_path = write_json(home.path().join("genesis.json"), &genesis)?;
-            let key_path =
-                write_json(home.path().join("validator_key.json"), &validator.private_key())?;
-            let jwt_path = write_jwt(home.path().join("jwt.hex"))?;
-
-            let mut node_config = generate_config(
-                index,
-                config.node_count,
-                RuntimeConfig::default(),
-                false,
-                BootstrapProtocol::Kademlia,
-                Selector::default(),
-                0,
-                0,
-                1_000,
-                TransportProtocol::Tcp,
-                LoggingConfig::default(),
+        // Port selection:
+        // - Avoid the TOCTOU race of "bind :0, read port, drop listener".
+        // - Instead, pick a deterministic high port range and retry on bind failures.
+        for attempt in 0u16..20 {
+            let base_port = choose_base_port(config.node_count, attempt);
+            let addresses = build_node_addrs(config.node_count, base_port);
+            tracing::debug!(
+                node_count = config.node_count,
+                attempt,
+                base_port,
+                "starting harness with fixed port plan"
             );
-            node_config.metrics.enabled = false;
 
-            // Tune ValueSync for faster catch-up during restarts
-            node_config.sync.status_update_interval = Duration::from_secs(1);
-            node_config.sync.request_timeout = Duration::from_secs(5);
-            node_config.sync.parallel_requests = 3;
+            let mut nodes = Vec::with_capacity(config.node_count);
+            let mut start_error: Option<eyre::Report> = None;
 
-            node_config.consensus.p2p.listen_addr = addresses[index].consensus.clone();
-            node_config.consensus.p2p.persistent_peers =
-                peer_multiaddrs(&addresses, index, |addr| &addr.consensus);
-            node_config.consensus.p2p.discovery.enabled = false;
-            node_config.mempool.p2p.listen_addr = addresses[index].mempool.clone();
-            node_config.mempool.p2p.persistent_peers =
-                peer_multiaddrs(&addresses, index, |addr| &addr.mempool);
-            node_config.mempool.p2p.discovery.enabled = false;
+            for index in 0..config.node_count {
+                let payload_plan = config.payload_plan();
+                let stub_state = Arc::new(TokioMutex::new(StubState::new(payload_plan.clone())));
+                let engine_stub = match EngineRpcStub::start(stub_state.clone()).await {
+                    Ok(stub) => stub,
+                    Err(e) => {
+                        start_error = Some(e);
+                        break;
+                    }
+                };
+                let home = match TempDir::new().wrap_err("create node tempdir") {
+                    Ok(home) => home,
+                    Err(e) => {
+                        engine_stub.shutdown().await;
+                        start_error = Some(e);
+                        break;
+                    }
+                };
+                let validator = &validator_keys[index];
+                let validator_address = validator.address();
+                let genesis_path = match write_json(home.path().join("genesis.json"), &genesis) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        engine_stub.shutdown().await;
+                        start_error = Some(e);
+                        break;
+                    }
+                };
+                let key_path = match write_json(
+                    home.path().join("validator_key.json"),
+                    &validator.private_key(),
+                ) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        engine_stub.shutdown().await;
+                        start_error = Some(e);
+                        break;
+                    }
+                };
+                let jwt_path = match write_jwt(home.path().join("jwt.hex")) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        engine_stub.shutdown().await;
+                        start_error = Some(e);
+                        break;
+                    }
+                };
 
-            config.apply_node_config(index, &mut node_config);
+                let mut node_config = generate_config(
+                    index,
+                    config.node_count,
+                    RuntimeConfig::default(),
+                    false,
+                    BootstrapProtocol::Kademlia,
+                    Selector::default(),
+                    0,
+                    0,
+                    1_000,
+                    TransportProtocol::Tcp,
+                    LoggingConfig::default(),
+                );
+                node_config.metrics.enabled = false;
+                // Default for Tier-1 harness: keep blob bytes on disk for assertions and avoid
+                // requiring external archiver configuration. Tests that exercise archiving enable
+                // it explicitly via `with_node_config`.
+                node_config.archiver.enabled = false;
 
-            let stored_config = node_config.clone();
+                // Tune ValueSync for faster catch-up during restarts
+                node_config.sync.status_update_interval = Duration::from_secs(1);
+                node_config.sync.request_timeout = Duration::from_secs(5);
+                node_config.sync.parallel_requests = 3;
 
-            let stored_genesis = genesis_path.clone();
-            let stored_key = key_path.clone();
-            let stored_jwt = jwt_path.clone();
+                node_config.consensus.p2p.listen_addr = addresses[index].consensus.clone();
+                node_config.consensus.p2p.persistent_peers =
+                    peer_multiaddrs(&addresses, index, |addr| &addr.consensus);
+                node_config.consensus.p2p.discovery.enabled = false;
+                node_config.mempool.p2p.listen_addr = addresses[index].mempool.clone();
+                node_config.mempool.p2p.persistent_peers =
+                    peer_multiaddrs(&addresses, index, |addr| &addr.mempool);
+                node_config.mempool.p2p.discovery.enabled = false;
 
-            // Let the node handle genesis initialization naturally through App::start()
-            // which calls State::hydrate_blob_parent_root() to seed genesis metadata if needed
-            let engine_http_url = engine_stub.url();
-            let eth1_rpc_url = engine_http_url.clone();
+                config.apply_node_config(index, &mut node_config);
 
-            let app = App {
-                config: node_config,
-                home_dir: home.path().to_path_buf(),
-                genesis_file: genesis_path,
-                private_key_file: key_path,
-                start_height: config.start_height,
-                engine_http_url: Some(engine_http_url.clone()),
-                engine_ipc_path: None,
-                eth1_rpc_url: Some(eth1_rpc_url),
-                jwt_path: Some(jwt_path),
-            };
+                let stored_config = node_config.clone();
+                let stored_genesis = genesis_path.clone();
+                let stored_key = key_path.clone();
+                let stored_jwt = jwt_path.clone();
 
-            let handle = app.start().await?;
-            let event_rx = TokioMutex::new(handle.tx_event.subscribe());
-            nodes.push(NodeProcess {
-                handle: Some(handle),
-                home,
-                engine_stub,
-                event_rx,
-                config: stored_config,
-                genesis_path: stored_genesis,
-                key_path: stored_key,
-                jwt_path: stored_jwt,
-                base_start_height: config.start_height,
-                validator_address,
-                stub_state,
-                running: true,
-            });
+                let engine_http_url = engine_stub.url();
+                let eth1_rpc_url = engine_http_url.clone();
+
+                let app = App {
+                    config: node_config,
+                    home_dir: home.path().to_path_buf(),
+                    genesis_file: genesis_path,
+                    private_key_file: key_path,
+                    start_height: config.start_height,
+                    engine_http_url: Some(engine_http_url.clone()),
+                    engine_ipc_path: None,
+                    eth1_rpc_url: Some(eth1_rpc_url),
+                    jwt_path: Some(jwt_path),
+                };
+
+                let handle = match app.start().await {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        // Ensure the stub doesn't outlive failed start attempts.
+                        engine_stub.shutdown().await;
+                        start_error = Some(e);
+                        break;
+                    }
+                };
+
+                let event_rx = TokioMutex::new(handle.tx_event.subscribe());
+                nodes.push(NodeProcess {
+                    handle: Some(handle),
+                    home,
+                    engine_stub,
+                    event_rx,
+                    config: stored_config,
+                    genesis_path: stored_genesis,
+                    key_path: stored_key,
+                    jwt_path: stored_jwt,
+                    base_start_height: config.start_height,
+                    validator_address,
+                    stub_state,
+                    running: true,
+                });
+            }
+
+            if let Some(err) = start_error {
+                for node in &mut nodes {
+                    let _ = node.stop().await;
+                    node.engine_stub.shutdown().await;
+                }
+
+                if is_addr_in_use(&err) {
+                    tracing::warn!(attempt, error = %err, "port plan collided; retrying");
+                    continue;
+                }
+                return Err(err);
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            return Ok(Self { nodes, is_shutdown: false });
         }
 
-        // Give nodes time to establish p2p connections via persistent peers
-        // before consensus begins. Without this, late-starting nodes miss proposals.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        Ok(Self { nodes, is_shutdown: false })
+        Err(eyre::eyre!("failed to start harness after multiple port allocation attempts"))
     }
 
     async fn wait_for_height(&self, node_index: usize, target_height: Height) -> Result<()> {
@@ -2316,7 +2453,7 @@ impl NetworkHarness {
     }
 
     fn node_address(&self, node_index: usize) -> Result<Address> {
-        Ok(self.node_ref(node_index)?.validator_address.clone())
+        Ok(self.node_ref(node_index)?.validator_address)
     }
 
     async fn ensure_shutdown(&mut self) -> Result<()> {
@@ -2471,6 +2608,21 @@ impl NetworkHarness {
     }
 }
 
+impl Drop for NetworkHarness {
+    fn drop(&mut self) {
+        if self.is_shutdown || self.nodes.is_empty() {
+            return;
+        }
+
+        let mut nodes = std::mem::take(&mut self.nodes);
+        self.is_shutdown = true;
+        // Drop can run during panic unwinding; do not rely on async cleanup.
+        for node in &mut nodes {
+            node.force_abort();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct NodeAddrs {
     consensus: Multiaddr,
@@ -2478,8 +2630,8 @@ struct NodeAddrs {
 }
 
 impl NodeAddrs {
-    fn new() -> Self {
-        Self { consensus: local_multiaddr(), mempool: local_multiaddr() }
+    fn with_ports(consensus_port: u16, mempool_port: u16) -> Self {
+        Self { consensus: tcp_multiaddr(consensus_port), mempool: tcp_multiaddr(mempool_port) }
     }
 }
 
@@ -2488,6 +2640,43 @@ where
     F: Fn(&'a NodeAddrs) -> &'a Multiaddr,
 {
     addrs.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, addr)| f(addr).clone()).collect()
+}
+
+fn tcp_multiaddr(port: u16) -> Multiaddr {
+    TransportProtocol::Tcp.multiaddr("127.0.0.1", port as usize)
+}
+
+fn choose_base_port(node_count: usize, attempt: u16) -> u16 {
+    // Keep in the high, non-privileged range and leave enough room for all nodes.
+    const MIN_BASE: u16 = 20_000;
+    const MAX_BASE: u16 = 55_000;
+    let needed = (node_count.saturating_mul(2) + 8) as u16;
+
+    let usable = MAX_BASE.saturating_sub(MIN_BASE + needed).max(1);
+    let pid = std::process::id() as u16;
+    let nanos =
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u16;
+    let salt = pid.wrapping_mul(97).wrapping_add(nanos.wrapping_mul(13));
+
+    let offset = salt.wrapping_add(attempt.wrapping_mul(needed)) % usable;
+    MIN_BASE + offset
+}
+
+fn build_node_addrs(node_count: usize, base_port: u16) -> Vec<NodeAddrs> {
+    let node_count_u16 = node_count as u16;
+    (0..node_count)
+        .map(|idx| {
+            let idx_u16 = idx as u16;
+            NodeAddrs::with_ports(base_port + idx_u16, base_port + node_count_u16 + idx_u16)
+        })
+        .collect()
+}
+
+fn is_addr_in_use(err: &eyre::Report) -> bool {
+    let msg = err.to_string();
+    msg.contains("Address already in use") ||
+        msg.contains("os error 48") || // macOS
+        msg.contains("os error 98") // Linux
 }
 
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<PathBuf> {
@@ -2500,19 +2689,12 @@ fn write_jwt(path: PathBuf) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn local_multiaddr() -> Multiaddr {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind temp port");
-    let port = listener.local_addr().unwrap().port() as usize;
-    drop(listener);
-    TransportProtocol::Tcp.multiaddr("127.0.0.1", port)
-}
-
 async fn load_blob_metadata(
     node: &NodeProcess,
     node_index: usize,
     height: Height,
 ) -> Result<BlobMetadata> {
-    let store = Store::open(node.home.path().join("store.db"), DbMetrics::new())
+    let store = Store::open_read_only(node.home.path().join("store.db"), DbMetrics::new())
         .wrap_err_with(|| format!("open store for node {node_index} to read metadata"))?;
     store
         .get_blob_metadata(height)
@@ -2528,7 +2710,7 @@ fn open_state_and_metrics(
     let key_file = File::open(&node.key_path).wrap_err("open validator key file")?;
     let private_key: PrivateKey =
         serde_json::from_reader(key_file).wrap_err("decode validator key")?;
-    let store = Store::open(node.home.path().join("store.db"), DbMetrics::new())?;
+    let store = Store::open_read_only(node.home.path().join("store.db"), DbMetrics::new())?;
     let blob_store = RocksDbBlobStore::open(node.home.path().join("blob_store.db"))?;
     let blob_metrics = BlobEngineMetrics::new();
     let blob_engine = Arc::new(BlobEngineImpl::new(blob_store, blob_metrics.clone())?);
@@ -2538,7 +2720,7 @@ fn open_state_and_metrics(
         genesis,
         LoadContext::new(),
         provider,
-        node.validator_address.clone(),
+        node.validator_address,
         node.base_start_height.unwrap_or_else(|| Height::new(1)),
         store,
         blob_engine,
@@ -2577,24 +2759,23 @@ async fn open_state_read_only(
     let key_file = File::open(&node.key_path).wrap_err("open validator key file")?;
     let private_key: PrivateKey =
         serde_json::from_reader(key_file).wrap_err("decode validator key")?;
-    let store = Store::open(node.home.path().join("store.db"), DbMetrics::new())?;
+    let store = Store::open_read_only(node.home.path().join("store.db"), DbMetrics::new())?;
     let blob_store = RocksDbBlobStore::open_read_only(node.home.path().join("blob_store.db"))?;
     let blob_metrics = BlobEngineMetrics::new();
     let blob_engine = Arc::new(BlobEngineImpl::new(blob_store, blob_metrics.clone())?);
     let provider = Ed25519Provider::new(private_key);
     let archive_metrics = ArchiveMetrics::new();
-    let mut state = State::new(
+    let state = State::new(
         genesis,
         LoadContext::new(),
         provider,
-        node.validator_address.clone(),
+        node.validator_address,
         node.base_start_height.unwrap_or_else(|| Height::new(1)),
         store,
         blob_engine,
         blob_metrics,
         archive_metrics,
     );
-    state.hydrate_blob_parent_root().await?;
     Ok(state)
 }
 
@@ -2948,105 +3129,6 @@ impl MockBlobProviderWithFailures {
     }
 }
 
-/// Mock blob provider that delays responses by a configurable duration.
-/// Used to test crash recovery scenarios where the node dies before upload completes.
-struct MockBlobProviderWithDelay {
-    addr: SocketAddr,
-    uploads: Arc<TokioMutex<Vec<MockUpload>>>,
-    delay: Arc<TokioMutex<Duration>>,
-    shutdown: TokioMutex<Option<oneshot::Sender<()>>>,
-    handle: TokioMutex<Option<JoinHandle<()>>>,
-}
-
-impl MockBlobProviderWithDelay {
-    async fn start(initial_delay: Duration) -> Result<Self> {
-        let uploads = Arc::new(TokioMutex::new(Vec::new()));
-        let delay = Arc::new(TokioMutex::new(initial_delay));
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let router = AxumRouter::new().route(
-            "/upload",
-            axum_post({
-                let uploads = uploads.clone();
-                let delay = delay.clone();
-                move |headers: AxumHeaderMap, multipart: axum::extract::Multipart| {
-                    let uploads = uploads.clone();
-                    let delay = delay.clone();
-                    let multipart = multipart;
-                    async move {
-                        let current_delay = *delay.lock().await;
-                        sleep(current_delay).await;
-                        mock_multipart_upload_handler(uploads, headers, multipart).await
-                    }
-                }
-            }),
-        );
-
-        let listener =
-            TokioTcpListener::bind("127.0.0.1:0").await.wrap_err("bind mock blob provider")?;
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            });
-            if let Err(e) = server.await {
-                tracing::error!(%e, "mock blob provider with delay server error");
-            }
-        });
-
-        Ok(Self {
-            addr,
-            uploads,
-            delay,
-            shutdown: TokioMutex::new(Some(shutdown_tx)),
-            handle: TokioMutex::new(Some(handle)),
-        })
-    }
-
-    fn url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-
-    async fn uploads(&self) -> Vec<MockUpload> {
-        self.uploads.lock().await.clone()
-    }
-
-    async fn set_delay(&self, new_delay: Duration) {
-        *self.delay.lock().await = new_delay;
-    }
-
-    async fn wait_for_uploads(
-        &self,
-        expected: usize,
-        deadline: Duration,
-    ) -> Result<Vec<MockUpload>> {
-        let uploads = Arc::clone(&self.uploads);
-        let fut = async move {
-            loop {
-                let current = uploads.lock().await.clone();
-                if current.len() >= expected {
-                    break Ok(current);
-                }
-                sleep(Duration::from_millis(50)).await;
-            }
-        };
-
-        match timeout(deadline, fut).await {
-            Ok(result) => result,
-            Err(_) => Err(eyre::eyre!("timed out waiting for {expected} uploads")),
-        }
-    }
-
-    async fn shutdown(&self) {
-        if let Some(tx) = self.shutdown.lock().await.take() {
-            let _ = tx.send(());
-        }
-        if let Some(handle) = self.handle.lock().await.take() {
-            handle.abort();
-        }
-    }
-}
-
 /// Mock blob provider that validates bearer token authentication.
 /// Tracks successful authentications and failures for assertions.
 struct MockBlobProviderWithAuth {
@@ -3380,19 +3462,19 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
 
     let mut guard = state.lock().await;
 
-    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) {
-        if head_height > guard.latest_block.block_number {
-            let parent_hash =
-                if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
-            guard.latest_block.block_number = head_height;
-            guard.latest_block.block_hash = forkchoice.head_block_hash;
-            guard.latest_block.parent_hash = parent_hash;
-            guard.latest_block.timestamp = timestamp_for_height(head_height);
-            debug_log!(
-                "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
-                head_height
-            );
-        }
+    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) &&
+        head_height > guard.latest_block.block_number
+    {
+        let parent_hash =
+            if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
+        guard.latest_block.block_number = head_height;
+        guard.latest_block.block_hash = forkchoice.head_block_hash;
+        guard.latest_block.parent_hash = parent_hash;
+        guard.latest_block.timestamp = timestamp_for_height(head_height);
+        debug_log!(
+            "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
+            head_height
+        );
     }
 
     if let Some(_attrs) = payload_attrs {
@@ -3439,7 +3521,7 @@ async fn handle_get_payload(
 ) -> Result<Value> {
     let params = expect_params_array(&req.params)?;
     let payload_id_hex =
-        params.get(0).and_then(Value::as_str).ok_or_else(|| eyre::eyre!("missing payload id"))?;
+        params.first().and_then(Value::as_str).ok_or_else(|| eyre::eyre!("missing payload id"))?;
     let id_bytes = parse_payload_id(payload_id_hex)?;
 
     let mut guard = state.lock().await;
@@ -3532,7 +3614,7 @@ fn expect_params_array(params: &Value) -> Result<Vec<Value>> {
 
 fn parse_payload_id(value: &str) -> Result<[u8; 8]> {
     let bytes = hex::decode(value.trim_start_matches("0x"))?;
-    Ok(bytes.as_slice().try_into().map_err(|_| eyre::eyre!("payload id must be 8 bytes"))?)
+    bytes.as_slice().try_into().map_err(|_| eyre::eyre!("payload id must be 8 bytes"))
 }
 
 fn format_payload_id(id: u64) -> String {
@@ -3601,7 +3683,7 @@ async fn dump_node_state(node_index: usize, node: &NodeProcess) {
             let snapshot_dir = tempfile::tempdir().wrap_err("create store snapshot dir")?;
             let snapshot_path = snapshot_dir.path().join("store.db");
             copy_path(&store_src, &snapshot_path).wrap_err("snapshot store db")?;
-            let store = Store::open(snapshot_path, DbMetrics::new())?;
+            let store = Store::open_read_only(snapshot_path, DbMetrics::new())?;
             let latest_decided = store.max_decided_value_height().await;
             let undecided = store
                 .get_all_undecided_blob_metadata_before(Height::new(u64::MAX))

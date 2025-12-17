@@ -93,6 +93,7 @@ pub struct Spammer {
 }
 
 impl Spammer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         url: Url,
         chain_id: u64,
@@ -103,7 +104,7 @@ impl Spammer {
         blobs_per_tx: usize,
         signer_index: usize,
     ) -> Result<Self> {
-        if blobs && (blobs_per_tx < 1 || blobs_per_tx > 1024) {
+        if blobs && !(1..=1024).contains(&blobs_per_tx) {
             return Err(eyre::eyre!("blobs_per_tx must be between 1 and 1024"));
         }
         let signers = crate::commands::genesis::make_signers();

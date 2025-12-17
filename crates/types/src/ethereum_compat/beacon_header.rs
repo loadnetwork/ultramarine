@@ -267,7 +267,7 @@ mod tests {
         let header = BeaconBlockHeader::new(12345, 42, B256::ZERO, B256::ZERO, B256::ZERO);
         let signature = Signature::from_bytes([0u8; 64]);
 
-        let signed_header = SignedBeaconBlockHeader::new(header.clone(), signature.clone());
+        let signed_header = SignedBeaconBlockHeader::new(header.clone(), signature);
 
         assert_eq!(signed_header.message, header);
         assert_eq!(signed_header.signature, signature);

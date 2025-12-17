@@ -109,7 +109,7 @@ impl ValidatorKey {
 
     /// Shortcut accessor for the validator address.
     pub(crate) fn address(&self) -> Address {
-        self.validator.address.clone()
+        self.validator.address
     }
 }
 

@@ -25,8 +25,8 @@ async-trait.workspace = true
 bytes.workspace = true
 color-eyre.workspace = true
 derive-where.workspace = true
-ethereum_ssz.workspace = true
 ethereum_hashing.workspace = true
+ethereum_ssz.workspace = true
 fixed_bytes.workspace = true
 
 hex.workspace = true
@@ -35,15 +35,17 @@ rand.workspace = true
 redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha3.workspace = true
 sha2.workspace = true
+sha3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url.workspace = true
 tree_hash.workspace = true
+url.workspace = true
 
 [dev-dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
 ultramarine-execution.workspace = true
 ultramarine-test-support.workspace = true
 
@@ -51,11 +53,9 @@ malachitebft-app-channel.workspace = true
 
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
-alloy-consensus.workspace = true
-alloy-eips.workspace = true
 c-kzg.workspace = true
-tempfile.workspace = true
 ethereum_ssz.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies.tokio]
 workspace = true

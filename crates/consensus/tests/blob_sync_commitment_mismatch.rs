@@ -18,7 +18,6 @@ async fn blob_sync_commitment_mismatch_rejected() -> color_eyre::Result<()> {
         sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::Round;
-    use ssz::Encode;
     use ultramarine_types::{
         blob::KzgCommitment, engine_api::ExecutionPayloadHeader, height::Height,
         sync::SyncedValuePackage, value::Value, value_metadata::ValueMetadata,
@@ -36,7 +35,7 @@ async fn blob_sync_commitment_mismatch_rejected() -> color_eyre::Result<()> {
     let round = Round::new(0);
 
     // Build valid proposal with blobs to get sidecars
-    let (proposed, payload_bytes, maybe_sidecars) =
+    let (_proposed, payload_bytes, maybe_sidecars) =
         propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle))
             .await?;
     let sidecars = maybe_sidecars.expect("sidecars expected");
@@ -79,7 +78,7 @@ async fn blob_sync_commitment_mismatch_rejected() -> color_eyre::Result<()> {
     assert!(undecided.is_empty(), "invalid blobs should be dropped after validation failure");
 
     let metadata = node.state.load_blob_metadata_for_round(height, round).await?;
-    assert!(metadata.map_or(true, |m| m.blob_count() == 0), "fake metadata should not be stored");
+    assert!(metadata.is_none_or(|m| m.blob_count() == 0), "fake metadata should not be stored");
 
     Ok(())
 }
@@ -91,10 +90,9 @@ async fn blob_sync_inclusion_proof_failure_rejected() -> color_eyre::Result<()> 
         sample_blob_bundle, sample_execution_payload_v3_for_height,
     };
     use malachitebft_app_channel::app::types::core::Round;
-    use ssz::Encode;
     use ultramarine_types::{
-        blob::KzgCommitment, engine_api::ExecutionPayloadHeader, height::Height,
-        sync::SyncedValuePackage, value::Value, value_metadata::ValueMetadata,
+        engine_api::ExecutionPayloadHeader, height::Height, sync::SyncedValuePackage, value::Value,
+        value_metadata::ValueMetadata,
     };
 
     let (genesis, validators) = make_genesis(1);
@@ -108,7 +106,7 @@ async fn blob_sync_inclusion_proof_failure_rejected() -> color_eyre::Result<()> 
     let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
     let round = Round::new(0);
 
-    let (proposed, payload_bytes, maybe_sidecars) =
+    let (_proposed, payload_bytes, maybe_sidecars) =
         propose_with_optional_blobs(&mut node.state, height, round, &payload, Some(&bundle))
             .await?;
     let sidecars = maybe_sidecars.expect("sidecars expected");

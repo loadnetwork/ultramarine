@@ -26,10 +26,13 @@ const CF_DECIDED: &str = "decided_blobs";
 ///
 /// This separation allows efficient cleanup of failed rounds while
 /// preserving decided blobs for execution layer handoff and archival.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RocksDbBlobStore {
     db: Arc<DB>,
 }
+
+type BlobStoreEntry = (Vec<u8>, Vec<u8>);
+type BlobStoreEntries = Vec<BlobStoreEntry>;
 
 impl RocksDbBlobStore {
     /// Open a RocksDB blob store at the given path
@@ -82,13 +85,6 @@ impl RocksDbBlobStore {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Get column family handle, returning error if not found
-    fn cf_handle(&self, name: &str) -> Result<&rocksdb::ColumnFamily, BlobStoreError> {
-        self.db
-            .cf_handle(name)
-            .ok_or_else(|| BlobStoreError::ColumnFamilyNotFound(name.to_string()))
-    }
-
     /// Serialize a blob sidecar using protobuf
     ///
     /// Uses protobuf for schema evolution and versioning:
@@ -112,7 +108,7 @@ impl RocksDbBlobStore {
         cf: &rocksdb::ColumnFamily,
         height: Height,
         round: Option<i64>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BlobStoreError> {
+    ) -> Result<BlobStoreEntries, BlobStoreError> {
         let mut prefix = height.as_u64().to_be_bytes().to_vec();
         if let Some(round) = round {
             prefix.extend_from_slice(&round.to_be_bytes());

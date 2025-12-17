@@ -69,7 +69,7 @@ impl TrustedSetup {
 mod hex_serde {
     use serde::{Deserialize, Deserializer};
 
-    pub fn deserialize<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
+    pub(super) fn deserialize<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -125,7 +125,8 @@ pub enum BlobVerificationError {
 ///
 /// This service loads the Ethereum trusted setup once and provides methods
 /// to verify individual or batches of blob sidecars.
-pub struct BlobVerifier {
+#[derive(Debug)]
+pub(crate) struct BlobVerifier {
     kzg_settings: Arc<KzgSettings>,
 }
 
@@ -143,7 +144,7 @@ impl BlobVerifier {
     /// # Errors
     ///
     /// Returns `BlobVerificationError::TrustedSetupLoad` if the setup cannot be loaded.
-    pub fn new() -> Result<Self, BlobVerificationError> {
+    pub(crate) fn new() -> Result<Self, BlobVerificationError> {
         // Parse embedded trusted setup JSON (same approach as Lighthouse)
         let trusted_setup: TrustedSetup =
             serde_json::from_slice(TRUSTED_SETUP_BYTES).map_err(|e| {
@@ -178,7 +179,7 @@ impl BlobVerifier {
     ///
     /// Returns `BlobVerificationError::TrustedSetupLoad` if the file cannot be loaded.
     #[allow(dead_code)]
-    pub fn from_trusted_setup_file(
+    pub(crate) fn from_trusted_setup_file(
         trusted_setup_path: &str,
     ) -> Result<Self, BlobVerificationError> {
         // Read and parse custom trusted setup file
@@ -223,7 +224,10 @@ impl BlobVerifier {
     /// - The KZG verification fails
     /// - The proof is mathematically invalid
     #[allow(dead_code)]
-    pub fn verify_blob_sidecar(&self, sidecar: &BlobSidecar) -> Result<(), BlobVerificationError> {
+    pub(crate) fn verify_blob_sidecar(
+        &self,
+        sidecar: &BlobSidecar,
+    ) -> Result<(), BlobVerificationError> {
         // Convert blob data to c-kzg format
         let blob = CKzgBlob::from_bytes(sidecar.blob.data())
             .map_err(|e| BlobVerificationError::InvalidBlob(format!("{:?}", e)))?;
@@ -267,7 +271,7 @@ impl BlobVerifier {
     /// - The batch KZG verification fails
     /// - Any proof is mathematically invalid
     #[allow(dead_code)]
-    pub fn verify_blob_sidecars_batch(
+    pub(crate) fn verify_blob_sidecars_batch(
         &self,
         sidecars: &[&BlobSidecar],
     ) -> Result<(), BlobVerificationError> {
@@ -365,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_invalid_blob_size() {
-        let verifier = BlobVerifier::new().unwrap();
+        let _verifier = BlobVerifier::new().unwrap();
 
         // Create a blob with wrong size (should be 131,072 bytes)
         let blob_data = vec![0u8; 1000]; // Wrong size!

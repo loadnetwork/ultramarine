@@ -65,9 +65,13 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+/// High-level blob engine orchestration.
 pub mod engine;
+/// Error types for the blob engine.
 pub mod error;
+/// Prometheus metrics for blob lifecycle operations.
 pub mod metrics;
+/// Persistent storage backends and blob storage abstractions.
 pub mod store;
 mod verifier;
 

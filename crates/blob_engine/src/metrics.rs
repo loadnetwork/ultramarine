@@ -9,6 +9,10 @@ use malachitebft_app_channel::app::metrics::{
     },
 };
 
+/// Prometheus metrics for the blob engine.
+///
+/// This is a thin, cloneable handle (`Arc`) that owns counters/gauges/histograms used for
+/// verification, storage tracking, and lifecycle transitions.
 #[derive(Clone, Debug)]
 pub struct BlobEngineMetrics(Arc<Inner>);
 
@@ -20,6 +24,7 @@ impl Deref for BlobEngineMetrics {
     }
 }
 
+/// Internal metric storage for [`BlobEngineMetrics`].
 #[derive(Debug)]
 pub struct Inner {
     // Verification metrics
@@ -44,6 +49,7 @@ pub struct Inner {
 }
 
 impl Inner {
+    /// Create a new, unregistered metrics set.
     pub fn new() -> Self {
         Self {
             verifications_success: Counter::default(),
@@ -72,6 +78,7 @@ impl Default for Inner {
 }
 
 impl BlobEngineMetrics {
+    /// Create a new, unregistered metrics set.
     pub fn new() -> Self {
         Self(Arc::new(Inner::new()))
     }
@@ -93,6 +100,7 @@ impl BlobEngineMetrics {
         }
     }
 
+    /// Register all blob engine metrics in the provided Prometheus registry.
     pub fn register(registry: &SharedRegistry) -> Self {
         let metrics = Self::new();
 

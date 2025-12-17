@@ -24,16 +24,16 @@ tracing-subscriber = { workspace = true }
 
 # Alloy dependencies for Ethereum operations
 alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
 alloy-genesis = { workspace = true }
 alloy-network = { workspace = true }
 alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-rlp = { workspace = true }
 alloy-rpc-types = { workspace = true }
 alloy-rpc-types-txpool = { workspace = true }
 alloy-signer = { workspace = true }
 alloy-signer-local = { workspace = true }
 alloy-transport-http = { workspace = true }
-alloy-eips = { workspace = true }
-alloy-rlp = { workspace = true }
 
-k256 = "0.13"
 c-kzg = { workspace = true }
+k256 = "0.13"

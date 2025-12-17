@@ -32,9 +32,12 @@ pub enum BlobEngineError {
     /// KZG verification failed
     #[error("Blob verification failed at height {height}, index {index}: {source}")]
     VerificationFailed {
+        /// Height at which verification failed.
         height: Height,
+        /// Blob index within the height.
         index: u16,
         #[source]
+        /// Underlying verification error.
         source: BlobVerificationError,
     },
 
@@ -44,7 +47,14 @@ pub enum BlobEngineError {
 
     /// Blob not found
     #[error("Blob not found: height={height}, round={round}, index={index}")]
-    BlobNotFound { height: Height, round: i64, index: u16 },
+    BlobNotFound {
+        /// Height of the missing blob.
+        height: Height,
+        /// Round of the missing blob.
+        round: i64,
+        /// Blob index within the round.
+        index: u16,
+    },
 
     /// No blobs found for height
     #[error("No blobs found for height {0}")]

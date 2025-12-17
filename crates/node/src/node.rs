@@ -34,6 +34,54 @@ use url::Url;
 
 use crate::archiver::{self, ArchiveJobSubmitter, ArchiverHandle};
 
+fn validate_validator_archiver_setting(
+    is_validator: bool,
+    archiver_enabled: bool,
+    address: &Address,
+) -> eyre::Result<()> {
+    if is_validator && !archiver_enabled && !cfg!(feature = "test-harness") {
+        return Err(eyre::eyre!(
+            "archiver.enabled=false but this node ({}) is in the validator set; \
+             validators must run with archiver enabled",
+            address
+        ));
+    }
+    Ok(())
+}
+
+fn validate_archiver_config_strict(effective_config: &Config) -> eyre::Result<()> {
+    // Phase 6 strictness: no silent mock / missing config.
+    // In production binaries, mock:// backends are disallowed.
+    // If archiver is enabled, require provider_url/provider_id/bearer_token.
+    if effective_config.archiver.enabled && !cfg!(any(test, feature = "test-harness")) {
+        if effective_config.archiver.provider_url.starts_with("mock://") {
+            return Err(eyre::eyre!(
+                "Archiver is enabled but provider_url={} is mock mode. \
+                 Mock backends are only allowed in tests.",
+                effective_config.archiver.provider_url
+            ));
+        }
+        if effective_config.archiver.provider_url.trim().is_empty() {
+            return Err(eyre::eyre!("Archiver is enabled but archiver.provider_url is empty"));
+        }
+        if effective_config.archiver.provider_id.trim().is_empty() {
+            return Err(eyre::eyre!("Archiver is enabled but archiver.provider_id is empty"));
+        }
+        if effective_config.archiver.bearer_token.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(eyre::eyre!(
+                "Archiver is enabled but archiver.bearer_token is not set. \
+                 Set ULTRAMARINE_ARCHIVER_BEARER_TOKEN or archiver.bearer_token in config."
+            ));
+        }
+        tracing::info!(
+            provider_url = %effective_config.archiver.provider_url,
+            provider_id = %effective_config.archiver.provider_id,
+            "Phase 6: Archiver configured for real provider"
+        );
+    }
+    Ok(())
+}
+
 /// Main application struct implementing the consensus node functionality
 #[derive(Clone, Debug)]
 pub struct App {
@@ -132,6 +180,7 @@ impl Node for App {
 
         // Load a single effective config (base + env overrides) and use it everywhere.
         let effective_config = self.load_config()?;
+        validate_archiver_config_strict(&effective_config)?;
 
         let private_key_file = self.load_private_key_file()?;
         let private_key = self.load_private_key(private_key_file);
@@ -145,6 +194,19 @@ impl Node for App {
         // then connect to the peers and receive the actual validator set?
         // hmm
         let initial_validator_set = genesis.validator_set.clone();
+
+        // PoA strictness: if this node is in the validator set, archiver must be enabled.
+        // Otherwise, heights proposed by this validator can never become "fully archived",
+        // and the network will retain blob bytes indefinitely for those heights.
+        //
+        // The full-node integration harness builds `ultramarine-node` with `test-harness`
+        // and disables archiver by default to keep blob bytes on disk for assertions.
+        let is_validator = genesis.validator_set.get_by_address(&address).is_some();
+        validate_validator_archiver_setting(
+            is_validator,
+            effective_config.archiver.enabled,
+            &address,
+        )?;
 
         let codec = ProtobufCodec;
 
@@ -188,38 +250,8 @@ impl Node for App {
             let archiver_pk = self.load_private_key(archiver_pk_file);
             self.get_signing_provider(archiver_pk)
         };
-        let archiver_address = address.clone();
+        let archiver_address = address;
         let archive_metrics_for_archiver = archive_metrics.clone();
-
-        // Phase 6 strictness: no silent mock / missing config.
-        // In production binaries, mock:// backends are disallowed.
-        // If archiver is enabled, require provider_url/provider_id/bearer_token.
-        if effective_config.archiver.enabled && !cfg!(test) {
-            if effective_config.archiver.provider_url.starts_with("mock://") {
-                return Err(eyre::eyre!(
-                    "Archiver is enabled but provider_url={} is mock mode. \
-                     Mock backends are only allowed in tests.",
-                    effective_config.archiver.provider_url
-                ));
-            }
-            if effective_config.archiver.provider_url.trim().is_empty() {
-                return Err(eyre::eyre!("Archiver is enabled but archiver.provider_url is empty"));
-            }
-            if effective_config.archiver.provider_id.trim().is_empty() {
-                return Err(eyre::eyre!("Archiver is enabled but archiver.provider_id is empty"));
-            }
-            if effective_config.archiver.bearer_token.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(eyre::eyre!(
-                    "Archiver is enabled but archiver.bearer_token is not set. \
-                     Set ULTRAMARINE_ARCHIVER_BEARER_TOKEN or archiver.bearer_token in config."
-                ));
-            }
-            tracing::info!(
-                provider_url = %effective_config.archiver.provider_url,
-                provider_id = %effective_config.archiver.provider_id,
-                "Phase 6: Archiver configured for real provider"
-            );
-        }
 
         let mut state = State::new(
             genesis,
@@ -522,5 +554,35 @@ impl CanMakeGenesis for App {
         let validators = validators.into_iter().map(|(pk, vp)| Validator::new(pk, vp));
         let validator_set = ValidatorSet::new(validators);
         Genesis { validator_set }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(not(feature = "test-harness"))]
+    fn validator_requires_archiver_enabled() {
+        let address = Address::repeat_byte(0x11);
+        let err = validate_validator_archiver_setting(true, false, &address)
+            .expect_err("validator with archiver disabled must error");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("archiver.enabled=false"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    #[cfg(feature = "test-harness")]
+    fn validator_can_disable_archiver_in_test_harness() {
+        let address = Address::repeat_byte(0x11);
+        validate_validator_archiver_setting(true, false, &address)
+            .expect("test harness should allow validators to disable archiver");
+    }
+
+    #[test]
+    fn non_validator_can_disable_archiver() {
+        let address = Address::repeat_byte(0x22);
+        validate_validator_archiver_setting(false, false, &address)
+            .expect("non-validator should be allowed to disable archiver");
     }
 }

@@ -91,6 +91,31 @@ pub struct ArchiverWorker<E: BlobEngine> {
     blob_engine: Arc<E>,
 }
 
+impl<E: BlobEngine> std::fmt::Debug for ArchiverWorker<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchiverWorker")
+            .field("enabled", &self.config.enabled)
+            .field("provider_url", &self.config.provider_url)
+            .field("provider_id", &self.config.provider_id)
+            .field("upload_path", &self.config.upload_path)
+            .field("retry_attempts", &self.config.retry_attempts)
+            .field("retry_backoff_ms", &self.config.retry_backoff_ms)
+            .field("max_queue_size", &self.config.max_queue_size)
+            .field("validator_address", &self.validator_address)
+            .finish_non_exhaustive()
+    }
+}
+
+struct UploadBlobParams<'a> {
+    height: Height,
+    round: Round,
+    blob_idx: u16,
+    blob_data: &'a [u8],
+    commitment: &'a KzgCommitment,
+    versioned_hash: B256,
+    blob_keccak: B256,
+}
+
 impl<E: BlobEngine + 'static> ArchiverWorker<E> {
     /// Create a new archiver worker.
     pub fn new(
@@ -320,7 +345,7 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
         // For each blob in the job, upload and create a notice
         for (i, &blob_idx) in job.blob_indices.iter().enumerate() {
             // Get commitment and keccak from job (already validated above)
-            let commitment = job.commitments[i].clone();
+            let commitment = job.commitments[i];
             let blob_keccak = job.blob_keccaks[i];
             let versioned_hash = job.versioned_hashes[i];
 
@@ -335,15 +360,15 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
             // Upload blob with retry/backoff
             let upload_start = std::time::Instant::now();
             let upload_result = self
-                .upload_blob(
-                    job.height,
-                    job.round,
+                .upload_blob(UploadBlobParams {
+                    height: job.height,
+                    round: job.round,
                     blob_idx,
                     blob_data,
-                    &commitment,
+                    commitment: &commitment,
                     versioned_hash,
                     blob_keccak,
-                )
+                })
                 .await;
             let upload_elapsed = upload_start.elapsed();
             self.metrics.observe_upload_blob_duration(upload_elapsed);
@@ -377,7 +402,7 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
                 blob_keccak,
                 provider_id: self.config.provider_id.clone(),
                 locator,
-                archived_by: self.validator_address.clone(),
+                archived_by: self.validator_address,
                 archived_at,
             };
 
@@ -420,22 +445,13 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
     /// Upload a blob with retry and exponential backoff.
     ///
     /// `mock://` provider URLs are supported by tests only.
-    async fn upload_blob(
-        &self,
-        height: Height,
-        round: Round,
-        blob_idx: u16,
-        blob_data: &[u8],
-        commitment: &KzgCommitment,
-        versioned_hash: B256,
-        blob_keccak: B256,
-    ) -> color_eyre::Result<String> {
+    async fn upload_blob(&self, params: UploadBlobParams<'_>) -> color_eyre::Result<String> {
         if self.config.provider_url.starts_with("mock://") {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-harness"))]
             {
-                return self.mock_upload(height, blob_idx).await;
+                return self.mock_upload(params.height, params.blob_idx).await;
             }
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-harness")))]
             {
                 return Err(color_eyre::eyre::eyre!(
                     "mock:// provider_url is only allowed in tests"
@@ -443,24 +459,14 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
             }
         }
 
-        self.do_upload(height, round, blob_idx, blob_data, commitment, versioned_hash, blob_keccak)
-            .await
+        self.do_upload(params).await
     }
 
     /// Perform the actual HTTP POST to the storage provider.
     ///
     /// Returns the locator string reported by the provider. The request
     /// includes blob metadata (height/index/commitment/hash) via headers.
-    async fn do_upload(
-        &self,
-        height: Height,
-        round: Round,
-        blob_idx: u16,
-        blob_data: &[u8],
-        commitment: &KzgCommitment,
-        versioned_hash: B256,
-        blob_keccak: B256,
-    ) -> color_eyre::Result<String> {
+    async fn do_upload(&self, params: UploadBlobParams<'_>) -> color_eyre::Result<String> {
         use color_eyre::eyre::bail;
 
         let base = self.config.provider_url.trim_end_matches('/');
@@ -468,9 +474,9 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
         let url = format!("{base}/{path}");
 
         let proposer_hex = format!("0x{}", hex::encode(self.validator_address.into_inner()));
-        let commitment_hex = format!("0x{}", hex::encode(commitment.as_bytes()));
-        let versioned_hash_hex = format!("0x{}", hex::encode(versioned_hash.as_slice()));
-        let blob_keccak_hex = format!("0x{}", hex::encode(blob_keccak.as_slice()));
+        let commitment_hex = format!("0x{}", hex::encode(params.commitment.as_bytes()));
+        let versioned_hash_hex = format!("0x{}", hex::encode(params.versioned_hash.as_slice()));
+        let blob_keccak_hex = format!("0x{}", hex::encode(params.blob_keccak.as_slice()));
 
         #[derive(serde::Serialize)]
         struct Tag<'a> {
@@ -482,9 +488,9 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
             Tag { key: "load", value: "true".to_string() },
             Tag { key: "load.network", value: "fibernet".to_string() },
             Tag { key: "load.kind", value: "blob".to_string() },
-            Tag { key: "load.height", value: height.as_u64().to_string() },
-            Tag { key: "load.round", value: round.as_i64().to_string() },
-            Tag { key: "load.blob_index", value: blob_idx.to_string() },
+            Tag { key: "load.height", value: params.height.as_u64().to_string() },
+            Tag { key: "load.round", value: params.round.as_i64().to_string() },
+            Tag { key: "load.blob_index", value: params.blob_idx.to_string() },
             Tag { key: "load.kzg_commitment", value: commitment_hex.clone() },
             Tag { key: "load.versioned_hash", value: versioned_hash_hex.clone() },
             Tag { key: "load.blob_keccak", value: blob_keccak_hex.clone() },
@@ -495,8 +501,8 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
         let tags_json = serde_json::to_string(&tags)
             .map_err(|e| color_eyre::eyre::eyre!("Failed to serialize tags JSON: {e}"))?;
 
-        let file_part = multipart::Part::bytes(blob_data.to_vec())
-            .file_name(format!("blob-{}-{}.bin", height.as_u64(), blob_idx))
+        let file_part = multipart::Part::bytes(params.blob_data.to_vec())
+            .file_name(format!("blob-{}-{}.bin", params.height.as_u64(), params.blob_idx))
             .mime_str("application/octet-stream")
             .map_err(|e| color_eyre::eyre::eyre!("Invalid mime for upload multipart: {e}"))?;
 
@@ -514,8 +520,8 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
         let response = request.send().await.map_err(|e| {
             color_eyre::eyre::eyre!(
                 "Failed to upload blob {} at height {}: {}",
-                blob_idx,
-                height,
+                params.blob_idx,
+                params.height,
                 e
             )
         })?;
@@ -544,8 +550,8 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
         let bytes = response.bytes().await.map_err(|e| {
             color_eyre::eyre::eyre!(
                 "Failed to read provider response for blob {} at height {}: {}",
-                blob_idx,
-                height,
+                params.blob_idx,
+                params.height,
                 e
             )
         })?;
@@ -605,7 +611,7 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
     }
 
     /// Mock upload that returns a fake locator (tests only).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-harness"))]
     async fn mock_upload(&self, height: Height, blob_idx: u16) -> color_eyre::Result<String> {
         // Simulate upload (mock always succeeds after simulated delay)
         tokio::time::sleep(Duration::from_millis(10)).await;

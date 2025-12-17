@@ -261,10 +261,22 @@ deps-outdated: ## Check for outdated dependencies (requires cargo-outdated).
 	@echo "$(YELLOW)Checking for outdated dependencies$(NC)"
 	cargo outdated -R
 
-.PHONY: audit
+.PHONY: audit audit-online
+AUDIT_DB_DIR ?= target/advisory-db
+
 audit: ## Run security audit on dependencies.
 	@echo "$(YELLOW)Running security audit$(NC)"
-	cargo audit
+	@if [ -n "$$CI" ]; then \
+		cargo audit --db $(AUDIT_DB_DIR); \
+	elif [ -d "$(AUDIT_DB_DIR)/.git" ]; then \
+		cargo audit --db $(AUDIT_DB_DIR) --offline; \
+	else \
+		echo "$(YELLOW)Skipping cargo audit (no local advisory DB at $(AUDIT_DB_DIR)). Run 'make audit-online' to fetch it.$(NC)"; \
+	fi
+
+audit-online: ## Fetch advisory DB and run cargo-audit (requires network).
+	@mkdir -p $(AUDIT_DB_DIR)
+	cargo audit --db $(AUDIT_DB_DIR)
 
 .PHONY: deny
 deny: ## Check dependencies against deny rules (requires cargo-deny).
@@ -645,7 +657,17 @@ itest-node: ## Run full-node (Tier 1) integration tests (process-isolated for de
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_restream_multi_validator -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_inclusion_proof_failure -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_blobless_sequence_behaves -- --ignored
-	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_pruning_retains_recent_heights -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_store_pruning_retains_recent_heights -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_sync_package_roundtrip -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_proof_failure -- --ignored
 	@echo "$(GREEN)✅ All 14 Tier 1 tests passed!$(NC)"
+
+.PHONY: itest-node-archiver
+itest-node-archiver: ## Run Tier 1 archiver/prune full-node integration tests.
+	@echo "$(GREEN)Running Tier 1 archiver/prune integration tests (5 tests, process-isolated)...$(NC)"
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_archiver_mock_provider_smoke -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_followers_prune_after_proposer_notices -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_archiver_provider_failure_retries -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_archiver_recover_pending_jobs_api -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_archiver_auth_token_transmitted -- --ignored
+	@echo "$(GREEN)✅ All 5 Tier 1 archiver/prune tests passed!$(NC)"

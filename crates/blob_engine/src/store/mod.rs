@@ -6,6 +6,7 @@ use ultramarine_types::{height::Height, proposal_part::BlobSidecar};
 
 use crate::error::BlobStoreError;
 
+/// RocksDB-backed blob store implementation.
 pub mod rocksdb;
 
 /// Key for identifying a blob in storage
@@ -14,8 +15,11 @@ pub mod rocksdb;
 /// During consensus, multiple rounds may propose different blobs for the same height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlobKey {
+    /// Consensus height for this blob.
     pub height: Height,
-    pub round: i64, // Round can be negative (Nil = -1)
+    /// Consensus round for this blob (can be negative; Nil = -1).
+    pub round: i64,
+    /// Blob index within the block.
     pub index: u16,
 }
 
@@ -26,7 +30,7 @@ impl BlobKey {
     }
 
     /// Encode key for undecided blobs: [height: u64 BE][round: i64 BE][index: u16 BE]
-    pub fn to_undecided_key(&self) -> Vec<u8> {
+    pub fn to_undecided_key(self) -> Vec<u8> {
         let mut key = Vec::with_capacity(18);
         key.extend_from_slice(&self.height.as_u64().to_be_bytes());
         key.extend_from_slice(&self.round.to_be_bytes());
@@ -35,7 +39,7 @@ impl BlobKey {
     }
 
     /// Encode key for decided blobs: [height: u64 BE][index: u16 BE]
-    pub fn to_decided_key(&self) -> Vec<u8> {
+    pub fn to_decided_key(self) -> Vec<u8> {
         let mut key = Vec::with_capacity(10);
         key.extend_from_slice(&self.height.as_u64().to_be_bytes());
         key.extend_from_slice(&self.index.to_be_bytes());

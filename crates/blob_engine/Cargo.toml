@@ -3,32 +3,27 @@ name = "ultramarine-blob-engine"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[lints]
-workspace = true
+rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 ultramarine-types = { path = "../types" }
 
 # Cryptography - KZG verification
 c-kzg.workspace = true
-
-# Storage backend
+hex.workspace = true
 rocksdb = "0.22"
 
 # Async runtime
 tokio.workspace = true
-async-trait.workspace = true
 
 # Serialization (protobuf for consistency with network layer)
 malachitebft-proto.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-hex.workspace = true
 
 # Error handling
 thiserror.workspace = true
@@ -40,5 +35,8 @@ tracing.workspace = true
 malachitebft-app-channel.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3.8"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true
