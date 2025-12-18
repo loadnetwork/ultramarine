@@ -8,6 +8,7 @@ name = "ultramarine-utils"
 path = "src/main.rs"
 
 [dependencies]
+ultramarine-genesis = { path = "../genesis" }
 ultramarine-types = { path = "../types" }
 
 # Core dependencies

@@ -107,7 +107,7 @@ impl Spammer {
         if blobs && !(1..=1024).contains(&blobs_per_tx) {
             return Err(eyre::eyre!("blobs_per_tx must be between 1 and 1024"));
         }
-        let signers = crate::commands::genesis::make_signers();
+        let signers = ultramarine_genesis::make_signers();
         let signer =
             signers.get(signer_index).ok_or_else(|| eyre::eyre!("Invalid signer index"))?.clone();
         Ok(Self {

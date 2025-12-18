@@ -1,0 +1,24 @@
+all:
+  hosts:
+    host-0: {}
+    host-1: {}
+    host-2: {}
+  vars: {}
+  children: {}
+_meta:
+  hostvars:
+    host-0:
+      ansible_host: 203.0.113.10
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-0
+    host-1:
+      ansible_host: 203.0.113.11
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-1
+    host-2:
+      ansible_host: 203.0.113.12
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-2

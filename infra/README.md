@@ -1,0 +1,66 @@
+# Infra (multi-host) tooling
+
+This folder contains the manifest-driven infra scaffolding described in `infra_progress.md`.
+
+Docs:
+
+- Firewall/ports guidance: `FIREWALL.md`
+
+## Netgen
+
+Netgen is a Rust binary in the workspace (source at `infra/gen/netgen/`).
+
+- Validates a manifest:
+  - `cargo run -p ultramarine-netgen --bin netgen -- validate --manifest infra/manifests/<net>.yaml`
+- Generates `infra/networks/<net>/network.lock.json` + public bundle outputs:
+  - `cargo run -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/<net>.yaml --out-dir infra/networks/<net>`
+- Optionally provides per-node secrets (plaintext or sops-encrypted):
+  - `cargo run -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/<net>.yaml --out-dir infra/networks/<net> --secrets-file infra/networks/<net>/secrets.sops.yaml`
+  - By default, `gen` fails if any validator is missing an archiver bearer token (required for a bootable testnet). Use `--allow-missing-archiver-tokens` only for non-bootable dry-runs.
+
+Generated outputs (current):
+
+- `infra/networks/<net>/network.lock.json` (deterministic lockfile: placements, ports, enodes/bootnodes, artifact checksums)
+- `infra/networks/<net>/bundle/public/genesis.json` (EL genesis; Prague/Cancun at genesis)
+- `infra/networks/<net>/bundle/public/network.json` (machine-readable network description)
+- `infra/networks/<net>/inventory.yml` (Ansible inventory)
+- `infra/networks/<net>/bundle/private/load-reth/p2p-keys/<node>.key` (stable EL identity; never commit)
+- `infra/networks/<net>/bundle/private/env/ultramarine-<node>.env` (runtime variables for systemd/Ansible)
+- `infra/networks/<net>/bundle/private/env/load-reth-<node>.env` (runtime variables for systemd/Ansible)
+- `infra/networks/<net>/bundle/private/ultramarine/secrets/<node>.env` (archiver bearer token env file; derived from secrets; never commit)
+- `infra/networks/<net>/bundle/private/ultramarine/homes/<node>/config/{config.toml,genesis.json,priv_validator_key.json}` (Ultramarine home skeleton; `priv_validator_key.json` is generated for every node; only `role=validator` nodes are in the genesis validator set; never commit)
+
+Notes:
+
+- Deploys are **Engine IPC-only**.
+- Validators require archiver config; bearer tokens are expected via decrypted secrets (see `SECRETS.md`).
+
+## Deploy (M3, systemd + Docker)
+
+Ansible is the deploy layer. It copies artifacts to hosts and installs systemd units that run pinned container images.
+
+Host layout:
+
+- Network artifacts: `/opt/loadnet/networks/<net>/...`
+- Active network symlink: `/opt/loadnet/current -> /opt/loadnet/networks/<net>`
+- Persistent EL state: `/var/lib/load-reth/<node>/`
+- Persistent CL state: `/var/lib/ultramarine/<node>/`
+- Engine IPC: `/run/load-reth/<node>/engine.ipc`
+
+Operator commands (from `ultramarine/`):
+
+- Generate artifacts: `make net-gen NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
+- Deploy to hosts (default: restarts services to apply new config): `make net-deploy NET=<net>`
+- Start/restart: `make net-up NET=<net>` / Stop: `make net-down NET=<net>`
+- Inspect: `make net-status NET=<net>` / `make net-logs NET=<net> LINES=200`
+- Health: `make net-health NET=<net>`
+- Preflight: `make net-doctor NET=<net>`
+- Firewall: `make net-firewall NET=<net>` (or `make net-deploy NET=<net> APPLY_FIREWALL=true`)
+- Local checks: `make infra-checks NET=<net>`
+
+Notes:
+
+- `net-deploy` fails fast if `infra/manifests/<net>.yaml` changed without regenerating `network.lock.json`.
+- To deploy without restarting running nodes: `make net-deploy NET=<net> RESTART_ON_DEPLOY=false`
+- `net-deploy` verifies `bundle/public/genesis.json` checksum against the lockfile on each host.
+- Firewall automation is idempotent, keeps SSH allowed, and opens only P2P ports by default.

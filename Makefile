@@ -671,3 +671,83 @@ itest-node-archiver: ## Run Tier 1 archiver/prune full-node integration tests.
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_archiver_recover_pending_jobs_api -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_archiver_auth_token_transmitted -- --ignored
 	@echo "$(GREEN)✅ All 5 Tier 1 archiver/prune tests passed!$(NC)"
+
+# -----------------------------------------------------------------------------
+# Infra (multi-host) helpers
+
+NET ?= example
+SECRETS_FILE ?=
+LINES ?= 200
+NET_DIR ?= infra/networks/$(NET)
+ANSIBLE_CONFIG_PATH ?= infra/ansible/ansible.cfg
+ANSIBLE_INVENTORY ?= $(NET_DIR)/inventory.yml
+ANSIBLE_PLAYBOOKS ?= infra/ansible/playbooks
+RESTART_ON_DEPLOY ?= true
+APPLY_FIREWALL ?= false
+
+.PHONY: net-validate
+net-validate: ## Validate infra manifest (NET=<net>).
+	cargo run --quiet -p ultramarine-netgen --bin netgen -- validate --manifest infra/manifests/$(NET).yaml
+
+.PHONY: net-gen
+net-gen: ## Generate infra lockfile + bundle (NET=<net>, optional SECRETS_FILE=<path>).
+	@if [ -n "$(SECRETS_FILE)" ]; then \
+		cargo run --quiet -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/$(NET).yaml --out-dir infra/networks/$(NET) --secrets-file "$(SECRETS_FILE)"; \
+	else \
+		cargo run --quiet -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/$(NET).yaml --out-dir infra/networks/$(NET); \
+	fi
+
+.PHONY: net-deploy
+net-deploy: ## Deploy artifacts + systemd units via Ansible (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/deploy.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR) restart_on_deploy=$(RESTART_ON_DEPLOY) apply_firewall=$(APPLY_FIREWALL)"
+
+.PHONY: net-up
+net-up: ## Start services via systemd (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-down
+net-down: ## Stop services via systemd (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-status
+net-status: ## Show systemd status for services (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/status.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-logs
+net-logs: ## Tail systemd logs (NET=<net>, NET_DIR=<dir>, LINES=<n>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/logs.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR) lines=$(LINES)"
+
+.PHONY: net-health
+net-health: ## Health check: services active + Engine IPC socket + height moving (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-doctor
+net-doctor: ## Preflight diagnostics (time sync, limits, units, listeners) (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-firewall
+net-firewall: ## Apply host firewall (UFW) rules for required P2P ports (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: infra-checks
+infra-checks: ## Run infra checks (netgen build + ansible syntax-checks if available).
+	cargo fmt --all
+	cargo build -q -p ultramarine-netgen
+	@if command -v ansible-playbook >/dev/null 2>&1; then \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/deploy.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml -e "net=$(NET) net_dir=$(NET_DIR)"; \
+	else \
+		echo "ansible-playbook not found; skipping syntax-checks (install ansible-core on the controller)"; \
+	fi

@@ -1,0 +1,36 @@
+[Unit]
+Description=ultramarine (%i)
+After=network-online.target docker.service load-reth@%i.service
+Wants=network-online.target
+Requires=docker.service load-reth@%i.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+WorkingDirectory=/opt/loadnet/current
+
+EnvironmentFile=/opt/loadnet/current/bundle/private/env/ultramarine-%i.env
+EnvironmentFile=-/opt/loadnet/current/bundle/private/ultramarine/secrets/%i.env
+
+ExecStartPre=/bin/bash -lc 'test -d "/var/lib/ultramarine/%i/config"'
+ExecStartPre=/bin/bash -lc 'test -S "$ULTRAMARINE_ENGINE_IPC_PATH"'
+
+ExecStart=/usr/bin/docker run --rm --name ultramarine-%i --network host \
+  --env ULTRAMARINE_ARCHIVER_ENABLED \
+  --env ULTRAMARINE_ARCHIVER_PROVIDER_URL \
+  --env ULTRAMARINE_ARCHIVER_PROVIDER_ID \
+  --env ULTRAMARINE_ARCHIVER_BEARER_TOKEN \
+  -v /var/lib/ultramarine/%i:/home \
+  -v /run/load-reth/%i:/run/load-reth/%i \
+  $ULTRAMARINE_IMAGE start \
+    --home=/home \
+    --engine-ipc-path=$ULTRAMARINE_ENGINE_IPC_PATH \
+    --eth1-rpc-url=$ULTRAMARINE_ETH1_RPC_URL
+
+ExecStop=/usr/bin/docker stop -t 10 ultramarine-%i
+
+[Install]
+WantedBy=multi-user.target

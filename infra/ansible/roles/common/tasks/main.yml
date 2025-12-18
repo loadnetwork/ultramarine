@@ -1,0 +1,60 @@
+---
+- name: Install dependencies
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - curl
+      - jq
+      - chrony
+    state: present
+    update_cache: true
+
+- name: Enable and start docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Enable and start chrony (time sync)
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Configure sysctl baseline
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-loadnet.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Load Network baseline (multi-host)
+      fs.file-max = 1048576
+  register: loadnet_sysctl_conf
+
+- name: Apply sysctl settings
+  ansible.builtin.command: sysctl --system
+  when: loadnet_sysctl_conf.changed
+  changed_when: true
+
+- name: Create base directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/loadnet
+    - /opt/loadnet/networks
+
+- name: Install systemd unit templates
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../../templates/systemd/{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: "load-reth@.service.j2", dest: "load-reth@.service" }
+    - { src: "ultramarine@.service.j2", dest: "ultramarine@.service" }

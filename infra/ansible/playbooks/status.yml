@@ -1,0 +1,22 @@
+---
+- name: Show service status
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: load-reth status
+      ansible.builtin.command: "systemctl --no-pager --full status load-reth@{{ item }}.service"
+      loop: "{{ loadnet_nodes }}"
+      register: reth_status
+      changed_when: false
+      failed_when: false
+    - ansible.builtin.debug:
+        var: reth_status.results
+    - name: ultramarine status
+      ansible.builtin.command: "systemctl --no-pager --full status ultramarine@{{ item }}.service"
+      loop: "{{ loadnet_nodes }}"
+      register: ultra_status
+      changed_when: false
+      failed_when: false
+    - ansible.builtin.debug:
+        var: ultra_status.results

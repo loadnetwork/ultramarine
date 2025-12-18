@@ -1,0 +1,184 @@
+---
+- name: Net doctor (preflight + basic diagnostics)
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    loadnet_root: /opt/loadnet
+    loadnet_current: "{{ loadnet_root }}/current"
+    loadnet_networks: "{{ loadnet_root }}/networks"
+    loadnet_net: "{{ net }}"
+    loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+  tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - net is defined
+          - net_dir is defined
+
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', net_dir + '/network.lock.json') | from_json }}"
+
+    - name: Assert lockfile matches selected network
+      ansible.builtin.assert:
+        that:
+          - loadnet_lock.network.name == net
+        fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
+
+    - name: Verify required services are installed
+      ansible.builtin.command: "systemctl is-enabled {{ item }}"
+      loop:
+        - docker
+        - chrony
+      changed_when: false
+      failed_when: false
+      register: enabled_services
+
+    - name: Verify required services are active
+      ansible.builtin.command: "systemctl is-active --quiet {{ item }}"
+      loop:
+        - docker
+        - chrony
+      changed_when: false
+      register: active_services
+
+    - name: Check fs.file-max baseline
+      ansible.builtin.command: sysctl -n fs.file-max
+      changed_when: false
+      register: fs_file_max
+
+    - name: Assert fs.file-max is sufficient
+      ansible.builtin.assert:
+        that:
+          - (fs_file_max.stdout | int) >= 1048576
+        fail_msg: "fs.file-max={{ fs_file_max.stdout }} is too low; expected >= 1048576"
+
+    - name: Check /opt/loadnet/current symlink exists
+      ansible.builtin.stat:
+        path: "{{ loadnet_current }}"
+        follow: false
+      register: current_link
+
+    - name: Assert /opt/loadnet/current is a symlink
+      ansible.builtin.assert:
+        that:
+          - current_link.stat.exists
+          - current_link.stat.islnk
+        fail_msg: "/opt/loadnet/current must be a symlink (run net-deploy first)"
+
+    - name: Check installed systemd unit templates
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/{{ item }}"
+      loop:
+        - load-reth@.service
+        - ultramarine@.service
+      register: unit_stats
+
+    - name: Assert systemd unit templates exist
+      ansible.builtin.assert:
+        that:
+          - unit_stats.results[0].stat.exists
+          - unit_stats.results[1].stat.exists
+        fail_msg: "missing systemd unit template(s); rerun net-deploy"
+
+    - name: Build node->ports map (from lockfile)
+      ansible.builtin.set_fact:
+        loadnet_ports_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='ports'))) }}"
+
+    - name: Build node->role map (from lockfile)
+      ansible.builtin.set_fact:
+        loadnet_role_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='role'))) }}"
+
+    - name: Build validator node list
+      ansible.builtin.set_fact:
+        loadnet_validator_nodes: "{{ loadnet_lock.nodes | selectattr('role', 'equalto', 'validator') | map(attribute='id') | list }}"
+
+    - name: Check free disk space under /var/lib (best-effort)
+      ansible.builtin.command: "df -Pk /var/lib"
+      changed_when: false
+      register: df_var_lib
+      failed_when: false
+
+    - name: Show /var/lib disk usage
+      ansible.builtin.debug:
+        var: df_var_lib.stdout_lines
+
+    - name: Stat load-reth p2p key files
+      ansible.builtin.stat:
+        path: "/opt/loadnet/current/bundle/private/load-reth/p2p-keys/{{ item }}.key"
+        follow: false
+      loop: "{{ loadnet_nodes }}"
+      register: reth_key_stats
+
+    - name: Assert load-reth p2p keys are 0600
+      ansible.builtin.assert:
+        that:
+          - reth_key_stats.results[ansible_loop.index0].stat.exists
+          - reth_key_stats.results[ansible_loop.index0].stat.mode == "0600"
+        fail_msg: "bad permissions for /opt/loadnet/current/bundle/private/load-reth/p2p-keys/{{ item }}.key (expected 0600)"
+      loop: "{{ loadnet_nodes }}"
+      loop_control:
+        extended: true
+
+    - name: Stat validator priv_validator_key.json files
+      ansible.builtin.stat:
+        path: "/var/lib/ultramarine/{{ item }}/config/priv_validator_key.json"
+        follow: false
+      loop: "{{ loadnet_validator_nodes }}"
+      register: validator_key_stats
+
+    - name: Assert validator priv_validator_key.json is 0600
+      ansible.builtin.assert:
+        that:
+          - validator_key_stats.results[ansible_loop.index0].stat.exists
+          - validator_key_stats.results[ansible_loop.index0].stat.mode == "0600"
+        fail_msg: "bad permissions for /var/lib/ultramarine/{{ item }}/config/priv_validator_key.json (expected 0600)"
+      loop: "{{ loadnet_validator_nodes }}"
+      loop_control:
+        extended: true
+
+    - name: Optional postflight - check listeners for each node (if services are active)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        node="{{ item }}"
+        el_p2p="{{ loadnet_ports_by_node[node].el_p2p }}"
+        cl_p2p="{{ loadnet_ports_by_node[node].cl_p2p }}"
+        cl_mempool="{{ loadnet_ports_by_node[node].cl_mempool }}"
+        el_http="{{ loadnet_ports_by_node[node].el_http }}"
+        el_metrics="{{ loadnet_ports_by_node[node].el_metrics }}"
+        cl_metrics="{{ loadnet_ports_by_node[node].cl_metrics }}"
+
+        if systemctl is-active --quiet "load-reth@${node}.service"; then
+          ss -lntu | awk '{print $5}' | grep -Eq ":${el_p2p}$" || {
+            echo "missing listener for load-reth p2p port ${el_p2p} (node=${node})" >&2
+            exit 1
+          }
+          ss -lnt | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:${el_http}$" || {
+            echo "load-reth HTTP is not bound to 127.0.0.1:${el_http} (node=${node})" >&2
+            exit 1
+          }
+          ss -lnt | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:${el_metrics}$" || {
+            echo "load-reth metrics is not bound to 127.0.0.1:${el_metrics} (node=${node})" >&2
+            exit 1
+          }
+        fi
+
+        if systemctl is-active --quiet "ultramarine@${node}.service"; then
+          ss -lntu | awk '{print $5}' | grep -Eq ":${cl_p2p}$" || {
+            echo "missing listener for ultramarine cl_p2p port ${cl_p2p} (node=${node})" >&2
+            exit 1
+          }
+          ss -lntu | awk '{print $5}' | grep -Eq ":${cl_mempool}$" || {
+            echo "missing listener for ultramarine cl_mempool port ${cl_mempool} (node=${node})" >&2
+            exit 1
+          }
+          ss -lnt | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:${cl_metrics}$" || {
+            echo "ultramarine metrics is not bound to 127.0.0.1:${cl_metrics} (node=${node})" >&2
+            exit 1
+          }
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ loadnet_nodes }}"
+      changed_when: false

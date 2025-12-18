@@ -1,0 +1,73 @@
+---
+- name: Deploy Load testnet services
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    loadnet_root: /opt/loadnet
+    loadnet_current: "{{ loadnet_root }}/current"
+    loadnet_networks: "{{ loadnet_root }}/networks"
+    loadnet_net: "{{ net }}"
+    loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+    restart_on_deploy: "{{ restart_on_deploy | default(true) }}"
+    apply_firewall: "{{ apply_firewall | default(false) }}"
+  pre_tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - net is defined
+          - net_dir is defined
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', net_dir + '/network.lock.json') | from_json }}"
+    - name: Assert lockfile matches selected network
+      ansible.builtin.assert:
+        that:
+          - loadnet_lock.network.name == net
+        fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
+
+    - name: Compute manifest sha256 on controller (drift check)
+      ansible.builtin.stat:
+        path: "{{ loadnet_lock.inputs.manifest_path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: manifest_stat
+
+    - name: Fail fast on manifest/lock drift
+      ansible.builtin.assert:
+        that:
+          - manifest_stat.stat.exists
+          - manifest_stat.stat.checksum == loadnet_lock.inputs.manifest_sha256
+        fail_msg: "manifest changed since lockfile was generated; rerun netgen (make net-gen NET={{ net }})"
+  roles:
+    - common
+    - { role: firewall, when: apply_firewall | bool }
+    - load_reth
+    - ultramarine
+  post_tasks:
+    - name: Point /opt/loadnet/current to selected network
+      ansible.builtin.file:
+        src: "{{ loadnet_net_dir }}"
+        dest: "{{ loadnet_current }}"
+        state: link
+        force: true
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart load-reth instances (apply new env/artifacts)
+      ansible.builtin.systemd:
+        name: "load-reth@{{ item }}.service"
+        enabled: true
+        state: restarted
+      loop: "{{ loadnet_nodes }}"
+      when: restart_on_deploy | bool
+
+    - name: Restart ultramarine instances (apply new env/artifacts)
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        enabled: true
+        state: restarted
+      loop: "{{ loadnet_nodes }}"
+      when: restart_on_deploy | bool

@@ -1,0 +1,109 @@
+---
+- name: Ensure per-node directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ loadnet_net_dir }}/bundle/private/env"
+    - "{{ loadnet_net_dir }}/bundle/private/ultramarine/secrets"
+    - "/var/lib/ultramarine"
+
+- name: Copy per-node ultramarine env
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/env/ultramarine-{{ node_id }}.env"
+    dest: "{{ loadnet_net_dir }}/bundle/private/env/ultramarine-{{ node_id }}.env"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+
+- name: Check for per-node archiver secret env (controller-side)
+  ansible.builtin.stat:
+    path: "{{ net_dir }}/bundle/private/ultramarine/secrets/{{ node_id }}.env"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+    index_var: node_idx
+  register: archiver_secret_stats
+  delegate_to: localhost
+  become: false
+
+- name: Copy per-node archiver secret env (if present)
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/ultramarine/secrets/{{ node_id }}.env"
+    dest: "{{ loadnet_net_dir }}/bundle/private/ultramarine/secrets/{{ node_id }}.env"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+    index_var: node_idx
+  when: archiver_secret_stats.results[node_idx].stat.exists
+  no_log: true
+
+- name: Ensure per-node ultramarine home config dir exists
+  ansible.builtin.file:
+    path: "/var/lib/ultramarine/{{ node_id }}/config"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+
+- name: Copy ultramarine config.toml + genesis.json (managed)
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/ultramarine/homes/{{ node_id }}/config/{{ item }}"
+    dest: "/var/lib/ultramarine/{{ node_id }}/config/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ loadnet_nodes | product(['config.toml','genesis.json']) | list }}"
+  loop_control:
+    loop_var: pair
+  vars:
+    node_id: "{{ pair.0 }}"
+    item: "{{ pair.1 }}"
+
+- name: Check for priv_validator_key.json in bundle (controller-side)
+  ansible.builtin.stat:
+    path: "{{ net_dir }}/bundle/private/ultramarine/homes/{{ node_id }}/config/priv_validator_key.json"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+    index_var: node_idx
+  register: bundle_priv_validator_key_stats
+  delegate_to: localhost
+  become: false
+
+- name: Check if priv_validator_key.json already exists on host
+  ansible.builtin.stat:
+    path: "/var/lib/ultramarine/{{ node_id }}/config/priv_validator_key.json"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+    index_var: node_idx
+  register: host_priv_validator_key_stats
+
+- name: Seed priv_validator_key.json (never overwrite)
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/ultramarine/homes/{{ node_id }}/config/priv_validator_key.json"
+    dest: "/var/lib/ultramarine/{{ node_id }}/config/priv_validator_key.json"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+    index_var: node_idx
+  when:
+    - bundle_priv_validator_key_stats.results[node_idx].stat.exists
+    - not host_priv_validator_key_stats.results[node_idx].stat.exists
+  no_log: true
