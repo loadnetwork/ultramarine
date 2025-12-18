@@ -1,0 +1,18 @@
+---
+- name: Stop Load testnet services
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Stop ultramarine instances
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        state: stopped
+      loop: "{{ loadnet_nodes }}"
+      ignore_errors: true
+    - name: Stop load-reth instances
+      ansible.builtin.systemd:
+        name: "load-reth@{{ item }}.service"
+        state: stopped
+      loop: "{{ loadnet_nodes }}"
+      ignore_errors: true

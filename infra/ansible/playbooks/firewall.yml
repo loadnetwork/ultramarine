@@ -1,0 +1,20 @@
+---
+- name: Configure host firewall (ufw)
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    net_dir: "{{ net_dir }}"
+  tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - net is defined
+          - net_dir is defined
+
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', net_dir + '/network.lock.json') | from_json }}"
+
+  roles:
+    - firewall

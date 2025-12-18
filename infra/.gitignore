@@ -1,0 +1,13 @@
+# Generated bundles (public artifacts may be committed per-network; private artifacts never).
+networks/*/bundle/private/
+
+# Common secret material
+**/jwtsecret
+**/*.jwt
+**/*.key
+**/*.pem
+**/*.agekey
+**/secrets.env
+
+# Optional local SOPS config (if you don't want to commit it)
+.sops.yaml.local

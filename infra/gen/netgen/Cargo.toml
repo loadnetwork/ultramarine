@@ -1,0 +1,28 @@
+[package]
+name = "ultramarine-netgen"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "netgen"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+color-eyre = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+ultramarine-genesis = { path = "../../../crates/genesis" }
+ultramarine-types = { path = "../../../crates/types" }
+ultramarine-cli = { path = "../../../crates/cli" }
+which = "8.0.0"
+toml = { workspace = true }
+
+# YAML parsing for manifests/secrets.
+serde_yaml = "0.9.34"
+
+# Load-reth p2p key generation + enode derivation.
+k256 = { version = "0.13", features = ["ecdsa"] }

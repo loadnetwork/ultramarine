@@ -1,0 +1,9 @@
+warning: validator placement cannot be resilient to losing any single host with n=3 equal-weight validators (survival would require validators_per_host<=0). offenders={"host-0": 1, "host-1": 1, "host-2": 1}
+Error: 
+   0: [91mmissing archiver bearer tokens for validator nodes: ["node-0", "node-1", "node-2"]. Provide --secrets-file or pass --allow-missing-archiver-tokens (unsafe).[0m
+
+Location:
+   [35minfra/gen/netgen/src/main.rs[0m:[35m571[0m
+
+Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
+Run with RUST_BACKTRACE=full to include source snippets.

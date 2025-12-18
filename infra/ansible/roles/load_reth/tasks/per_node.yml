@@ -1,0 +1,29 @@
+---
+- name: Ensure per-node directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ loadnet_net_dir }}/bundle/private/env"
+    - "{{ loadnet_net_dir }}/bundle/private/load-reth/p2p-keys"
+    - "/var/lib/load-reth/{{ node_id }}"
+
+- name: Copy env file
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/env/load-reth-{{ node_id }}.env"
+    dest: "{{ loadnet_net_dir }}/bundle/private/env/load-reth-{{ node_id }}.env"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy p2p key
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/load-reth/p2p-keys/{{ node_id }}.key"
+    dest: "{{ loadnet_net_dir }}/bundle/private/load-reth/p2p-keys/{{ node_id }}.key"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true

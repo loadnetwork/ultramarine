@@ -1,0 +1,44 @@
+---
+- name: Ensure network directory exists
+  ansible.builtin.file:
+    path: "{{ loadnet_net_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy lockfile
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/network.lock.json"
+    dest: "{{ loadnet_net_dir }}/network.lock.json"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy public bundle (genesis + network.json)
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/public/"
+    dest: "{{ loadnet_net_dir }}/bundle/public/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+
+- name: Verify public genesis.json checksum matches lockfile
+  ansible.builtin.stat:
+    path: "{{ loadnet_net_dir }}/{{ loadnet_lock.artifacts.public.genesis_json.path }}"
+    checksum_algorithm: sha256
+  register: loadnet_genesis_stat
+
+- name: Assert public genesis.json checksum matches lockfile
+  ansible.builtin.assert:
+    that:
+      - loadnet_genesis_stat.stat.exists
+      - loadnet_genesis_stat.stat.checksum == loadnet_lock.artifacts.public.genesis_json.sha256
+    fail_msg: "genesis.json checksum mismatch on host; rerun net-deploy after regenerating artifacts"
+
+- name: Copy per-node load-reth env + p2p key
+  ansible.builtin.include_tasks: per_node.yml
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
