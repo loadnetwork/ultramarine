@@ -57,7 +57,7 @@ alloy-rpc-types-eth = { version = "1.0.23", default-features = false }
 alloy-rpc-types-txpool = { version = "1.0.23" }
 alloy-signer = { version = "1.0.23" }
 alloy-signer-local = { version = "1.0.23", features = ["keystore", "mnemonic"] }
-alloy-transport-http = { version = "1.0.23", features = ["jwt-auth"] }
+alloy-transport-http = { version = "1.0.23", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
 
 async-trait = "0.1.85"
 axum = "0.8.4"
@@ -87,7 +87,7 @@ prost-build = "0.13"
 prost-types = "0.13"
 rand = { version = "0.8.5", features = ["std_rng"] }
 redb = "3.0.0"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 safe_arith = { git = "https://github.com/sigp/lighthouse.git", package = "safe_arith", rev = "v7.1.0" }
 serde = "1.0.219"
 serde_json = "1.0.142"
