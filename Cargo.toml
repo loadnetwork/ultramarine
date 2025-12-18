@@ -3,10 +3,12 @@ resolver = "2"
 
 members = [
     "bin/ultramarine",
+    "infra/gen/netgen",
     "crates/blob_engine",
     "crates/cli",
     "crates/consensus",
     "crates/execution",
+    "crates/genesis",
     "crates/node",
     "crates/test",
     "crates/test_support",

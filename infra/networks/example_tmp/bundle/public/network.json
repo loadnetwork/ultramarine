@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "netgen",
+    "version": "0.1.0"
+  },
+  "network": {
+    "name": "example",
+    "chain_id": 16383
+  },
+  "inputs": {
+    "manifest_path": "infra/manifests/example.yaml",
+    "manifest_sha256": "857b1028b21194e4e75ab95bfaf6bf5aa6591c6719523826b96f1e95ff0bc681"
+  },
+  "policy": {
+    "engine": "ipc-only",
+    "sync_enabled": true,
+    "metrics_bind": "127.0.0.1"
+  },
+  "hosts": [
+    {
+      "id": "host-0",
+      "public_ip": "203.0.113.10",
+      "ssh_user": "ubuntu"
+    },
+    {
+      "id": "host-1",
+      "public_ip": "203.0.113.11",
+      "ssh_user": "ubuntu"
+    },
+    {
+      "id": "host-2",
+      "public_ip": "203.0.113.12",
+      "ssh_user": "ubuntu"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node-0",
+      "host": "host-0",
+      "role": "validator",
+      "images": {
+        "ultramarine": "ultramarine:local",
+        "load_reth": "docker.io/loadnetwork/load-reth:v0.1.2"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-0/engine.ipc"
+      },
+      "ports": {
+        "el_http": 8545,
+        "el_p2p": 30303,
+        "el_metrics": 9001,
+        "cl_p2p": 27000,
+        "cl_metrics": 29000
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-0.key",
+        "enode": "enode://6b49a6676952956d1995b8d4e3d006a9f46941a5a869da8060d907691f77649d6f48337a77ccbb03ad953344886bad3d8e5bdd4b574768ce748ba2f6db53ac63@203.0.113.10:30303",
+        "bootnodes": [
+          "enode://7226cdabd7cbe15fe29655cde6dd5d4ca1b0c40fecaf7a4fe54e6b6169238efb6f1100e5f0e1a746bdfd4972bdfef21627ec056756a6ccfb178b38b130662226@203.0.113.11:31303",
+          "enode://79a053618e831d246ca210909a7fb089b06c08d6ca598810619d24aebf0d2655ef9ad8273ac79f84c10c5c424ed7890f077351938cc9b66c5937d1342b67c637@203.0.113.12:32303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "example",
+        "bearer_token_present": false
+      }
+    },
+    {
+      "id": "node-1",
+      "host": "host-1",
+      "role": "validator",
+      "images": {
+        "ultramarine": "ultramarine:local",
+        "load_reth": "docker.io/loadnetwork/load-reth:v0.1.2"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-1/engine.ipc"
+      },
+      "ports": {
+        "el_http": 9545,
+        "el_p2p": 31303,
+        "el_metrics": 10001,
+        "cl_p2p": 28000,
+        "cl_metrics": 30000
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-1.key",
+        "enode": "enode://7226cdabd7cbe15fe29655cde6dd5d4ca1b0c40fecaf7a4fe54e6b6169238efb6f1100e5f0e1a746bdfd4972bdfef21627ec056756a6ccfb178b38b130662226@203.0.113.11:31303",
+        "bootnodes": [
+          "enode://6b49a6676952956d1995b8d4e3d006a9f46941a5a869da8060d907691f77649d6f48337a77ccbb03ad953344886bad3d8e5bdd4b574768ce748ba2f6db53ac63@203.0.113.10:30303",
+          "enode://79a053618e831d246ca210909a7fb089b06c08d6ca598810619d24aebf0d2655ef9ad8273ac79f84c10c5c424ed7890f077351938cc9b66c5937d1342b67c637@203.0.113.12:32303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "example",
+        "bearer_token_present": false
+      }
+    },
+    {
+      "id": "node-2",
+      "host": "host-2",
+      "role": "validator",
+      "images": {
+        "ultramarine": "ultramarine:local",
+        "load_reth": "docker.io/loadnetwork/load-reth:v0.1.2"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-2/engine.ipc"
+      },
+      "ports": {
+        "el_http": 10545,
+        "el_p2p": 32303,
+        "el_metrics": 11001,
+        "cl_p2p": 29000,
+        "cl_metrics": 31000
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-2.key",
+        "enode": "enode://79a053618e831d246ca210909a7fb089b06c08d6ca598810619d24aebf0d2655ef9ad8273ac79f84c10c5c424ed7890f077351938cc9b66c5937d1342b67c637@203.0.113.12:32303",
+        "bootnodes": [
+          "enode://6b49a6676952956d1995b8d4e3d006a9f46941a5a869da8060d907691f77649d6f48337a77ccbb03ad953344886bad3d8e5bdd4b574768ce748ba2f6db53ac63@203.0.113.10:30303",
+          "enode://7226cdabd7cbe15fe29655cde6dd5d4ca1b0c40fecaf7a4fe54e6b6169238efb6f1100e5f0e1a746bdfd4972bdfef21627ec056756a6ccfb178b38b130662226@203.0.113.11:31303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "example",
+        "bearer_token_present": false
+      }
+    }
+  ],
+  "artifacts": {
+    "public": {
+      "genesis_json": {
+        "path": "bundle/public/genesis.json",
+        "sha256": "1643cbd6641602c85602871327a2e38924de95cabd64682e0d7d2b0080348fc7"
+      }
+    }
+  }
+}

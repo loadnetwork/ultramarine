@@ -1,0 +1,42 @@
+[Unit]
+Description=load-reth (%i)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+RuntimeDirectory=load-reth/%i
+RuntimeDirectoryMode=0700
+
+WorkingDirectory=/opt/loadnet/current
+
+EnvironmentFile=/opt/loadnet/current/bundle/private/env/load-reth-%i.env
+
+ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/$LOAD_RETH_GENESIS_JSON"'
+ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/$LOAD_RETH_P2P_KEY_PATH"'
+
+ExecStart=/usr/bin/docker run --rm --name load-reth-%i --network host \
+  -v /var/lib/load-reth/%i:/data/load-reth \
+  -v /opt/loadnet/current/$LOAD_RETH_GENESIS_JSON:/assets/genesis.json:ro \
+  -v /opt/loadnet/current/$LOAD_RETH_P2P_KEY_PATH:/assets/p2p.key:ro \
+  -v /run/load-reth/%i:/run/load-reth/%i \
+  $LOAD_RETH_IMAGE node -d \
+    --datadir=/data/load-reth \
+    --chain=/assets/genesis.json \
+    --http --http.addr=127.0.0.1 --http.port=$LOAD_RETH_HTTP_PORT \
+    --metrics=127.0.0.1:$LOAD_RETH_METRICS_PORT \
+    --port=$LOAD_RETH_P2P_PORT --discovery.port=$LOAD_RETH_P2P_PORT \
+    --nat=extip:$LOAD_RETH_PUBLIC_IP \
+    --p2p-secret-key=/assets/p2p.key \
+    --bootnodes=$LOAD_RETH_BOOTNODES \
+    --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH
+
+ExecStop=/usr/bin/docker stop -t 10 load-reth-%i
+
+[Install]
+WantedBy=multi-user.target

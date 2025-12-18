@@ -1,0 +1,43 @@
+---
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+
+- name: Ensure SSH stays allowed (never lock out the operator)
+  ansible.builtin.command: "ufw allow {{ ansible_port | default(22) }}/tcp"
+  changed_when: false
+
+- name: Set UFW default policies (safe baseline)
+  ansible.builtin.command: "ufw default {{ item }}"
+  loop:
+    - deny incoming
+    - allow outgoing
+  changed_when: false
+
+- name: Build node->ports map (from lockfile)
+  ansible.builtin.set_fact:
+    loadnet_ports_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='ports'))) }}"
+
+- name: Open required P2P ports for nodes on this host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ufw allow "{{ loadnet_ports_by_node[node_id].el_p2p }}/tcp"
+    ufw allow "{{ loadnet_ports_by_node[node_id].el_p2p }}/udp"
+    ufw allow "{{ loadnet_ports_by_node[node_id].cl_p2p }}/tcp"
+    ufw allow "{{ loadnet_ports_by_node[node_id].cl_mempool }}/tcp"
+  args:
+    executable: /bin/bash
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+  changed_when: false
+
+- name: Enable ufw (idempotent)
+  ansible.builtin.command: "ufw --force enable"
+  changed_when: false
+
+- name: Show ufw status
+  ansible.builtin.command: "ufw status verbose"
+  changed_when: false

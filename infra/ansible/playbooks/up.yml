@@ -1,0 +1,26 @@
+---
+- name: Start Load testnet services
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    loadnet_root: /opt/loadnet
+    loadnet_current: "{{ loadnet_root }}/current"
+  tasks:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart load-reth instances (apply current env/artifacts)
+      ansible.builtin.systemd:
+        name: "load-reth@{{ item }}.service"
+        enabled: true
+        state: restarted
+      loop: "{{ loadnet_nodes }}"
+
+    - name: Restart ultramarine instances (apply current env/artifacts)
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        enabled: true
+        state: restarted
+      loop: "{{ loadnet_nodes }}"
