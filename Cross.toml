@@ -1,10 +1,7 @@
 [build]
 pre-build = [
-    # Use HTTPS for package sources
+    # Install certificates and configure APT retries/timeouts for robustness.
     "apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates",
-    "find /etc/apt/ -type f \\( -name '*.list' -o -name '*.sources' \\) -exec sed -i 's|http://|https://|g' {} +",
-
-    # Configure APT retries and timeouts to handle network issues
     "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries",
     "echo 'Acquire::http::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
     "echo 'Acquire::ftp::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
@@ -14,3 +11,9 @@ pre-build = [
     # recommended clang versions for the given cross and bindgen version.
     "apt-get update && apt-get install --assume-yes --no-install-recommends llvm-dev libclang-dev clang libc6-dev",
 ]
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:latest"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:latest"
