@@ -13,7 +13,9 @@ fn main() -> Result<()> {
     if env::var("PROTOC").is_err() {
         let protoc = protoc_bin_vendored::protoc_bin_path()
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
-        env::set_var("PROTOC", protoc);
+        unsafe {
+            env::set_var("PROTOC", protoc);
+        }
     }
 
     let mut config = prost_build::Config::new();
