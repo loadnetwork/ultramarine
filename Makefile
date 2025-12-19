@@ -678,16 +678,29 @@ itest-node-archiver: ## Run Tier 1 archiver/prune full-node integration tests.
 NET ?= example
 SECRETS_FILE ?=
 LINES ?= 200
+LIMIT ?=
 NET_DIR ?= infra/networks/$(NET)
 ANSIBLE_CONFIG_PATH ?= infra/ansible/ansible.cfg
 ANSIBLE_INVENTORY ?= $(NET_DIR)/inventory.yml
 ANSIBLE_PLAYBOOKS ?= infra/ansible/playbooks
 RESTART_ON_DEPLOY ?= true
 APPLY_FIREWALL ?= false
+STORAGE_WIPE ?= false
+DATA_MOUNTPOINT ?= /var/lib/loadnet
+DATA_SOURCE_MOUNTPOINT ?= /home
+DATA_SOURCE_DIR ?= $(DATA_SOURCE_MOUNTPOINT)/loadnet
+DATA_DEVICES ?=
+DATA_RAID_LEVEL ?= 1
+MOVE_DOCKER_DATAROOT ?= false
+DOCKER_DATAROOT ?= $(DATA_MOUNTPOINT)/docker
 
 .PHONY: net-validate
 net-validate: ## Validate infra manifest (NET=<net>).
 	cargo run --quiet -p ultramarine-netgen --bin netgen -- validate --manifest infra/manifests/$(NET).yaml
+
+.PHONY: net-plan
+net-plan: ## Generate infra lockfile + inventory without secrets (dry-run for bootstrap) (NET=<net>).
+	cargo run --quiet -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/$(NET).yaml --out-dir infra/networks/$(NET) --allow-missing-archiver-tokens
 
 .PHONY: net-gen
 net-gen: ## Generate infra lockfile + bundle (NET=<net>, optional SECRETS_FILE=<path>).
@@ -699,43 +712,48 @@ net-gen: ## Generate infra lockfile + bundle (NET=<net>, optional SECRETS_FILE=<
 
 .PHONY: net-deploy
 net-deploy: ## Deploy artifacts + systemd units via Ansible (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/deploy.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/deploy.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR) restart_on_deploy=$(RESTART_ON_DEPLOY) apply_firewall=$(APPLY_FIREWALL)"
 
 .PHONY: net-up
 net-up: ## Start services via systemd (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-down
 net-down: ## Stop services via systemd (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-status
 net-status: ## Show systemd status for services (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/status.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/status.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-logs
 net-logs: ## Tail systemd logs (NET=<net>, NET_DIR=<dir>, LINES=<n>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/logs.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/logs.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR) lines=$(LINES)"
 
 .PHONY: net-health
 net-health: ## Health check: services active + Engine IPC socket + height moving (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-doctor
 net-doctor: ## Preflight diagnostics (time sync, limits, units, listeners) (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-firewall
 net-firewall: ## Apply host firewall (UFW) rules for required P2P ports (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-storage
+net-storage: ## Storage bootstrap (non-destructive by default; set STORAGE_WIPE=true + DATA_DEVICES=/dev/disk/by-id/...) (NET=<net>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/storage.yml \
+		-e "loadnet_storage_wipe=$(STORAGE_WIPE) loadnet_data_mountpoint=$(DATA_MOUNTPOINT) loadnet_data_source_mountpoint=$(DATA_SOURCE_MOUNTPOINT) loadnet_data_source_dir=$(DATA_SOURCE_DIR) loadnet_data_devices=$(DATA_DEVICES) loadnet_data_raid_level=$(DATA_RAID_LEVEL) loadnet_move_docker_dataroot=$(MOVE_DOCKER_DATAROOT) loadnet_docker_dataroot=$(DOCKER_DATAROOT)"
 
 .PHONY: infra-checks
 infra-checks: ## Run infra checks (netgen build + ansible syntax-checks if available).
@@ -746,6 +764,7 @@ infra-checks: ## Run infra checks (netgen build + ansible syntax-checks if avail
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/storage.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml -e "net=$(NET) net_dir=$(NET_DIR)"; \
 	else \

@@ -1,0 +1,32 @@
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+    # Use HTTPS for package sources
+    "apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*",
+    "find /etc/apt/ -type f \\( -name '*.list' -o -name '*.sources' \\) -exec sed -i 's|http://|https://|g' {} +",
+
+    # Configure APT retries and timeouts to handle transient network issues
+    "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries",
+    "echo 'Acquire::http::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
+    "echo 'Acquire::ftp::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
+
+    # OpenSSL development libraries (required by native-tls/openssl-sys) + pkg-config
+    "apt-get update && apt-get install --assume-yes --no-install-recommends libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*",
+]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    # Use HTTPS for package sources
+    "apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*",
+    "find /etc/apt/ -type f \\( -name '*.list' -o -name '*.sources' \\) -exec sed -i 's|http://|https://|g' {} +",
+
+    # Configure APT retries and timeouts to handle transient network issues
+    "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries",
+    "echo 'Acquire::http::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
+    "echo 'Acquire::ftp::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
+
+    # OpenSSL development libraries (required by native-tls/openssl-sys) + pkg-config
+    "apt-get update && apt-get install --assume-yes --no-install-recommends libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*",
+]
+
+[build.env]
+passthrough = ["JEMALLOC_SYS_WITH_LG_PAGE"]

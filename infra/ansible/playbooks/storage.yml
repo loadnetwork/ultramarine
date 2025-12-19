@@ -1,0 +1,21 @@
+---
+- name: Storage bootstrap (validator hosts)
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    loadnet_data_mountpoint: "{{ loadnet_data_mountpoint | default('/var/lib/loadnet') }}"
+    # Optional: if the data volume is already mounted somewhere else (common in provider images),
+    # bind-mount it into loadnet_data_mountpoint in non-destructive mode.
+    loadnet_data_source_mountpoint: "{{ loadnet_data_source_mountpoint | default('/home') }}"
+    loadnet_data_source_dir: "{{ loadnet_data_source_dir | default(loadnet_data_source_mountpoint + '/loadnet') }}"
+    loadnet_storage_wipe: "{{ loadnet_storage_wipe | default(false) }}"
+    loadnet_data_devices: "{{ loadnet_data_devices | default([]) }}"
+    loadnet_data_raid_level: "{{ loadnet_data_raid_level | default(1) }}"
+    loadnet_md_device: "{{ loadnet_md_device | default('/dev/md/loadnet-data') }}"
+    loadnet_md_name: "{{ loadnet_md_name | default('loadnet-data') }}"
+    loadnet_fs_type: "{{ loadnet_fs_type | default('xfs') }}"
+    loadnet_move_docker_dataroot: "{{ loadnet_move_docker_dataroot | default(false) }}"
+    loadnet_docker_dataroot: "{{ loadnet_docker_dataroot | default(loadnet_data_mountpoint + '/docker') }}"
+  roles:
+    - storage

@@ -66,6 +66,12 @@ Policy:
 - Opens only P2P ports required for CL/EL connectivity.
 - Keeps RPC/metrics closed by default (should remain bound to localhost).
 
+## Storage note
+
+For validator hosts, apply storage bootstrap before deploy so chain state lives on the data volume:
+
+- `make net-storage NET=<net> ...`
+
 ## Notes
 
 - If you change `ports.allocation` / `host_block_stride`, update firewall rules accordingly.

@@ -1,0 +1,258 @@
+---
+- name: Install storage dependencies
+  ansible.builtin.apt:
+    name:
+      - mdadm
+      - xfsprogs
+      - rsync
+    state: present
+    update_cache: true
+
+- name: Assert required inputs for destructive mode
+  ansible.builtin.assert:
+    that:
+      - loadnet_storage_wipe | bool
+      - loadnet_data_devices is iterable
+      - (loadnet_data_devices | length) >= 1
+    fail_msg: "Destructive storage bootstrap requires loadnet_storage_wipe=true and explicit loadnet_data_devices=[/dev/disk/by-id/...]"
+  when: loadnet_storage_wipe | bool
+
+- name: Ensure mountpoint exists
+  ansible.builtin.file:
+    path: "{{ loadnet_data_mountpoint }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create mdadm array (RAID1 or RAID0) (destructive)
+  ansible.builtin.command: >-
+    mdadm --create {{ loadnet_md_device }}
+    --name {{ loadnet_md_name }}
+    --level {{ loadnet_data_raid_level }}
+    --raid-devices {{ loadnet_data_devices | length }}
+    {{ loadnet_data_devices | join(' ') }}
+  when:
+    - loadnet_storage_wipe | bool
+    - (loadnet_data_devices | length) >= 2
+  changed_when: true
+
+- name: Persist mdadm config (destructive)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    mdadm --detail --scan | tee /etc/mdadm/mdadm.conf >/dev/null
+    update-initramfs -u
+  args:
+    executable: /bin/bash
+  when:
+    - loadnet_storage_wipe | bool
+    - (loadnet_data_devices | length) >= 2
+  changed_when: true
+
+- name: Create filesystem on md device (destructive)
+  ansible.builtin.command: "mkfs.{{ loadnet_fs_type }} -f {{ loadnet_md_device }}"
+  when:
+    - loadnet_storage_wipe | bool
+    - (loadnet_data_devices | length) >= 2
+  changed_when: true
+
+- name: Create filesystem on single device (destructive)
+  ansible.builtin.command: "mkfs.{{ loadnet_fs_type }} -f {{ loadnet_data_devices[0] }}"
+  when:
+    - loadnet_storage_wipe | bool
+    - (loadnet_data_devices | length) == 1
+  changed_when: true
+
+- name: Get filesystem UUID
+  ansible.builtin.command: "blkid -s UUID -o value {{ (loadnet_data_devices | length) >= 2 | ternary(loadnet_md_device, loadnet_data_devices[0]) }}"
+  register: loadnet_fs_uuid
+  changed_when: false
+  when: loadnet_storage_wipe | bool
+
+- name: Persist fstab entry (destructive)
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    create: true
+    line: "UUID={{ loadnet_fs_uuid.stdout }} {{ loadnet_data_mountpoint }} {{ loadnet_fs_type }} defaults,noatime 0 2"
+    regexp: "^UUID={{ loadnet_fs_uuid.stdout | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+"
+  when: loadnet_storage_wipe | bool
+
+- name: Mount data volume (destructive)
+  ansible.builtin.command: "mount {{ loadnet_data_mountpoint }}"
+  when: loadnet_storage_wipe | bool
+  changed_when: true
+
+- name: Verify data mount is present (after destructive bootstrap)
+  ansible.builtin.command: "findmnt -n {{ loadnet_data_mountpoint }}"
+  changed_when: false
+  when: loadnet_storage_wipe | bool
+
+- name: Verify data mount is present (non-destructive mode)
+  ansible.builtin.command: "findmnt -n {{ loadnet_data_mountpoint }}"
+  changed_when: false
+  when: not (loadnet_storage_wipe | bool)
+  register: mount_check
+
+- name: Get root filesystem source device (for safety checks)
+  ansible.builtin.command: "findmnt -n -o SOURCE /"
+  changed_when: false
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+  register: root_source
+
+- name: Check whether the source mountpoint is mounted (auto-adopt)
+  ansible.builtin.command: "findmnt -n {{ loadnet_data_source_mountpoint }}"
+  changed_when: false
+  failed_when: false
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+  register: source_mount_check
+
+- name: Get source mountpoint backing device (auto-adopt)
+  ansible.builtin.command: "findmnt -n -o SOURCE {{ loadnet_data_source_mountpoint }}"
+  changed_when: false
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - source_mount_check.rc == 0
+  register: source_device
+
+- name: Fail safely if source mountpoint is on the root filesystem (refuse to use OS disk)
+  ansible.builtin.fail:
+    msg: >-
+      Refusing to auto-adopt {{ loadnet_data_source_mountpoint }} because it appears to be on the root filesystem
+      (SOURCE {{ source_device.stdout }} == {{ root_source.stdout }}). Mount a separate data volume at {{ loadnet_data_mountpoint }}
+      or provide explicit loadnet_data_devices + loadnet_storage_wipe=true.
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - source_mount_check.rc == 0
+    - source_device.stdout == root_source.stdout
+
+- name: Ensure source dir exists (auto-adopt)
+  ansible.builtin.file:
+    path: "{{ loadnet_data_source_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - source_mount_check.rc == 0
+    - source_device.stdout != root_source.stdout
+
+- name: Bind-mount source dir into data mountpoint (auto-adopt)
+  ansible.builtin.command: "mount --bind {{ loadnet_data_source_dir }} {{ loadnet_data_mountpoint }}"
+  changed_when: true
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - source_mount_check.rc == 0
+    - source_device.stdout != root_source.stdout
+
+- name: Persist bind-mount in fstab (auto-adopt)
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    create: true
+    line: "{{ loadnet_data_source_dir }} {{ loadnet_data_mountpoint }} none bind,x-systemd.requires-mounts-for={{ loadnet_data_source_mountpoint }} 0 0"
+    regexp: "^{{ loadnet_data_source_dir | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+none\\s+"
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - source_mount_check.rc == 0
+    - source_device.stdout != root_source.stdout
+
+- name: Re-check data mount is present after auto-adopt
+  ansible.builtin.command: "findmnt -n {{ loadnet_data_mountpoint }}"
+  changed_when: false
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+  register: mount_check_after
+
+- name: Fail with guidance if data mount is missing (non-destructive mode)
+  ansible.builtin.fail:
+    msg: >-
+      {{ loadnet_data_mountpoint }} is not mounted.
+      Either mount your data volume there, or run net-storage with loadnet_storage_wipe=true and explicit loadnet_data_devices.
+      If your provider image mounts the data volume elsewhere, set loadnet_data_source_mountpoint (default: /home)
+      and/or loadnet_data_source_dir (default: /home/loadnet).
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - mount_check_after.rc != 0
+
+- name: Ensure chain state dirs exist under data mount
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ loadnet_data_mountpoint }}/load-reth"
+    - "{{ loadnet_data_mountpoint }}/ultramarine"
+
+- name: Symlink /var/lib/load-reth to data mount
+  ansible.builtin.file:
+    src: "{{ loadnet_data_mountpoint }}/load-reth"
+    dest: /var/lib/load-reth
+    state: link
+    force: true
+
+- name: Symlink /var/lib/ultramarine to data mount
+  ansible.builtin.file:
+    src: "{{ loadnet_data_mountpoint }}/ultramarine"
+    dest: /var/lib/ultramarine
+    state: link
+    force: true
+
+- name: Ensure Docker data-root dir exists (optional)
+  ansible.builtin.file:
+    path: "{{ loadnet_docker_dataroot }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0711"
+  when: loadnet_move_docker_dataroot | bool
+
+- name: Configure Docker data-root (optional)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {
+        "data-root": "{{ loadnet_docker_dataroot }}"
+      }
+  register: docker_daemon_json
+  when: loadnet_move_docker_dataroot | bool
+
+- name: Stop docker before moving data-root (optional)
+  ansible.builtin.systemd:
+    name: docker
+    state: stopped
+  when:
+    - loadnet_move_docker_dataroot | bool
+    - docker_daemon_json.changed
+
+- name: Migrate existing docker state (optional, best-effort)
+  ansible.builtin.command: "rsync -aHAX --delete /var/lib/docker/ {{ loadnet_docker_dataroot }}/"
+  when:
+    - loadnet_move_docker_dataroot | bool
+    - docker_daemon_json.changed
+  changed_when: true
+  failed_when: false
+
+- name: Start docker after moving data-root (optional)
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - loadnet_move_docker_dataroot | bool
+    - docker_daemon_json.changed
