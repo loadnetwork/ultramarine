@@ -1,0 +1,60 @@
+schema_version: 1
+
+network:
+  name: alphanet
+  chain_id: 16384
+
+# Container images pinned by tag (MVP). M4 can add optional digests.
+images:
+  ultramarine: "ultramarine:local"
+  load_reth: "docker.io/loadnetwork/load-reth:v0.1.2"
+
+# Hosts are the failure domains. For public testnets, these should be public IPs/DNS.
+hosts:
+  - id: lon2-0
+    public_ip: "67.213.117.143"
+    ssh_user: ubuntu
+  - id: fra2-0
+    public_ip: "67.213.121.57"
+    ssh_user: ubuntu
+
+# Nodes are CL+EL pairs and must be co-located (one node references one host).
+nodes:
+  - id: node-0
+    host: lon2-0
+    role: validator
+  - id: node-1
+    host: fra2-0
+    role: validator
+
+# Engine API policy for deploys: IPC-only.
+engine:
+  mode: ipc
+  ipc_path_template: "/run/load-reth/{node_id}/engine.ipc"
+
+# Port allocation is deterministic. "host-block" is easiest to operate.
+ports:
+  allocation: host-block
+  host_block_stride: 1000
+  el:
+    http: 8545
+    p2p: 30303
+    metrics: 9001
+  cl:
+    p2p: 27000
+    mempool: 28000
+    metrics: 29000
+
+# ValueSync must be enabled for multi-host networks.
+sync:
+  enabled: true
+
+# Validators require archiver. The generator enforces presence of provider+token.
+archiver:
+  enabled: true
+  provider_url: "https://archiver.example.com"
+  provider_id: "loads3"
+
+# Metrics exposure policy: "localhost" is safest for public testnets without centralized Prometheus.
+exposure:
+  metrics_bind: "127.0.0.1"

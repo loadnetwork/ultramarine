@@ -82,6 +82,31 @@
           - unit_stats.results[1].stat.exists
         fail_msg: "missing systemd unit template(s); rerun net-deploy"
 
+    - name: Check data mount exists (/var/lib/loadnet)
+      ansible.builtin.command: "findmnt -n /var/lib/loadnet"
+      changed_when: false
+      register: findmnt_loadnet
+      failed_when: false
+
+    - name: Warn if /var/lib/loadnet is not mounted
+      ansible.builtin.debug:
+        msg: "/var/lib/loadnet is not mounted (recommended for validators). Run net-storage before go-live."
+      when: findmnt_loadnet.rc != 0
+
+    - name: Check docker data-root (if docker is running)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker info --format '{{"{{.DockerRootDir}}"}}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: docker_root
+      failed_when: false
+
+    - name: Show docker data-root
+      ansible.builtin.debug:
+        msg: "docker data-root: {{ docker_root.stdout | default('unknown') }}"
+
     - name: Build node->ports map (from lockfile)
       ansible.builtin.set_fact:
         loadnet_ports_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='ports'))) }}"
