@@ -16,7 +16,7 @@ Netgen is a Rust binary in the workspace (source at `infra/gen/netgen/`).
   - `cargo run -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/<net>.yaml --out-dir infra/networks/<net>`
 - Optionally provides per-node secrets (plaintext or sops-encrypted):
   - `cargo run -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/<net>.yaml --out-dir infra/networks/<net> --secrets-file infra/networks/<net>/secrets.sops.yaml`
-  - By default, `gen` fails if any validator is missing an archiver bearer token (required for a bootable testnet). Use `--allow-missing-archiver-tokens` only for non-bootable dry-runs.
+  - By default, `gen` fails if any validator is missing an archiver bearer token (required for a bootable testnet). For non-bootable dry-runs (e.g. to bootstrap storage), use `make net-plan NET=<net>` (or pass `--allow-missing-archiver-tokens` directly).
 
 Generated outputs (current):
 
@@ -49,6 +49,7 @@ Host layout:
 
 Operator commands (from `ultramarine/`):
 
+- Dry-run / bootstrap (no secrets yet): `make net-plan NET=<net>` (generates inventory/lockfile/bundles but the network won’t be bootable without archiver tokens for validators)
 - Generate artifacts: `make net-gen NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
 - Deploy to hosts (default: restarts services to apply new config): `make net-deploy NET=<net>`
 - Start/restart: `make net-up NET=<net>` / Stop: `make net-down NET=<net>`
@@ -56,10 +57,18 @@ Operator commands (from `ultramarine/`):
 - Health: `make net-health NET=<net>`
 - Preflight: `make net-doctor NET=<net>`
 - Firewall: `make net-firewall NET=<net>` (or `make net-deploy NET=<net> APPLY_FIREWALL=true`)
+- Storage bootstrap: `make net-storage NET=<net>` (see notes below)
+- Limit any Ansible run to a single host: add `LIMIT=<host_id>` (e.g. `make net-storage NET=<net> LIMIT=lon2-0`)
 - Local checks: `make infra-checks NET=<net>`
 
 Notes:
 
+- Storage bootstrap is intentionally separate from deploy.
+- In non-destructive mode, `net-storage` expects the data volume to be mounted at `DATA_MOUNTPOINT` (default: `/var/lib/loadnet`).
+- If your provider image mounts the data volume elsewhere (common: `/home`), `net-storage` auto-adopts it by bind-mounting `DATA_SOURCE_DIR` (default: `/home/loadnet`) into `DATA_MOUNTPOINT` and persists it in `/etc/fstab` with systemd mount ordering (`x-systemd.requires-mounts-for=/home`).
+- Destructive provisioning requires explicit device IDs and an explicit flag, e.g.:
+  - `make net-storage NET=<net> STORAGE_WIPE=true DATA_DEVICES="['/dev/disk/by-id/nvme-...','/dev/disk/by-id/nvme-...']" DATA_RAID_LEVEL=1 MOVE_DOCKER_DATAROOT=true`
+- You don’t need to care about the mdadm “device number” (e.g. `/dev/md127`): the playbook defaults to creating `/dev/md/loadnet-data` and mounts by filesystem UUID in `/etc/fstab`. The only per-host detail is selecting the underlying NVMe devices (by-id is safest); discover them with e.g. `ssh <host> 'ls -la /dev/disk/by-id | grep nvme | grep -v part'`.
 - `net-deploy` fails fast if `infra/manifests/<net>.yaml` changed without regenerating `network.lock.json`.
 - To deploy without restarting running nodes: `make net-deploy NET=<net> RESTART_ON_DEPLOY=false`
 - `net-deploy` verifies `bundle/public/genesis.json` checksum against the lockfile on each host.
