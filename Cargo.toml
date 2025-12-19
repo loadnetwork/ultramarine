@@ -85,6 +85,7 @@ merkle_proof = { git = "https://github.com/sigp/lighthouse.git", package = "merk
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"
+protoc-bin-vendored = "3.2.0"
 rand = { version = "0.8.5", features = ["std_rng"] }
 redb = "3.0.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
