@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 
-use std::io::Result;
-use std::env;
+use std::{env, io::Result};
 
 fn main() -> Result<()> {
     let protos = &["proto/consensus.proto", "proto/sync.proto", "proto/liveness.proto"];
@@ -11,8 +10,7 @@ fn main() -> Result<()> {
     }
 
     if env::var("PROTOC").is_err() {
-        let protoc = protoc_bin_vendored::protoc_bin_path()
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+        let protoc = protoc_bin_vendored::protoc_bin_path().map_err(std::io::Error::other)?;
         unsafe {
             env::set_var("PROTOC", protoc);
         }

@@ -2929,7 +2929,7 @@ async fn mock_multipart_upload_handler(
     if tags.get("load").map(String::as_str) != Some("true") {
         return parse_error("load");
     }
-    if tags.get("load.network").map(String::as_str) != Some("fibernet") {
+    if tags.get("load.network").map(String::as_str) != Some("fibernet-beta") {
         return parse_error("load.network");
     }
 

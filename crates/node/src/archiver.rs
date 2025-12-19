@@ -486,7 +486,7 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
 
         let tags = vec![
             Tag { key: "load", value: "true".to_string() },
-            Tag { key: "load.network", value: "fibernet".to_string() },
+            Tag { key: "load.network", value: "fibernet-beta".to_string() },
             Tag { key: "load.kind", value: "blob".to_string() },
             Tag { key: "load.height", value: params.height.as_u64().to_string() },
             Tag { key: "load.round", value: params.round.as_i64().to_string() },
