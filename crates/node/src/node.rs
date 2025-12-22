@@ -524,12 +524,7 @@ impl Node for App {
             }
         });
 
-        Ok(Handle {
-            app: app_handle,
-            engine: engine_handle,
-            tx_event,
-            archiver: archiver_handle,
-        })
+        Ok(Handle { app: app_handle, engine: engine_handle, tx_event, archiver: archiver_handle })
     }
 
     async fn run(self) -> eyre::Result<()> {
