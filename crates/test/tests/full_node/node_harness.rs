@@ -2331,7 +2331,15 @@ impl NetworkHarness {
                                 debug_log!("node {} event {}", node_index, event);
                                 record_event(&log_clone, format!("{event}"));
                             }
-                            Err(e) => break Err(eyre::eyre!("event channel closed: {e}")),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                record_event(
+                                    &log_clone,
+                                    format!("event channel lagged; skipped {skipped} events"),
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                break Err(eyre::eyre!("event channel closed"))
+                            }
                         }
                     }
                     _ = sleep(Duration::from_millis(100)) => {
@@ -2485,7 +2493,7 @@ impl NetworkHarness {
         self.ensure_shutdown().await?;
         let node =
             self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
-        let blob_store = RocksDbBlobStore::open(node.home.path().join("blob_store.db"))
+        let blob_store = RocksDbBlobStore::open_read_only(node.home.path().join("blob_store.db"))
             .wrap_err("open blob store")?;
         let metrics = BlobEngineMetrics::new();
         let engine = BlobEngineImpl::new(blob_store, metrics)?;
