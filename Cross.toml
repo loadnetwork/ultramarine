@@ -1,32 +1,19 @@
-[target.x86_64-unknown-linux-gnu]
+[build]
 pre-build = [
-    # Use HTTPS for package sources
-    "apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*",
-    "find /etc/apt/ -type f \\( -name '*.list' -o -name '*.sources' \\) -exec sed -i 's|http://|https://|g' {} +",
+  # Install certificates and configure APT retries/timeouts for robustness.
+  "apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates",
+  "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries",
+  "echo 'Acquire::http::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
+  "echo 'Acquire::ftp::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
 
-    # Configure APT retries and timeouts to handle transient network issues
-    "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries",
-    "echo 'Acquire::http::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
-    "echo 'Acquire::ftp::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
-
-    # OpenSSL development libraries (required by native-tls/openssl-sys) + pkg-config
-    "apt-get update && apt-get install --assume-yes --no-install-recommends libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*",
+  # rust-bindgen dependencies: llvm-dev libclang-dev (>= 10) clang (>= 10)
+  # See: https://github.com/cross-rs/cross/wiki/FAQ#using-clang--bindgen for
+  # recommended clang versions for the given cross and bindgen version.
+  "apt-get update && apt-get install --assume-yes --no-install-recommends llvm-dev libclang-dev clang libc6-dev protobuf-compiler pkg-config",
 ]
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 
 [target.aarch64-unknown-linux-gnu]
-pre-build = [
-    # Use HTTPS for package sources
-    "apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*",
-    "find /etc/apt/ -type f \\( -name '*.list' -o -name '*.sources' \\) -exec sed -i 's|http://|https://|g' {} +",
-
-    # Configure APT retries and timeouts to handle transient network issues
-    "echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries",
-    "echo 'Acquire::http::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
-    "echo 'Acquire::ftp::Timeout \"60\";' >> /etc/apt/apt.conf.d/80-retries",
-
-    # OpenSSL development libraries (required by native-tls/openssl-sys) + pkg-config
-    "apt-get update && apt-get install --assume-yes --no-install-recommends libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*",
-]
-
-[build.env]
-passthrough = ["JEMALLOC_SYS_WITH_LG_PAGE"]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"

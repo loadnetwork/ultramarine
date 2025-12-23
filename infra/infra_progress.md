@@ -50,6 +50,7 @@ Path note: this repo keeps infra under `ultramarine/infra/`. If extracted into a
 - **No “manual peer wiring”**: local docker workflow can use `admin_addPeer`, but multi-host must rely on explicit peer/bootnode configuration and correct dialable addresses.
   - Code reality: local-only peer wiring script exists at `ultramarine/scripts/add_peers.sh`. Multi-host should instead rely on stable identities + explicit bootnodes/persistent peers (see `ultramarine/compose*.yaml` for the devnet pattern).
 - **Static host addressing (MVP)**: assume stable public IP/DNS per host. If IPs churn, regenerate and redeploy the lock/bundle.
+- **EL backpressure is expected**: `engine_newPayload`/`engine_forkchoiceUpdated` can return `SYNCING` after EL restart or during catch-up. Infra must avoid wiping EL state, and ops should treat sustained SYNCING as an EL liveness issue (not a CL crash loop).
 
 ---
 

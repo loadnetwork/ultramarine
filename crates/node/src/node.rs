@@ -102,6 +102,7 @@ pub struct Handle {
     pub app: JoinHandle<()>,
     pub engine: EngineHandle,
     pub tx_event: TxEvent<LoadContext>,
+    pub archiver: Option<ArchiverHandle>,
 }
 
 impl std::fmt::Debug for Handle {
@@ -117,6 +118,9 @@ impl NodeHandle<LoadContext> for Handle {
     }
 
     async fn kill(&self, _reason: Option<String>) -> eyre::Result<()> {
+        if let Some(archiver) = &self.archiver {
+            archiver.abort();
+        }
         self.engine.actor.kill_and_wait(None).await?;
         self.app.abort();
         self.engine.handle.abort();
@@ -139,7 +143,9 @@ impl Node for App {
 
     fn load_config(&self) -> eyre::Result<Self::Config> {
         let mut cfg = self.config.clone();
-        cfg.apply_archiver_env_overrides();
+        if !cfg!(feature = "test-harness") {
+            cfg.apply_archiver_env_overrides();
+        }
         Ok(cfg)
     }
 
@@ -462,6 +468,8 @@ impl Node for App {
             engine_api_endpoint: engine_endpoint,
             eth1_rpc_url: eth_url,
             jwt_secret,
+            forkchoice_with_attrs_max_attempts: None,
+            forkchoice_with_attrs_delay_ms: None,
         };
 
         let execution_client = ExecutionClient::new(execution_config).await?;
@@ -497,13 +505,11 @@ impl Node for App {
         }
 
         // Extract job_tx and notice_rx from archiver_channels
-        let (archiver_job_tx, archive_notice_rx) = match archiver_channels {
+        let (archiver_handle, archiver_job_tx, archive_notice_rx) = match archiver_channels {
             Some((handle, notice_rx, submit_tx)) => {
-                // keep handle alive for lifetime of node
-                drop(handle);
-                (Some(submit_tx), Some(notice_rx))
+                (Some(handle), Some(submit_tx), Some(notice_rx))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
         let app_handle = tokio::spawn(async move {
@@ -520,7 +526,7 @@ impl Node for App {
             }
         });
 
-        Ok(Handle { app: app_handle, engine: engine_handle, tx_event })
+        Ok(Handle { app: app_handle, engine: engine_handle, tx_event, archiver: archiver_handle })
     }
 
     async fn run(self) -> eyre::Result<()> {

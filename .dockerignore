@@ -4,6 +4,11 @@
 .git/
 target/
 dist/
+!dist/bin/
+!dist/bin/amd64/
+!dist/bin/amd64/ultramarine
+!dist/bin/arm64/
+!dist/bin/arm64/ultramarine
 
 # Local data and generated runtime state
 nodes/

@@ -668,6 +668,12 @@ pub async fn run(
                             "[DIAG] ✅ process_decided_certificate succeeded: {} txs, {} blobs, current_height now={}",
                             outcome.tx_count, outcome.blob_count, state.current_height
                         );
+                        if outcome.execution_pending {
+                            warn!(
+                                height = %height,
+                                "Execution layer still syncing; execution finalization deferred"
+                            );
+                        }
                         outcome
                     }
                     Err(e) => {
@@ -989,6 +995,14 @@ async fn handle_get_value(
 ) -> eyre::Result<()> {
     info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
 
+    if state.is_el_degraded() {
+        return Err(eyre!(
+            "Execution layer not ready; refusing to propose at height {} round {}",
+            height,
+            round
+        ));
+    }
+
     let latest_block = ensure_latest_block(state, execution_layer).await?;
     debug!("Requesting EL to build payload with blobs on top of head");
 
@@ -1028,6 +1042,7 @@ async fn handle_get_value(
 
     let (_signed_header, sidecars) = state
         .prepare_blob_sidecar_parts(&proposal, blobs_bundle.as_ref())
+        .await
         .map_err(|e| eyre!("Failed to prepare blob sidecars: {}", e))?;
 
     let round_i64 = round.as_i64();

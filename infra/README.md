@@ -55,8 +55,10 @@ Operator commands (from `ultramarine/`):
 - Generate artifacts: `make net-gen NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
 - One-command bootstrap (plan + storage + pre-doctor): `make net-bootstrap NET=<net> MOVE_DOCKER_DATAROOT=true`
 - One-command go-live (gen + storage + deploy + post-doctor + health): `make net-launch NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml APPLY_FIREWALL=true MOVE_DOCKER_DATAROOT=true`
-- One-command update (gen + deploy + health): `make net-update NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
-- Deploy to hosts (default: restarts services to apply new config): `make net-deploy NET=<net>`
+- One-command update (gen + apply + roll + health): `make net-update NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
+- Deploy to hosts (default: ensures services are running; no restarts if already running): `make net-deploy NET=<net>`
+- Apply + restart immediately (disruptive): `make net-redeploy NET=<net>`
+- Rolling restart (disruptive; may halt small nets): `make net-roll NET=<net> ROLL_CONFIRM=YES`
 - Start/restart: `make net-up NET=<net>` / Stop: `make net-down NET=<net>`
 - Inspect: `make net-status NET=<net>` / `make net-logs NET=<net> LINES=200`
 - Health: `make net-health NET=<net>`
@@ -64,7 +66,7 @@ Operator commands (from `ultramarine/`):
 - Diagnostics (post-deploy): `make net-doctor NET=<net>`
 - Firewall: `make net-firewall NET=<net>` (or `make net-deploy NET=<net> APPLY_FIREWALL=true`)
 - Storage bootstrap: `make net-storage NET=<net>` (see notes below)
-- Wipe network from hosts (destructive): `make net-wipe NET=<net> WIPE_CONFIRM=WIPE` (tune with `WIPE_STATE=true|false`, `WIPE_FIREWALL=true|false`, and `LIMIT=<host_id>`)
+- Wipe network from hosts (destructive): `make net-wipe NET=<net> WIPE_CONFIRM=YES` (tune with `WIPE_STATE=true|false`, `WIPE_MONITORING=true|false`, `WIPE_CONTAINERS=true|false`, `WIPE_FIREWALL=true|false`, `WIPE_NODES=node-0`, and `LIMIT=<host_id>`)
 - Limit any Ansible run to a single host: add `LIMIT=<host_id>` (e.g. `make net-storage NET=<net> LIMIT=lon2-0`)
 - SSH key: pass `SSH_KEY=/path/to/key` (or use ssh-agent / `~/.ssh/config`).
 - Local checks: `make infra-checks NET=<net>`
@@ -81,6 +83,8 @@ Notes:
   - `make net-storage NET=<net> STORAGE_WIPE=true DATA_DEVICES="['/dev/disk/by-id/nvme-...','/dev/disk/by-id/nvme-...']" DATA_RAID_LEVEL=1 MOVE_DOCKER_DATAROOT=true`
 - You don’t need to care about the mdadm “device number” (e.g. `/dev/md127`): the playbook defaults to creating `/dev/md/loadnet-data` and mounts by filesystem UUID in `/etc/fstab`. The only per-host detail is selecting the underlying NVMe devices (by-id is safest); discover them with e.g. `ssh <host> 'ls -la /dev/disk/by-id | grep nvme | grep -v part'`.
 - `net-deploy` fails fast if `infra/manifests/<net>.yaml` changed without regenerating `network.lock.json`.
-- To deploy without restarting running nodes: `make net-deploy NET=<net> RESTART_ON_DEPLOY=false`
+- To deploy without restarting running nodes: `make net-deploy NET=<net>` (or `make net-apply NET=<net>`)
+- To restart after a deploy: `make net-roll NET=<net> ROLL_CONFIRM=YES` (recommended over restarting all at once)
 - `net-deploy` verifies `bundle/public/genesis.json` checksum against the lockfile on each host.
 - Firewall automation is idempotent, keeps SSH allowed, and opens only P2P ports by default.
+- For non-`example` networks, `netgen validate` rejects placeholder archiver URLs (e.g. `archiver.example.com`).

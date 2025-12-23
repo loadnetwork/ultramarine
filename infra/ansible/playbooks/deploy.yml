@@ -77,13 +77,12 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: Restart load-reth instances (apply new env/artifacts)
+    - name: Ensure load-reth instances are running
       ansible.builtin.systemd:
         name: "load-reth@{{ item }}.service"
         enabled: true
-        state: restarted
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
       loop: "{{ loadnet_nodes }}"
-      when: restart_on_deploy | bool
 
     - name: Check for stale load-reth containers that block restarts
       ansible.builtin.command:
@@ -110,26 +109,22 @@
         state: present
         timeout: 90
       loop: "{{ loadnet_nodes }}"
-      when: restart_on_deploy | bool
 
-    - name: Restart ultramarine instances (apply new env/artifacts)
+    - name: Ensure ultramarine instances are running
       ansible.builtin.systemd:
         name: "ultramarine@{{ item }}.service"
         enabled: true
-        state: restarted
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
       loop: "{{ loadnet_nodes }}"
-      when: restart_on_deploy | bool
 
-    - name: Restart Prometheus (monitoring)
+    - name: Ensure Prometheus is running (monitoring)
       ansible.builtin.systemd:
         name: prometheus.service
         enabled: true
-        state: restarted
-      when: restart_on_deploy | bool
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
 
-    - name: Restart Grafana (monitoring)
+    - name: Ensure Grafana is running (monitoring)
       ansible.builtin.systemd:
         name: grafana.service
         enabled: true
-        state: restarted
-      when: restart_on_deploy | bool
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"

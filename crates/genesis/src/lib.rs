@@ -98,9 +98,7 @@ pub fn write_genesis(path: &std::path::Path, genesis: &Genesis) -> Result<()> {
             ),
         );
     }
-    if let Some(config) = genesis_value
-        .get_mut("config")
-        .and_then(serde_json::Value::as_object_mut)
+    if let Some(config) = genesis_value.get_mut("config").and_then(serde_json::Value::as_object_mut)
     {
         if matches!(config.get("daoForkSupport"), Some(serde_json::Value::Bool(false))) {
             config.remove("daoForkSupport");

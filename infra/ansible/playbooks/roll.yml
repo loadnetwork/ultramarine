@@ -1,0 +1,72 @@
+---
+- name: Rolling restart Load services (serial=1)
+  hosts: all
+  gather_facts: true
+  become: true
+  serial: 1
+  vars:
+    loadnet_net: "{{ net }}"
+    loadnet_net_dir: "{{ net_dir }}"
+    loadnet_roll_confirm: "{{ roll_confirm | default('') }}"
+  pre_tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - loadnet_net is defined
+          - loadnet_net_dir is defined
+
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', loadnet_net_dir + '/network.lock.json') | from_json }}"
+
+    - name: Assert lockfile matches selected network
+      ansible.builtin.assert:
+        that:
+          - loadnet_lock.network.name == loadnet_net
+        fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ loadnet_net }}'"
+
+    - name: Require explicit confirmation when rolling restart may halt chain
+      ansible.builtin.assert:
+        that:
+          - loadnet_roll_confirm == "YES"
+        fail_msg: "Refusing to roll-restart with <=2 validators (halts chain) without roll_confirm=YES"
+      when: (loadnet_lock.nodes | selectattr('role', 'equalto', 'validator') | list | length) <= 2
+
+  tasks:
+    - name: Stop ultramarine instances on host (best-effort)
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        state: stopped
+      loop: "{{ loadnet_nodes | default([]) }}"
+      ignore_errors: true
+
+    - name: Restart load-reth instances on host
+      ansible.builtin.systemd:
+        name: "load-reth@{{ item }}.service"
+        state: restarted
+        enabled: true
+      loop: "{{ loadnet_nodes | default([]) }}"
+
+    - name: Wait for load-reth engine IPC sockets
+      ansible.builtin.wait_for:
+        path: "/run/load-reth/{{ item }}/engine.ipc"
+        state: present
+        timeout: 90
+      loop: "{{ loadnet_nodes | default([]) }}"
+
+    - name: Restart ultramarine instances on host
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        state: restarted
+        enabled: true
+      loop: "{{ loadnet_nodes | default([]) }}"
+
+    - name: Restart monitoring services on host (best-effort)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+        enabled: true
+      loop:
+        - prometheus.service
+        - grafana.service
+      ignore_errors: true

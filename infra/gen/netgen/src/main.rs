@@ -345,6 +345,16 @@ fn validate_manifest(m: &Manifest, allow_unsafe_failure_domains: bool) -> Result
     if m.archiver.provider_url.trim().is_empty() || m.archiver.provider_id.trim().is_empty() {
         bail!("archiver.provider_url/provider_id must be non-empty");
     }
+    // Prevent deploying placeholder URLs on real networks.
+    // `example.yaml` is allowed to use example.com placeholders.
+    if m.network.name != "example" {
+        let url = m.archiver.provider_url.trim();
+        if url.contains("example.com") {
+            bail!(
+                "archiver.provider_url looks like a placeholder ({url}); set a real provider URL (e.g. https://load-s3-agent.load.network)"
+            );
+        }
+    }
 
     match m.ports.allocation.as_str() {
         "host-block" | "by-index" => {}

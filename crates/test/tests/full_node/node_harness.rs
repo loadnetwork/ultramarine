@@ -13,7 +13,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, Once},
+    sync::{
+        Arc, Mutex, Once,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -123,6 +126,9 @@ use ultramarine_execution::EngineApi;
 
 type NodeConfigHook = Arc<dyn Fn(usize, &mut Config) + Send + Sync>;
 type PayloadPlan = Arc<dyn Fn(Height) -> usize + Send + Sync>;
+type SyncPlan = Arc<dyn Fn(Height) -> bool + Send + Sync>;
+type ParentOverridePlan = Arc<dyn Fn(Height) -> Option<B256> + Send + Sync>;
+type StubStateHook = Arc<dyn Fn(usize, &mut StubState) + Send + Sync>;
 
 #[derive(Clone)]
 struct HarnessConfig {
@@ -130,12 +136,19 @@ struct HarnessConfig {
     start_height: Option<Height>,
     node_config_hook: Option<NodeConfigHook>,
     payload_plan: Option<PayloadPlan>,
+    stub_state_hook: Option<StubStateHook>,
 }
 
 impl HarnessConfig {
     fn apply_node_config(&self, index: usize, config: &mut Config) {
         if let Some(hook) = &self.node_config_hook {
             (hook)(index, config);
+        }
+    }
+
+    fn apply_stub_state(&self, index: usize, state: &mut StubState) {
+        if let Some(hook) = &self.stub_state_hook {
+            (hook)(index, state);
         }
     }
 
@@ -151,11 +164,18 @@ struct FullNodeTestBuilder {
     start_height: Option<Height>,
     node_config_hook: Option<NodeConfigHook>,
     payload_plan: Option<PayloadPlan>,
+    stub_state_hook: Option<StubStateHook>,
 }
 
 impl Default for FullNodeTestBuilder {
     fn default() -> Self {
-        Self { node_count: 3, start_height: None, node_config_hook: None, payload_plan: None }
+        Self {
+            node_count: 3,
+            start_height: None,
+            node_config_hook: None,
+            payload_plan: None,
+            stub_state_hook: None,
+        }
     }
 }
 
@@ -188,6 +208,48 @@ impl FullNodeTestBuilder {
             None => hook,
         });
         self
+    }
+
+    #[allow(dead_code)]
+    fn with_stub_state_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(usize, &mut StubState) + Send + Sync + 'static,
+    {
+        let hook: StubStateHook = Arc::new(hook);
+        self.stub_state_hook = Some(match self.stub_state_hook.take() {
+            Some(previous) => Arc::new(move |index, state| {
+                (previous)(index, state);
+                (hook)(index, state);
+            }),
+            None => hook,
+        });
+        self
+    }
+
+    #[allow(dead_code)]
+    fn with_el_sync_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> bool + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: SyncPlan = Arc::new(move |height| plan(index, height));
+            state.set_sync_plan(per_node);
+        })
+    }
+
+    #[allow(dead_code)]
+    fn with_el_parent_override_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> Option<B256> + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: ParentOverridePlan = Arc::new(move |height| plan(index, height));
+            state.set_parent_override_plan(per_node);
+        })
     }
 
     /// Enable the archiver worker and configure provider + auth for the test harness.
@@ -238,6 +300,7 @@ impl FullNodeTestBuilder {
             start_height: self.start_height,
             node_config_hook: self.node_config_hook.clone(),
             payload_plan: self.payload_plan.clone(),
+            stub_state_hook: self.stub_state_hook.clone(),
         };
 
         let mut network = NetworkHarness::start(&config).await?;
@@ -1853,7 +1916,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
 
                 let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
                 let (_signed_header, sidecars) =
-                    state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))?;
+                    state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle)).await?;
 
                 let package = SyncedValuePackage::Full {
                     value: value.clone(),
@@ -1895,6 +1958,86 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                 assert_eq!(metrics_snapshot.verifications_success, 1);
                 assert_eq!(metrics_snapshot.lifecycle_promoted, 1);
                 drop(state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_syncing_degrades_node() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(4)
+        .with_el_sync_plan(|index, height| index == 0 && height.as_u64() >= 2)
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_for_nodes_at(&[1, 2, 3], Height::new(3)).await?;
+
+                let guard = network.nodes[0].stub_state.lock().await;
+                eyre::ensure!(
+                    guard.latest_block.block_number == 1,
+                    "expected node 0 EL stub to remain at height 1 while syncing, got {}",
+                    guard.latest_block.block_number
+                );
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_transient_syncing_recovers() -> Result<()> {
+    init_test_logging();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .with_el_sync_plan({
+            let attempts = Arc::clone(&attempts);
+            move |index, height| {
+                if index != 0 || height.as_u64() < 2 {
+                    return false;
+                }
+                attempts.fetch_add(1, Ordering::SeqCst) < 5
+            }
+        })
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_for_nodes_at(&[0, 1], Height::new(3)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_transient_bad_payload_parent_recovers() -> Result<()> {
+    init_test_logging();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .with_el_parent_override_plan({
+            let attempts = Arc::clone(&attempts);
+            move |index, height| {
+                if index != 0 || height.as_u64() != 2 {
+                    return None;
+                }
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Return a parent that is guaranteed to not equal the requested head.
+                    return Some(B256::from([0xAAu8; 32]));
+                }
+                None
+            }
+        })
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_for_nodes_at(&[0, 1], Height::new(3)).await?;
                 Ok(())
             })
         })
@@ -2146,7 +2289,9 @@ impl NetworkHarness {
 
             for index in 0..config.node_count {
                 let payload_plan = config.payload_plan();
-                let stub_state = Arc::new(TokioMutex::new(StubState::new(payload_plan.clone())));
+                let mut local_stub = StubState::new(payload_plan.clone());
+                config.apply_stub_state(index, &mut local_stub);
+                let stub_state = Arc::new(TokioMutex::new(local_stub));
                 let engine_stub = match EngineRpcStub::start(stub_state.clone()).await {
                     Ok(stub) => stub,
                     Err(e) => {
@@ -2331,7 +2476,15 @@ impl NetworkHarness {
                                 debug_log!("node {} event {}", node_index, event);
                                 record_event(&log_clone, format!("{event}"));
                             }
-                            Err(e) => break Err(eyre::eyre!("event channel closed: {e}")),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                record_event(
+                                    &log_clone,
+                                    format!("event channel lagged; skipped {skipped} events"),
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                break Err(eyre::eyre!("event channel closed"))
+                            }
                         }
                     }
                     _ = sleep(Duration::from_millis(100)) => {
@@ -2485,7 +2638,7 @@ impl NetworkHarness {
         self.ensure_shutdown().await?;
         let node =
             self.nodes.get(node_index).ok_or_else(|| eyre::eyre!("node {node_index} missing"))?;
-        let blob_store = RocksDbBlobStore::open(node.home.path().join("blob_store.db"))
+        let blob_store = RocksDbBlobStore::open_read_only(node.home.path().join("blob_store.db"))
             .wrap_err("open blob store")?;
         let metrics = BlobEngineMetrics::new();
         let engine = BlobEngineImpl::new(blob_store, metrics)?;
@@ -2929,7 +3082,7 @@ async fn mock_multipart_upload_handler(
     if tags.get("load").map(String::as_str) != Some("true") {
         return parse_error("load");
     }
-    if tags.get("load.network").map(String::as_str) != Some("fibernet") {
+    if tags.get("load.network").map(String::as_str) != Some("fibernet-beta") {
         return parse_error("load.network");
     }
 
@@ -3313,6 +3466,8 @@ struct StubState {
     next_payload_id: u64,
     pending: HashMap<[u8; 8], (ExecutionPayloadV3, Option<BlobsBundle>, Vec<AlloyBytes>)>,
     payload_plan: Option<PayloadPlan>,
+    sync_plan: Option<SyncPlan>,
+    parent_override_plan: Option<ParentOverridePlan>,
 }
 
 impl StubState {
@@ -3322,11 +3477,29 @@ impl StubState {
             next_payload_id: 0,
             pending: HashMap::new(),
             payload_plan,
+            sync_plan: None,
+            parent_override_plan: None,
         }
     }
 
     fn blob_count_for_height(&self, height: Height) -> usize {
         self.payload_plan.as_ref().map(|plan| plan(height)).unwrap_or(1)
+    }
+
+    fn set_sync_plan(&mut self, plan: SyncPlan) {
+        self.sync_plan = Some(plan);
+    }
+
+    fn is_syncing_for(&self, height: Height) -> bool {
+        self.sync_plan.as_ref().map(|plan| plan(height)).unwrap_or(false)
+    }
+
+    fn set_parent_override_plan(&mut self, plan: ParentOverridePlan) {
+        self.parent_override_plan = Some(plan);
+    }
+
+    fn parent_override_for(&self, height: Height) -> Option<B256> {
+        self.parent_override_plan.as_ref().and_then(|plan| plan(height))
     }
 }
 
@@ -3462,30 +3635,55 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
 
     let mut guard = state.lock().await;
 
-    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) &&
-        head_height > guard.latest_block.block_number
-    {
-        let parent_hash =
-            if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
-        guard.latest_block.block_number = head_height;
-        guard.latest_block.block_hash = forkchoice.head_block_hash;
-        guard.latest_block.parent_hash = parent_hash;
-        guard.latest_block.timestamp = timestamp_for_height(head_height);
-        debug_log!(
-            "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
-            head_height
-        );
+    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) {
+        let head = Height::new(head_height);
+        if guard.is_syncing_for(head) {
+            return Ok(json!({
+                "payloadStatus": {
+                    "status": "SYNCING",
+                    "latestValidHash": Value::Null,
+                    "validationError": Value::Null
+                },
+                "payloadId": Value::Null
+            }));
+        }
+        if head_height > guard.latest_block.block_number {
+            let parent_hash =
+                if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
+            guard.latest_block.block_number = head_height;
+            guard.latest_block.block_hash = forkchoice.head_block_hash;
+            guard.latest_block.parent_hash = parent_hash;
+            guard.latest_block.timestamp = timestamp_for_height(head_height);
+            debug_log!(
+                "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
+                head_height
+            );
+        }
     }
 
     if let Some(_attrs) = payload_attrs {
         // Generate payload for next height (latest + 1)
         let next_height = Height::new(guard.latest_block.block_number + 1);
 
+        if guard.is_syncing_for(next_height) {
+            return Ok(json!({
+                "payloadStatus": {
+                    "status": "SYNCING",
+                    "latestValidHash": Value::Null,
+                    "validationError": Value::Null
+                },
+                "payloadId": Value::Null
+            }));
+        }
+
         debug_log!("engine_forkchoiceUpdatedV3: generating payload for height {}", next_height);
 
         let blob_count = guard.blob_count_for_height(next_height);
         let bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
-        let payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
+        let mut payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
+        if let Some(parent_override) = guard.parent_override_for(next_height) {
+            payload.payload_inner.payload_inner.parent_hash = parent_override;
+        }
         let execution_requests = sample_execution_requests_for_height(next_height);
         let payload_id = guard.next_payload_id;
         guard.next_payload_id += 1;
@@ -3559,6 +3757,15 @@ async fn handle_new_payload(
     }
 
     let mut guard = state.lock().await;
+    let height = Height::new(payload.block_number);
+    if guard.is_syncing_for(height) {
+        return Ok(json!({
+            "status": "SYNCING",
+            "latestValidHash": Value::Null,
+            "validationError": Value::Null
+        }));
+    }
+
     guard.latest_block = ExecutionBlock {
         block_hash: payload.block_hash,
         block_number: payload.block_number,
