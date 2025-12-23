@@ -590,19 +590,41 @@ spam: ## Spam the EL with transactions (60s @ 500 tps against default RPC).
 spam-blobs: ## Spam all three EL nodes with blob transactions (60s @ 50 tps per EL, 6 blobs per tx).
 	@echo "⚙️  Building ultramarine-utils spammer binary..."
 	@cargo build --quiet --bin ultramarine-utils
-	@echo "🚀 Spamming blob txs against load-reth RPCs on 8545, 18545, and 28545"
+	@echo "🚀 Spamming blob txs against load-reth RPCs"
 	@set -e; \
+	  SPAM_TIME="$${SPAM_TIME:-60}"; \
+	  SPAM_RATE="$${SPAM_RATE:-50}"; \
+	  SPAM_BLOBS_PER_TX="$${SPAM_BLOBS_PER_TX:-6}"; \
+	  SPAM_RPC_URLS="$${SPAM_RPC_URLS:-http://127.0.0.1:8545 http://127.0.0.1:18545 http://127.0.0.1:28545}"; \
+	  if [ -n "$${SPAM_PRIVATE_KEY:-}" ]; then \
+	    set -- $$SPAM_RPC_URLS; \
+	    if [ "$$#" -ne 1 ]; then \
+	      echo "error: SPAM_PRIVATE_KEY requires exactly one RPC URL (set SPAM_RPC_URLS to a single URL)" >&2; \
+	      exit 2; \
+	    fi; \
+	  fi; \
 	  i=0; \
-	  for rpc in 8545 18545 28545; do \
-	    echo "→ blasting http://127.0.0.1:$$rpc"; \
-	    target/debug/ultramarine-utils spam \
-	      --time=60 \
-	      --rate=50 \
-	      --rpc-url=http://127.0.0.1:$$rpc \
-	      --blobs \
-	      --blobs-per-tx=6 \
-	      --signer-index=$$i \
-	      & \
+	  for url in $$SPAM_RPC_URLS; do \
+	    echo "→ blasting $$url"; \
+	    if [ -n "$${SPAM_PRIVATE_KEY:-}" ]; then \
+	      target/debug/ultramarine-utils spam \
+	        --time=$$SPAM_TIME \
+	        --rate=$$SPAM_RATE \
+	        --rpc-url=$$url \
+	        --blobs \
+	        --blobs-per-tx=$$SPAM_BLOBS_PER_TX \
+	        --private-key=$${SPAM_PRIVATE_KEY} \
+	        & \
+	    else \
+	      target/debug/ultramarine-utils spam \
+	        --time=$$SPAM_TIME \
+	        --rate=$$SPAM_RATE \
+	        --rpc-url=$$url \
+	        --blobs \
+	        --blobs-per-tx=$$SPAM_BLOBS_PER_TX \
+	        --signer-index=$$i \
+	        & \
+	    fi; \
 	    i=$$((i+1)); \
 	  done; \
 	  wait
