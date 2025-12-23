@@ -679,13 +679,20 @@ NET ?= example
 SECRETS_FILE ?=
 LINES ?= 200
 LIMIT ?=
-NET_DIR ?= infra/networks/$(NET)
+SSH_KEY ?=
+NET_DIR ?= $(abspath infra/networks/$(NET))
 ANSIBLE_CONFIG_PATH ?= infra/ansible/ansible.cfg
 ANSIBLE_INVENTORY ?= $(NET_DIR)/inventory.yml
 ANSIBLE_PLAYBOOKS ?= infra/ansible/playbooks
 RESTART_ON_DEPLOY ?= true
 APPLY_FIREWALL ?= false
+PROMETHEUS_BIND ?= 127.0.0.1
+PROMETHEUS_PORT ?= 9090
+PROMETHEUS_SCRAPE_INTERVAL ?= 5s
+GRAFANA_BIND ?= 0.0.0.0
+GRAFANA_PORT ?= 3000
 STORAGE_WIPE ?= false
+APT_DISABLE_PROXY ?= false
 DATA_MOUNTPOINT ?= /var/lib/loadnet
 DATA_SOURCE_MOUNTPOINT ?= /home
 DATA_SOURCE_DIR ?= $(DATA_SOURCE_MOUNTPOINT)/loadnet
@@ -693,6 +700,17 @@ DATA_DEVICES ?=
 DATA_RAID_LEVEL ?= 1
 MOVE_DOCKER_DATAROOT ?= false
 DOCKER_DATAROOT ?= $(DATA_MOUNTPOINT)/docker
+SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
+SOPS_AGE_RECIPIENT ?=
+SECRETS_PLAINTEXT ?= $(NET_DIR)/secrets.yaml
+SECRETS_ENCRYPTED ?= $(NET_DIR)/secrets.sops.yaml
+REMOVE_PLAINTEXT ?= false
+WIPE_CONFIRM ?=
+WIPE_STATE ?= true
+WIPE_MONITORING ?= true
+WIPE_CONTAINERS ?= true
+WIPE_FIREWALL ?= false
+EXTRA_VARS ?=
 
 .PHONY: net-validate
 net-validate: ## Validate infra manifest (NET=<net>).
@@ -705,55 +723,125 @@ net-plan: ## Generate infra lockfile + inventory without secrets (dry-run for bo
 .PHONY: net-gen
 net-gen: ## Generate infra lockfile + bundle (NET=<net>, optional SECRETS_FILE=<path>).
 	@if [ -n "$(SECRETS_FILE)" ]; then \
-		cargo run --quiet -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/$(NET).yaml --out-dir infra/networks/$(NET) --secrets-file "$(SECRETS_FILE)"; \
+		SOPS_AGE_KEY_FILE="$(SOPS_AGE_KEY_FILE)" cargo run --quiet -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/$(NET).yaml --out-dir infra/networks/$(NET) --secrets-file "$(SECRETS_FILE)"; \
 	else \
 		cargo run --quiet -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/$(NET).yaml --out-dir infra/networks/$(NET); \
 	fi
 
+.PHONY: net-secrets-encrypt
+net-secrets-encrypt: ## Encrypt plaintext secrets.yaml -> secrets.sops.yaml (NET=<net>, SOPS_AGE_RECIPIENT=<age1...>).
+	@if [ -z "$(SOPS_AGE_RECIPIENT)" ]; then \
+		echo "SOPS_AGE_RECIPIENT is required (age public key)"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(SECRETS_PLAINTEXT)" ]; then \
+		echo "Missing plaintext secrets file: $(SECRETS_PLAINTEXT)"; \
+		exit 1; \
+	fi
+	@if ! command -v sops >/dev/null 2>&1; then \
+		echo "sops not found; install it first"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(SOPS_AGE_KEY_FILE)" ]; then \
+		echo "Age key file not found: $(SOPS_AGE_KEY_FILE)"; \
+		exit 1; \
+	fi
+	cp "$(SECRETS_PLAINTEXT)" "$(SECRETS_ENCRYPTED)"
+	SOPS_AGE_KEY_FILE="$(SOPS_AGE_KEY_FILE)" sops --encrypt --age "$(SOPS_AGE_RECIPIENT)" -i "$(SECRETS_ENCRYPTED)"
+	@if [ "$(REMOVE_PLAINTEXT)" = "true" ]; then \
+		rm -f "$(SECRETS_PLAINTEXT)"; \
+		echo "Removed plaintext secrets file."; \
+	else \
+		echo "Plaintext secrets left at $(SECRETS_PLAINTEXT); delete it when done."; \
+	fi
+
+.PHONY: net-bootstrap
+net-bootstrap: ## Bootstrap (no secrets): plan + storage + doctor (NET=<net>, optional LIMIT=<host_id>).
+	@$(MAKE) net-plan NET=$(NET)
+	@$(MAKE) net-storage NET=$(NET) LIMIT=$(LIMIT) MOVE_DOCKER_DATAROOT=$(MOVE_DOCKER_DATAROOT)
+	@$(MAKE) net-doctor-pre NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT)
+
+.PHONY: net-launch
+net-launch: ## Go-live from scratch: bootstrap + gen + deploy + health (NET=<net>, SECRETS_FILE=<path>, optional LIMIT=<host_id>).
+	@if [ -z "$(SECRETS_FILE)" ]; then \
+		echo "SECRETS_FILE is required for net-launch (validators need archiver bearer tokens)."; \
+		echo "Use 'make net-bootstrap NET=$(NET)' if you want to prep hosts before secrets exist."; \
+		exit 1; \
+	fi
+	@$(MAKE) net-bootstrap NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT) MOVE_DOCKER_DATAROOT=$(MOVE_DOCKER_DATAROOT)
+	@$(MAKE) net-gen NET=$(NET) SECRETS_FILE=$(SECRETS_FILE)
+	@$(MAKE) net-deploy NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT) APPLY_FIREWALL=$(APPLY_FIREWALL) RESTART_ON_DEPLOY=true
+	@$(MAKE) net-doctor-post NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT)
+	@$(MAKE) net-health NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT)
+
+.PHONY: net-update
+net-update: ## One-command update: gen + deploy + health (NET=<net>, SECRETS_FILE=<path>, optional LIMIT=<host_id>).
+	@if [ -z "$(SECRETS_FILE)" ]; then \
+		echo "SECRETS_FILE is required for net-update (validators need archiver bearer tokens)."; \
+		exit 1; \
+	fi
+	@$(MAKE) net-gen NET=$(NET) SECRETS_FILE=$(SECRETS_FILE)
+	@$(MAKE) net-deploy NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT) APPLY_FIREWALL=$(APPLY_FIREWALL)
+	@$(MAKE) net-health NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT)
+
 .PHONY: net-deploy
 net-deploy: ## Deploy artifacts + systemd units via Ansible (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/deploy.yml \
-		-e "net=$(NET) net_dir=$(NET_DIR) restart_on_deploy=$(RESTART_ON_DEPLOY) apply_firewall=$(APPLY_FIREWALL)"
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/deploy.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR) restart_on_deploy=$(RESTART_ON_DEPLOY) apply_firewall=$(APPLY_FIREWALL) loadnet_apt_disable_proxy=$(APT_DISABLE_PROXY) loadnet_prometheus_bind=$(PROMETHEUS_BIND) loadnet_prometheus_port=$(PROMETHEUS_PORT) loadnet_prometheus_scrape_interval=$(PROMETHEUS_SCRAPE_INTERVAL) loadnet_grafana_bind=$(GRAFANA_BIND) loadnet_grafana_port=$(GRAFANA_PORT)"
 
 .PHONY: net-up
 net-up: ## Start services via systemd (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/up.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-down
 net-down: ## Stop services via systemd (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-status
 net-status: ## Show systemd status for services (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/status.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/status.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-logs
 net-logs: ## Tail systemd logs (NET=<net>, NET_DIR=<dir>, LINES=<n>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/logs.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/logs.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR) lines=$(LINES)"
 
 .PHONY: net-health
 net-health: ## Health check: services active + Engine IPC socket + height moving (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml \
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
 .PHONY: net-doctor
-net-doctor: ## Preflight diagnostics (time sync, limits, units, listeners) (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml \
+net-doctor: ## Post-deploy diagnostics (units/current/layout/listeners) (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml \
 		-e "net=$(NET) net_dir=$(NET_DIR)"
 
+.PHONY: net-doctor-pre
+net-doctor-pre: ## Pre-deploy checks (OS/storage/docker) (NET=<net>, NET_DIR=<dir>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor_pre.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-doctor-post
+net-doctor-post: ## Post-deploy checks (units/current/layout/listeners) (NET=<net>, NET_DIR=<dir>).
+	@$(MAKE) net-doctor NET=$(NET) NET_DIR=$(NET_DIR) LIMIT=$(LIMIT)
 .PHONY: net-firewall
 net-firewall: ## Apply host firewall (UFW) rules for required P2P ports (NET=<net>, NET_DIR=<dir>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml \
-		-e "net=$(NET) net_dir=$(NET_DIR)"
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR) loadnet_apt_disable_proxy=$(APT_DISABLE_PROXY) loadnet_prometheus_bind=$(PROMETHEUS_BIND) loadnet_prometheus_port=$(PROMETHEUS_PORT) loadnet_grafana_bind=$(GRAFANA_BIND) loadnet_grafana_port=$(GRAFANA_PORT)"
 
 .PHONY: net-storage
 net-storage: ## Storage bootstrap (non-destructive by default; set STORAGE_WIPE=true + DATA_DEVICES=/dev/disk/by-id/...) (NET=<net>).
-	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/storage.yml \
-		-e "loadnet_storage_wipe=$(STORAGE_WIPE) loadnet_data_mountpoint=$(DATA_MOUNTPOINT) loadnet_data_source_mountpoint=$(DATA_SOURCE_MOUNTPOINT) loadnet_data_source_dir=$(DATA_SOURCE_DIR) loadnet_data_devices=$(DATA_DEVICES) loadnet_data_raid_level=$(DATA_RAID_LEVEL) loadnet_move_docker_dataroot=$(MOVE_DOCKER_DATAROOT) loadnet_docker_dataroot=$(DOCKER_DATAROOT)"
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/storage.yml \
+		-e "loadnet_storage_wipe=$(STORAGE_WIPE) loadnet_data_mountpoint=$(DATA_MOUNTPOINT) loadnet_data_source_mountpoint=$(DATA_SOURCE_MOUNTPOINT) loadnet_data_source_dir=$(DATA_SOURCE_DIR) loadnet_data_devices=$(DATA_DEVICES) loadnet_data_raid_level=$(DATA_RAID_LEVEL) loadnet_move_docker_dataroot=$(MOVE_DOCKER_DATAROOT) loadnet_docker_dataroot=$(DOCKER_DATAROOT) loadnet_apt_disable_proxy=$(APT_DISABLE_PROXY)"
+
+.PHONY: net-wipe
+net-wipe: ## Destroy+clean hosts (destructive): WIPE_CONFIRM=YES (WIPE_STATE=true|false, WIPE_MONITORING=true|false, WIPE_CONTAINERS=true|false, WIPE_FIREWALL=true|false, EXTRA_VARS="k=v ...", LIMIT=<host_id>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/wipe.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR) wipe_confirm=$(WIPE_CONFIRM) wipe_state=$(WIPE_STATE) wipe_monitoring=$(WIPE_MONITORING) wipe_containers=$(WIPE_CONTAINERS) wipe_firewall=$(WIPE_FIREWALL)" \
+		$(if $(EXTRA_VARS),-e "$(EXTRA_VARS)",)
 
 .PHONY: infra-checks
 infra-checks: ## Run infra checks (netgen build + ansible syntax-checks if available).
@@ -765,8 +853,10 @@ infra-checks: ## Run infra checks (netgen build + ansible syntax-checks if avail
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/down.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/firewall.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/storage.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/wipe.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
 		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/health.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
-		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml -e "net=$(NET) net_dir=$(NET_DIR)"; \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml -e "net=$(NET) net_dir=$(NET_DIR)" && \
+		ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook --syntax-check -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor_pre.yml -e "net=$(NET) net_dir=$(NET_DIR)"; \
 	else \
 		echo "ansible-playbook not found; skipping syntax-checks (install ansible-core on the controller)"; \
 	fi

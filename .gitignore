@@ -4,6 +4,7 @@ debug/
 ipc/
 assets/genesis.json
 assets/jwtsecret
+assets/p2p-keys/
 
 .vscode
 .idea

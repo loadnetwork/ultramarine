@@ -24,3 +24,15 @@
         enabled: true
         state: restarted
       loop: "{{ loadnet_nodes }}"
+
+    - name: Restart Prometheus (monitoring)
+      ansible.builtin.systemd:
+        name: prometheus.service
+        enabled: true
+        state: restarted
+
+    - name: Restart Grafana (monitoring)
+      ansible.builtin.systemd:
+        name: grafana.service
+        enabled: true
+        state: restarted

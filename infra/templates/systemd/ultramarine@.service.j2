@@ -16,9 +16,10 @@ EnvironmentFile=/opt/loadnet/current/bundle/private/env/ultramarine-%i.env
 EnvironmentFile=-/opt/loadnet/current/bundle/private/ultramarine/secrets/%i.env
 
 ExecStartPre=/bin/bash -lc 'test -d "/var/lib/ultramarine/%i/config"'
-ExecStartPre=/bin/bash -lc 'test -S "$ULTRAMARINE_ENGINE_IPC_PATH"'
+ExecStartPre=/bin/bash -lc 'for i in {1..60}; do if [ -S "$ULTRAMARINE_ENGINE_IPC_PATH" ]; then exit 0; fi; sleep 1; done; echo "engine IPC not ready: $ULTRAMARINE_ENGINE_IPC_PATH" >&2; exit 1'
+ExecStartPre=/bin/bash -lc 'docker rm -f ultramarine-%i >/dev/null 2>&1 || true'
 
-ExecStart=/usr/bin/docker run --rm --name ultramarine-%i --network host \
+ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name ultramarine-%i --network host --platform=linux/amd64 \
   --env ULTRAMARINE_ARCHIVER_ENABLED \
   --env ULTRAMARINE_ARCHIVER_PROVIDER_URL \
   --env ULTRAMARINE_ARCHIVER_PROVIDER_ID \
@@ -28,7 +29,7 @@ ExecStart=/usr/bin/docker run --rm --name ultramarine-%i --network host \
   $ULTRAMARINE_IMAGE start \
     --home=/home \
     --engine-ipc-path=$ULTRAMARINE_ENGINE_IPC_PATH \
-    --eth1-rpc-url=$ULTRAMARINE_ETH1_RPC_URL
+    --eth1-rpc-url=$ULTRAMARINE_ETH1_RPC_URL'
 
 ExecStop=/usr/bin/docker stop -t 10 ultramarine-%i
 

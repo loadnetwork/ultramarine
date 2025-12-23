@@ -1,0 +1,14 @@
+all:
+  hosts:
+    f4-metal-medium-ams-fibernet-2:
+      ansible_host: 64.34.87.1
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-1
+    lon2-0:
+      ansible_host: 67.213.117.143
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-0
+  vars: {}
+  children: {}

@@ -825,8 +825,13 @@ fn generate(
     // Compute bootnodes (all enodes except self).
     let all_enodes: Vec<String> = lock_nodes.iter().map(|n| n.load_reth.enode.clone()).collect();
     for n in &mut lock_nodes {
-        n.load_reth.bootnodes =
+        let mut bootnodes: Vec<String> =
             all_enodes.iter().filter(|e| *e != &n.load_reth.enode).cloned().collect();
+        if bootnodes.is_empty() {
+            // Avoid passing an empty --bootnodes flag on single-node networks.
+            bootnodes.push(n.load_reth.enode.clone());
+        }
+        n.load_reth.bootnodes = bootnodes;
     }
 
     let lock = Lockfile {

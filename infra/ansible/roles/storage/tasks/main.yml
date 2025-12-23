@@ -1,12 +1,43 @@
 ---
+- name: Optionally disable apt proxy
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99loadnet-no-proxy
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Acquire::http::Proxy "false";
+      Acquire::https::Proxy "false";
+      Acquire::ftp::Proxy "false";
+  when: loadnet_apt_disable_proxy | default(false) | bool
+
 - name: Install storage dependencies
-  ansible.builtin.apt:
-    name:
-      - mdadm
-      - xfsprogs
-      - rsync
-    state: present
-    update_cache: true
+  block:
+    - name: Install storage dependencies (with cache update)
+      ansible.builtin.apt:
+        name:
+          - mdadm
+          - xfsprogs
+          - rsync
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ loadnet_apt_cache_valid_time | default(3600) }}"
+        update_cache_retries: "{{ loadnet_apt_update_retries | default(10) }}"
+        update_cache_retry_max_delay: "{{ loadnet_apt_update_max_delay | default(30) }}"
+        lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
+  rescue:
+    - name: Warn about apt cache update failure
+      ansible.builtin.debug:
+        msg: "apt cache update failed; retrying install without update_cache."
+    - name: Install storage dependencies (without cache update)
+      ansible.builtin.apt:
+        name:
+          - mdadm
+          - xfsprogs
+          - rsync
+        state: present
+        update_cache: false
+        lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
 
 - name: Assert required inputs for destructive mode
   ansible.builtin.assert:
@@ -92,6 +123,7 @@
   changed_when: false
   when: not (loadnet_storage_wipe | bool)
   register: mount_check
+  failed_when: false
 
 - name: Get root filesystem source device (for safety checks)
   ansible.builtin.command: "findmnt -n -o SOURCE /"
@@ -101,39 +133,119 @@
     - mount_check.rc != 0
   register: root_source
 
-- name: Check whether the source mountpoint is mounted (auto-adopt)
-  ansible.builtin.command: "findmnt -n {{ loadnet_data_source_mountpoint }}"
-  changed_when: false
-  failed_when: false
+- name: Lookup configured source mount (auto-adopt)
+  ansible.builtin.set_fact:
+    loadnet_configured_source_mount: >-
+      {{
+        (ansible_facts.mounts | selectattr('mount', 'equalto', loadnet_data_source_mountpoint) | list | first)
+        | default({})
+      }}
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
-  register: source_mount_check
 
-- name: Get source mountpoint backing device (auto-adopt)
-  ansible.builtin.command: "findmnt -n -o SOURCE {{ loadnet_data_source_mountpoint }}"
-  changed_when: false
+- name: Build auto-adopt candidate list (non-root mounts)
+  ansible.builtin.set_fact:
+    loadnet_mount_candidates: >-
+      {{
+        ansible_facts.mounts
+        | rejectattr('mount', 'equalto', '/')
+        | rejectattr('mount', 'match', '^/boot')
+        | rejectattr('mount', 'match', '^/efi')
+        | rejectattr('fstype', 'in', loadnet_mount_excluded_fstypes)
+        | rejectattr('device', 'equalto', root_source.stdout)
+        | list
+      }}
+  vars:
+    loadnet_mount_excluded_fstypes:
+      - tmpfs
+      - devtmpfs
+      - overlay
+      - squashfs
+      - proc
+      - sysfs
+      - cgroup
+      - cgroup2
+      - mqueue
+      - pstore
+      - tracefs
+      - debugfs
+      - securityfs
+      - fusectl
+      - rpc_pipefs
+      - autofs
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
-    - source_mount_check.rc == 0
-  register: source_device
+
+- name: Select auto-adopt source mount when configured mount is missing
+  ansible.builtin.set_fact:
+    loadnet_auto_source_mount: "{{ loadnet_mount_candidates[0] }}"
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - loadnet_configured_source_mount | length == 0
+    - loadnet_mount_candidates | length == 1
+
+- name: Warn when multiple non-root mount candidates exist
+  ansible.builtin.debug:
+    msg: >-
+      Multiple non-root mountpoints detected: {{ loadnet_mount_candidates | map(attribute='mount') | list }}.
+      Set loadnet_data_source_mountpoint explicitly to select one.
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+    - loadnet_configured_source_mount | length == 0
+    - loadnet_mount_candidates | length > 1
+
+- name: Select effective source mount (configured or auto-detected)
+  ansible.builtin.set_fact:
+    loadnet_effective_source_mount: >-
+      {{
+        (loadnet_configured_source_mount | length > 0)
+        | ternary(loadnet_configured_source_mount, loadnet_auto_source_mount | default({}))
+      }}
+    loadnet_effective_source_mountpoint: >-
+      {{
+        (loadnet_configured_source_mount | length > 0)
+        | ternary(loadnet_configured_source_mount.mount, (loadnet_auto_source_mount | default({})).mount | default(''))
+      }}
+    loadnet_effective_source_device: >-
+      {{
+        (loadnet_configured_source_mount | length > 0)
+        | ternary(loadnet_configured_source_mount.device, (loadnet_auto_source_mount | default({})).device | default(''))
+      }}
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
+
+- name: Select effective source dir
+  ansible.builtin.set_fact:
+    loadnet_effective_source_dir: >-
+      {{
+        (loadnet_configured_source_mount | length > 0)
+        | ternary(loadnet_data_source_dir,
+                  (loadnet_effective_source_mountpoint != '') | ternary(loadnet_effective_source_mountpoint + '/loadnet', ''))
+      }}
+  when:
+    - not (loadnet_storage_wipe | bool)
+    - mount_check.rc != 0
 
 - name: Fail safely if source mountpoint is on the root filesystem (refuse to use OS disk)
   ansible.builtin.fail:
     msg: >-
-      Refusing to auto-adopt {{ loadnet_data_source_mountpoint }} because it appears to be on the root filesystem
-      (SOURCE {{ source_device.stdout }} == {{ root_source.stdout }}). Mount a separate data volume at {{ loadnet_data_mountpoint }}
+      Refusing to auto-adopt {{ loadnet_effective_source_mountpoint }} because it appears to be on the root filesystem
+      (SOURCE {{ loadnet_effective_source_device }} == {{ root_source.stdout }}). Mount a separate data volume at {{ loadnet_data_mountpoint }}
       or provide explicit loadnet_data_devices + loadnet_storage_wipe=true.
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
-    - source_mount_check.rc == 0
-    - source_device.stdout == root_source.stdout
+    - loadnet_effective_source_mountpoint != ''
+    - loadnet_effective_source_device == root_source.stdout
 
 - name: Ensure source dir exists (auto-adopt)
   ansible.builtin.file:
-    path: "{{ loadnet_data_source_dir }}"
+    path: "{{ loadnet_effective_source_dir }}"
     state: directory
     owner: root
     group: root
@@ -141,29 +253,29 @@
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
-    - source_mount_check.rc == 0
-    - source_device.stdout != root_source.stdout
+    - loadnet_effective_source_mountpoint != ''
+    - loadnet_effective_source_device != root_source.stdout
 
 - name: Bind-mount source dir into data mountpoint (auto-adopt)
-  ansible.builtin.command: "mount --bind {{ loadnet_data_source_dir }} {{ loadnet_data_mountpoint }}"
+  ansible.builtin.command: "mount --bind {{ loadnet_effective_source_dir }} {{ loadnet_data_mountpoint }}"
   changed_when: true
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
-    - source_mount_check.rc == 0
-    - source_device.stdout != root_source.stdout
+    - loadnet_effective_source_mountpoint != ''
+    - loadnet_effective_source_device != root_source.stdout
 
 - name: Persist bind-mount in fstab (auto-adopt)
   ansible.builtin.lineinfile:
     path: /etc/fstab
     create: true
-    line: "{{ loadnet_data_source_dir }} {{ loadnet_data_mountpoint }} none bind,x-systemd.requires-mounts-for={{ loadnet_data_source_mountpoint }} 0 0"
-    regexp: "^{{ loadnet_data_source_dir | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+none\\s+"
+    line: "{{ loadnet_effective_source_dir }} {{ loadnet_data_mountpoint }} none bind,x-systemd.requires-mounts-for={{ loadnet_effective_source_mountpoint }} 0 0"
+    regexp: "^{{ loadnet_effective_source_dir | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+none\\s+"
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
-    - source_mount_check.rc == 0
-    - source_device.stdout != root_source.stdout
+    - loadnet_effective_source_mountpoint != ''
+    - loadnet_effective_source_device != root_source.stdout
 
 - name: Re-check data mount is present after auto-adopt
   ansible.builtin.command: "findmnt -n {{ loadnet_data_mountpoint }}"
@@ -172,6 +284,7 @@
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
   register: mount_check_after
+  failed_when: false
 
 - name: Fail with guidance if data mount is missing (non-destructive mode)
   ansible.builtin.fail:
@@ -180,6 +293,7 @@
       Either mount your data volume there, or run net-storage with loadnet_storage_wipe=true and explicit loadnet_data_devices.
       If your provider image mounts the data volume elsewhere, set loadnet_data_source_mountpoint (default: /home)
       and/or loadnet_data_source_dir (default: /home/loadnet).
+      Detected mountpoints: {{ loadnet_mount_candidates | default([]) | map(attribute='mount') | list }}.
   when:
     - not (loadnet_storage_wipe | bool)
     - mount_check.rc != 0
@@ -219,6 +333,28 @@
     mode: "0711"
   when: loadnet_move_docker_dataroot | bool
 
+- name: Ensure /etc/docker exists (optional)
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: loadnet_move_docker_dataroot | bool
+
+- name: Check if docker service exists (optional)
+  ansible.builtin.command: "systemctl status docker"
+  changed_when: false
+  failed_when: false
+  register: loadnet_docker_status
+  when: loadnet_move_docker_dataroot | bool
+
+- name: Check for existing docker data (optional)
+  ansible.builtin.stat:
+    path: /var/lib/docker
+  register: loadnet_docker_data
+  when: loadnet_move_docker_dataroot | bool
+
 - name: Configure Docker data-root (optional)
   ansible.builtin.copy:
     dest: /etc/docker/daemon.json
@@ -239,12 +375,14 @@
   when:
     - loadnet_move_docker_dataroot | bool
     - docker_daemon_json.changed
+    - loadnet_docker_status.rc != 4
 
 - name: Migrate existing docker state (optional, best-effort)
   ansible.builtin.command: "rsync -aHAX --delete /var/lib/docker/ {{ loadnet_docker_dataroot }}/"
   when:
     - loadnet_move_docker_dataroot | bool
     - docker_daemon_json.changed
+    - loadnet_docker_data.stat.exists
   changed_when: true
   failed_when: false
 
@@ -256,3 +394,4 @@
   when:
     - loadnet_move_docker_dataroot | bool
     - docker_daemon_json.changed
+    - loadnet_docker_status.rc != 4

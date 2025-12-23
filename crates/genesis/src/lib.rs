@@ -88,7 +88,25 @@ pub fn write_genesis(path: &std::path::Path, genesis: &Genesis) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let genesis_json = serde_json::to_string_pretty(genesis)?;
+    let mut genesis_value = serde_json::to_value(genesis)?;
+    if let Some(root) = genesis_value.as_object_mut() {
+        root.insert("gasUsed".to_string(), serde_json::Value::String("0x0".to_string()));
+        root.insert(
+            "parentHash".to_string(),
+            serde_json::Value::String(
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+        );
+    }
+    if let Some(config) = genesis_value
+        .get_mut("config")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if matches!(config.get("daoForkSupport"), Some(serde_json::Value::Bool(false))) {
+            config.remove("daoForkSupport");
+        }
+    }
+    let genesis_json = serde_json::to_string_pretty(&genesis_value)?;
     std::fs::write(path, genesis_json)?;
     Ok(())
 }

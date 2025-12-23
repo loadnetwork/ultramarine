@@ -9,8 +9,16 @@
     loadnet_networks: "{{ loadnet_root }}/networks"
     loadnet_net: "{{ net }}"
     loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
-    restart_on_deploy: "{{ restart_on_deploy | default(true) }}"
-    apply_firewall: "{{ apply_firewall | default(false) }}"
+    # Avoid self-referential defaults (which can cause recursive loop errors in Jinja).
+    # Extra-vars (from `make net-deploy ...`) override these safely.
+    restart_on_deploy: true
+    apply_firewall: false
+    loadnet_prometheus_port: 9090
+    loadnet_prometheus_bind: "127.0.0.1"
+    loadnet_prometheus_scrape_interval: "5s"
+    loadnet_grafana_port: 3000
+    loadnet_grafana_bind: "0.0.0.0"
+    loadnet_el_http_bind: "0.0.0.0"
   pre_tasks:
     - name: Assert required vars
       ansible.builtin.assert:
@@ -26,9 +34,21 @@
           - loadnet_lock.network.name == net
         fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
 
+    - name: Resolve repo root on controller
+      ansible.builtin.set_fact:
+        loadnet_repo_root: "{{ playbook_dir | dirname | dirname | dirname }}"
+
+    - name: Resolve manifest path on controller
+      ansible.builtin.set_fact:
+        loadnet_manifest_path: >-
+          {{
+            (loadnet_lock.inputs.manifest_path is match('^/'))
+            | ternary(loadnet_lock.inputs.manifest_path, loadnet_repo_root + '/' + loadnet_lock.inputs.manifest_path)
+          }}
+
     - name: Compute manifest sha256 on controller (drift check)
       ansible.builtin.stat:
-        path: "{{ loadnet_lock.inputs.manifest_path }}"
+        path: "{{ loadnet_manifest_path }}"
         checksum_algorithm: sha256
       delegate_to: localhost
       become: false
@@ -45,6 +65,7 @@
     - { role: firewall, when: apply_firewall | bool }
     - load_reth
     - ultramarine
+    - monitoring
   post_tasks:
     - name: Point /opt/loadnet/current to selected network
       ansible.builtin.file:
@@ -64,10 +85,51 @@
       loop: "{{ loadnet_nodes }}"
       when: restart_on_deploy | bool
 
+    - name: Check for stale load-reth containers that block restarts
+      ansible.builtin.command:
+        cmd: "docker inspect -f '{{\"{{\"}}.Id{{\"}}\"}}' load-reth-{{ item }}"
+      register: load_reth_container
+      loop: "{{ loadnet_nodes }}"
+      changed_when: false
+      failed_when: false
+      when: restart_on_deploy | bool
+
+    - name: Remove stale load-reth containers
+      ansible.builtin.command:
+        cmd: "docker rm -f load-reth-{{ item.item }}"
+      loop: "{{ load_reth_container.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - restart_on_deploy | bool
+        - item.rc == 0
+
+    - name: Wait for load-reth engine IPC sockets
+      ansible.builtin.wait_for:
+        path: "/run/load-reth/{{ item }}/engine.ipc"
+        state: present
+        timeout: 90
+      loop: "{{ loadnet_nodes }}"
+      when: restart_on_deploy | bool
+
     - name: Restart ultramarine instances (apply new env/artifacts)
       ansible.builtin.systemd:
         name: "ultramarine@{{ item }}.service"
         enabled: true
         state: restarted
       loop: "{{ loadnet_nodes }}"
+      when: restart_on_deploy | bool
+
+    - name: Restart Prometheus (monitoring)
+      ansible.builtin.systemd:
+        name: prometheus.service
+        enabled: true
+        state: restarted
+      when: restart_on_deploy | bool
+
+    - name: Restart Grafana (monitoring)
+      ansible.builtin.systemd:
+        name: grafana.service
+        enabled: true
+        state: restarted
       when: restart_on_deploy | bool

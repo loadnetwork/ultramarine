@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "netgen",
+    "version": "0.1.0"
+  },
+  "network": {
+    "name": "fibernet",
+    "chain_id": 16384
+  },
+  "inputs": {
+    "manifest_path": "infra/manifests/fibernet.yaml",
+    "manifest_sha256": "73edab8044a071cd9799fa95a7418a51b147f3836a324fc01063e6a6de22786c"
+  },
+  "policy": {
+    "engine": "ipc-only",
+    "sync_enabled": true,
+    "metrics_bind": "127.0.0.1"
+  },
+  "hosts": [
+    {
+      "id": "f4-metal-medium-ams-fibernet-2",
+      "public_ip": "64.34.87.1",
+      "ssh_user": "ubuntu"
+    },
+    {
+      "id": "lon2-0",
+      "public_ip": "67.213.117.143",
+      "ssh_user": "ubuntu"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node-0",
+      "host": "lon2-0",
+      "role": "validator",
+      "images": {
+        "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
+        "load_reth": "docker.io/loadnetwork/load-reth:fibernet"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-0/engine.ipc"
+      },
+      "ports": {
+        "el_http": 8545,
+        "el_p2p": 30303,
+        "el_metrics": 9001,
+        "cl_p2p": 27000,
+        "cl_mempool": 28000,
+        "cl_metrics": 29000
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-0.key",
+        "enode": "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+        "bootnodes": [
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@64.34.87.1:31303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "loads3",
+        "bearer_token_present": true
+      }
+    },
+    {
+      "id": "node-1",
+      "host": "f4-metal-medium-ams-fibernet-2",
+      "role": "validator",
+      "images": {
+        "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
+        "load_reth": "docker.io/loadnetwork/load-reth:fibernet"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-1/engine.ipc"
+      },
+      "ports": {
+        "el_http": 9545,
+        "el_p2p": 31303,
+        "el_metrics": 10001,
+        "cl_p2p": 28000,
+        "cl_mempool": 29000,
+        "cl_metrics": 30000
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-1.key",
+        "enode": "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@64.34.87.1:31303",
+        "bootnodes": [
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "loads3",
+        "bearer_token_present": true
+      }
+    }
+  ],
+  "artifacts": {
+    "public": {
+      "genesis_json": {
+        "path": "bundle/public/genesis.json",
+        "sha256": "d1ed2cbf8f6219188ddf15cc8d3f4420eabda0acf9c94a75db19a0d640e1a2a4"
+      }
+    }
+  }
+}

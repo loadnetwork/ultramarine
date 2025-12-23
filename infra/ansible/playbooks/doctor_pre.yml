@@ -1,0 +1,88 @@
+---
+- name: Net doctor (pre-deploy)
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    loadnet_root: /opt/loadnet
+    loadnet_current: "{{ loadnet_root }}/current"
+    loadnet_networks: "{{ loadnet_root }}/networks"
+    loadnet_net: "{{ net }}"
+    loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+  tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - net is defined
+          - net_dir is defined
+
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', net_dir + '/network.lock.json') | from_json }}"
+
+    - name: Assert lockfile matches selected network
+      ansible.builtin.assert:
+        that:
+          - loadnet_lock.network.name == net
+        fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
+
+    - name: Check required services are active (best-effort)
+      ansible.builtin.command: "systemctl is-active --quiet {{ item }}"
+      loop:
+        - docker
+        - chrony
+      changed_when: false
+      failed_when: false
+      register: active_services
+
+    - name: Warn if required services are not active
+      ansible.builtin.debug:
+        msg: "service {{ item.item }} is not active yet (expected after net-deploy)."
+      loop: "{{ active_services.results }}"
+      when: item.rc != 0
+
+    - name: Check fs.file-max baseline
+      ansible.builtin.command: sysctl -n fs.file-max
+      changed_when: false
+      register: fs_file_max
+
+    - name: Assert fs.file-max is sufficient
+      ansible.builtin.assert:
+        that:
+          - (fs_file_max.stdout | int) >= 1048576
+        fail_msg: "fs.file-max={{ fs_file_max.stdout }} is too low; expected >= 1048576"
+
+    - name: Check data mount exists (/var/lib/loadnet)
+      ansible.builtin.command: "findmnt -n /var/lib/loadnet"
+      changed_when: false
+      register: findmnt_loadnet
+      failed_when: false
+
+    - name: Warn if /var/lib/loadnet is not mounted
+      ansible.builtin.debug:
+        msg: "/var/lib/loadnet is not mounted (required for validator go-live). Run net-storage."
+      when: findmnt_loadnet.rc != 0
+
+    - name: Check docker data-root
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker info --format '{{"{{.DockerRootDir}}"}}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: docker_root
+      failed_when: false
+
+    - name: Show docker data-root
+      ansible.builtin.debug:
+        msg: "docker data-root: {{ docker_root.stdout | default('unknown') }}"
+
+    - name: Check free disk space under /var/lib (best-effort)
+      ansible.builtin.command: "df -Pk /var/lib"
+      changed_when: false
+      register: df_var_lib
+      failed_when: false
+
+    - name: Show /var/lib disk usage
+      ansible.builtin.debug:
+        var: df_var_lib.stdout_lines

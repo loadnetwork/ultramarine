@@ -1,5 +1,5 @@
 ---
-- name: Net doctor (preflight + basic diagnostics)
+- name: Net doctor (post-deploy)
   hosts: all
   gather_facts: true
   become: true
@@ -119,6 +119,10 @@
       ansible.builtin.set_fact:
         loadnet_validator_nodes: "{{ loadnet_lock.nodes | selectattr('role', 'equalto', 'validator') | map(attribute='id') | list }}"
 
+    - name: Build expected metrics bind (from lockfile policy)
+      ansible.builtin.set_fact:
+        loadnet_expected_metrics_bind: "{{ loadnet_lock.policy.metrics_bind | default('127.0.0.1') }}"
+
     - name: Check free disk space under /var/lib (best-effort)
       ansible.builtin.command: "df -Pk /var/lib"
       changed_when: false
@@ -198,8 +202,8 @@
             echo "missing listener for ultramarine cl_mempool port ${cl_mempool} (node=${node})" >&2
             exit 1
           }
-          ss -lnt | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:${cl_metrics}$" || {
-            echo "ultramarine metrics is not bound to 127.0.0.1:${cl_metrics} (node=${node})" >&2
+          ss -lnt | awk '{print $4}' | grep -Eq "^{{ loadnet_expected_metrics_bind | regex_escape }}:${cl_metrics}$" || {
+            echo "ultramarine metrics is not bound to {{ loadnet_expected_metrics_bind }}:${cl_metrics} (node=${node})" >&2
             exit 1
           }
         fi
