@@ -16,3 +16,13 @@
         state: stopped
       loop: "{{ loadnet_nodes }}"
       ignore_errors: true
+    - name: Stop Grafana (monitoring)
+      ansible.builtin.systemd:
+        name: grafana.service
+        state: stopped
+      ignore_errors: true
+    - name: Stop Prometheus (monitoring)
+      ansible.builtin.systemd:
+        name: prometheus.service
+        state: stopped
+      ignore_errors: true

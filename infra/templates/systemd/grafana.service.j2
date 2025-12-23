@@ -1,0 +1,28 @@
+[Unit]
+Description=loadnet-grafana
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+WorkingDirectory=/opt/loadnet/current
+
+ExecStartPre=/bin/bash -lc 'docker rm -f loadnet-grafana >/dev/null 2>&1 || true'
+
+ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name loadnet-grafana --network host --platform=linux/amd64 \
+  -e GF_SERVER_HTTP_ADDR={{ loadnet_grafana_bind | default("0.0.0.0") }} \
+  -e GF_SERVER_HTTP_PORT={{ loadnet_grafana_port | default(3000) }} \
+  -v /opt/loadnet/current/monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro \
+  -v /opt/loadnet/current/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro \
+  -v /var/lib/grafana:/var/lib/grafana \
+  docker.io/grafana/grafana:10.4.2'
+
+ExecStop=/usr/bin/docker stop -t 10 loadnet-grafana
+
+[Install]
+WantedBy=multi-user.target

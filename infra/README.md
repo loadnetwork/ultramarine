@@ -17,6 +17,8 @@ Netgen is a Rust binary in the workspace (source at `infra/gen/netgen/`).
 - Optionally provides per-node secrets (plaintext or sops-encrypted):
   - `cargo run -p ultramarine-netgen --bin netgen -- gen --manifest infra/manifests/<net>.yaml --out-dir infra/networks/<net> --secrets-file infra/networks/<net>/secrets.sops.yaml`
   - By default, `gen` fails if any validator is missing an archiver bearer token (required for a bootable testnet). For non-bootable dry-runs (e.g. to bootstrap storage), use `make net-plan NET=<net>` (or pass `--allow-missing-archiver-tokens` directly).
+  - To create the encrypted file from a plaintext `secrets.yaml`, use:
+    - `make net-secrets-encrypt NET=<net> SOPS_AGE_RECIPIENT=<age1...> REMOVE_PLAINTEXT=true`
 
 Generated outputs (current):
 
@@ -51,19 +53,28 @@ Operator commands (from `ultramarine/`):
 
 - Dry-run / bootstrap (no secrets yet): `make net-plan NET=<net>` (generates inventory/lockfile/bundles but the network won’t be bootable without archiver tokens for validators)
 - Generate artifacts: `make net-gen NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
+- One-command bootstrap (plan + storage + pre-doctor): `make net-bootstrap NET=<net> MOVE_DOCKER_DATAROOT=true`
+- One-command go-live (gen + storage + deploy + post-doctor + health): `make net-launch NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml APPLY_FIREWALL=true MOVE_DOCKER_DATAROOT=true`
+- One-command update (gen + deploy + health): `make net-update NET=<net> SECRETS_FILE=infra/networks/<net>/secrets.sops.yaml`
 - Deploy to hosts (default: restarts services to apply new config): `make net-deploy NET=<net>`
 - Start/restart: `make net-up NET=<net>` / Stop: `make net-down NET=<net>`
 - Inspect: `make net-status NET=<net>` / `make net-logs NET=<net> LINES=200`
 - Health: `make net-health NET=<net>`
-- Preflight: `make net-doctor NET=<net>`
+- Preflight (pre-deploy): `make net-doctor-pre NET=<net>`
+- Diagnostics (post-deploy): `make net-doctor NET=<net>`
 - Firewall: `make net-firewall NET=<net>` (or `make net-deploy NET=<net> APPLY_FIREWALL=true`)
 - Storage bootstrap: `make net-storage NET=<net>` (see notes below)
+- Wipe network from hosts (destructive): `make net-wipe NET=<net> WIPE_CONFIRM=WIPE` (tune with `WIPE_STATE=true|false`, `WIPE_FIREWALL=true|false`, and `LIMIT=<host_id>`)
 - Limit any Ansible run to a single host: add `LIMIT=<host_id>` (e.g. `make net-storage NET=<net> LIMIT=lon2-0`)
+- SSH key: pass `SSH_KEY=/path/to/key` (or use ssh-agent / `~/.ssh/config`).
 - Local checks: `make infra-checks NET=<net>`
 
 Notes:
 
+- Controller requirement: use an Ansible version compatible with your controller Python.
+  - `ansible-core 2.15.x` is not compatible with Python `3.14+`. If you used `pipx` and see errors involving `ast.Str`, reinstall Ansible with Python 3.11/3.12 (example: `pipx reinstall --python python3.12 ansible-core`).
 - Storage bootstrap is intentionally separate from deploy.
+- If your host image enforces a broken apt proxy, set `APT_DISABLE_PROXY=true` (writes `/etc/apt/apt.conf.d/99loadnet-no-proxy`).
 - In non-destructive mode, `net-storage` expects the data volume to be mounted at `DATA_MOUNTPOINT` (default: `/var/lib/loadnet`).
 - If your provider image mounts the data volume elsewhere (common: `/home`), `net-storage` auto-adopts it by bind-mounting `DATA_SOURCE_DIR` (default: `/home/loadnet`) into `DATA_MOUNTPOINT` and persists it in `/etc/fstab` with systemd mount ordering (`x-systemd.requires-mounts-for=/home`).
 - Destructive provisioning requires explicit device IDs and an explicit flag, e.g.:

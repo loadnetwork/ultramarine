@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "netgen",
+    "version": "0.1.0"
+  },
+  "network": {
+    "name": "fibernet",
+    "chain_id": 16384
+  },
+  "nodes": [
+    {
+      "id": "node-0",
+      "role": "validator",
+      "host": "lon2-0",
+      "public_ip": "67.213.117.143",
+      "ports": {
+        "el_http": 8545,
+        "el_p2p": 30303,
+        "el_metrics": 9001,
+        "cl_p2p": 27000,
+        "cl_mempool": 28000,
+        "cl_metrics": 29000
+      },
+      "load_reth": {
+        "enode": "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+        "bootnodes": [
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@64.34.87.1:31303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "loads3"
+      }
+    },
+    {
+      "id": "node-1",
+      "role": "validator",
+      "host": "f4-metal-medium-ams-fibernet-2",
+      "public_ip": "64.34.87.1",
+      "ports": {
+        "el_http": 9545,
+        "el_p2p": 31303,
+        "el_metrics": 10001,
+        "cl_p2p": 28000,
+        "cl_mempool": 29000,
+        "cl_metrics": 30000
+      },
+      "load_reth": {
+        "enode": "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@64.34.87.1:31303",
+        "bootnodes": [
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://archiver.example.com",
+        "provider_id": "loads3"
+      }
+    }
+  ],
+  "artifacts": {
+    "public": {
+      "genesis_json": {
+        "path": "bundle/public/genesis.json",
+        "sha256": "d1ed2cbf8f6219188ddf15cc8d3f4420eabda0acf9c94a75db19a0d640e1a2a4"
+      }
+    }
+  }
+}

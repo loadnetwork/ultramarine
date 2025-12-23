@@ -1,21 +1,21 @@
 schema_version: 1
 
 network:
-  name: alphanet
+  name: fibernet
   chain_id: 16384
 
 # Container images pinned by tag (MVP). M4 can add optional digests.
 images:
-  ultramarine: "ultramarine:local"
-  load_reth: "docker.io/loadnetwork/load-reth:v0.1.2"
+  ultramarine: "docker.io/loadnetwork/ultramarine:fibernet"
+  load_reth: "docker.io/loadnetwork/load-reth:fibernet"
 
 # Hosts are the failure domains. For public testnets, these should be public IPs/DNS.
 hosts:
   - id: lon2-0
     public_ip: "67.213.117.143"
     ssh_user: ubuntu
-  - id: fra2-0
-    public_ip: "67.213.121.57"
+  - id: f4-metal-medium-ams-fibernet-2
+    public_ip: "64.34.87.1"
     ssh_user: ubuntu
 
 # Nodes are CL+EL pairs and must be co-located (one node references one host).
@@ -24,7 +24,7 @@ nodes:
     host: lon2-0
     role: validator
   - id: node-1
-    host: fra2-0
+    host: f4-metal-medium-ams-fibernet-2
     role: validator
 
 # Engine API policy for deploys: IPC-only.

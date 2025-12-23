@@ -1,0 +1,28 @@
+[Unit]
+Description=loadnet-prometheus
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+WorkingDirectory=/opt/loadnet/current
+
+ExecStartPre=/bin/bash -lc 'docker rm -f loadnet-prometheus >/dev/null 2>&1 || true'
+
+ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name loadnet-prometheus --network host --platform=linux/amd64 \
+  -v /opt/loadnet/current/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro \
+  -v /var/lib/prometheus:/prometheus \
+  docker.io/prom/prometheus:v2.54.1 \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/prometheus \
+    --web.listen-address={{ loadnet_prometheus_bind | default("127.0.0.1") }}:{{ loadnet_prometheus_port | default(9090) }}'
+
+ExecStop=/usr/bin/docker stop -t 10 loadnet-prometheus
+
+[Install]
+WantedBy=multi-user.target

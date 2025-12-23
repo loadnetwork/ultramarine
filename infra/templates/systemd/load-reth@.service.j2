@@ -17,24 +17,25 @@ WorkingDirectory=/opt/loadnet/current
 
 EnvironmentFile=/opt/loadnet/current/bundle/private/env/load-reth-%i.env
 
-ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/$LOAD_RETH_GENESIS_JSON"'
+ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/bundle/public/genesis.json"'
 ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/$LOAD_RETH_P2P_KEY_PATH"'
+ExecStartPre=/bin/bash -lc 'docker rm -f load-reth-%i >/dev/null 2>&1 || true'
 
-ExecStart=/usr/bin/docker run --rm --name load-reth-%i --network host \
+ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i --network host --platform=linux/amd64 --user 0:0 \
   -v /var/lib/load-reth/%i:/data/load-reth \
-  -v /opt/loadnet/current/$LOAD_RETH_GENESIS_JSON:/assets/genesis.json:ro \
-  -v /opt/loadnet/current/$LOAD_RETH_P2P_KEY_PATH:/assets/p2p.key:ro \
+  -v /opt/loadnet/current/bundle/public:/assets:ro \
+  -v /opt/loadnet/current/$LOAD_RETH_P2P_KEY_PATH:/run/load-reth/%i/p2p.key:ro \
   -v /run/load-reth/%i:/run/load-reth/%i \
   $LOAD_RETH_IMAGE node -d \
     --datadir=/data/load-reth \
     --chain=/assets/genesis.json \
-    --http --http.addr=127.0.0.1 --http.port=$LOAD_RETH_HTTP_PORT \
+    --http --http.addr={{ loadnet_el_http_bind | default("0.0.0.0") }} --http.port=$LOAD_RETH_HTTP_PORT \
     --metrics=127.0.0.1:$LOAD_RETH_METRICS_PORT \
     --port=$LOAD_RETH_P2P_PORT --discovery.port=$LOAD_RETH_P2P_PORT \
     --nat=extip:$LOAD_RETH_PUBLIC_IP \
-    --p2p-secret-key=/assets/p2p.key \
+    --p2p-secret-key=/run/load-reth/%i/p2p.key \
     --bootnodes=$LOAD_RETH_BOOTNODES \
-    --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH
+    --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH'
 
 ExecStop=/usr/bin/docker stop -t 10 load-reth-%i
 
