@@ -39,6 +39,27 @@ pub fn build_dev_genesis(chain_id: u64) -> Result<Genesis> {
         );
     }
 
+    build_genesis_from_alloc(chain_id, alloc)
+}
+
+pub fn build_genesis(chain_id: u64, alloc: BTreeMap<Address, GenesisAccount>) -> Result<Genesis> {
+    build_genesis_from_alloc(chain_id, alloc)
+}
+
+pub fn build_genesis_from_alloc_strings(
+    chain_id: u64,
+    alloc: Vec<(String, String)>,
+) -> Result<Genesis> {
+    let mut map = BTreeMap::new();
+    for (address, balance_wei) in alloc {
+        let addr = Address::from_str(&address)?;
+        let balance = U256::from_str(&balance_wei)?;
+        map.insert(addr, GenesisAccount { balance, ..Default::default() });
+    }
+    build_genesis_from_alloc(chain_id, map)
+}
+
+fn build_genesis_from_alloc(chain_id: u64, alloc: BTreeMap<Address, GenesisAccount>) -> Result<Genesis> {
     // The Ethereum Cancun-Deneb (Dencun) upgrade was activated on the mainnet on March 13, 2024.
     // We keep the timestamp reference handy for future policy, but Load activates forks at genesis.
     let date = NaiveDate::from_ymd_opt(2024, 3, 14).unwrap();

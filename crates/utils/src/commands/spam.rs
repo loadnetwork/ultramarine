@@ -7,6 +7,7 @@ use alloy_rpc_types_txpool::TxpoolStatus;
 use alloy_signer_local::PrivateKeySigner;
 use clap::Parser;
 use color_eyre::eyre::{self, Result};
+use hex::FromHex;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -43,6 +44,9 @@ pub struct SpamCmd {
     /// Index of the signer to use
     #[clap(long, default_value = "0")]
     signer_index: usize,
+    /// Optional 0x-prefixed hex private key to use as the signer (overrides signer_index).
+    #[clap(long)]
+    private_key: Option<String>,
 }
 
 impl SpamCmd {
@@ -66,6 +70,7 @@ impl SpamCmd {
             self.blobs,
             self.blobs_per_tx,
             self.signer_index,
+            self.private_key.clone(),
         )?;
         spammer.run().await
     }
@@ -103,13 +108,24 @@ impl Spammer {
         blobs: bool,
         blobs_per_tx: usize,
         signer_index: usize,
+        private_key: Option<String>,
     ) -> Result<Self> {
         if blobs && !(1..=1024).contains(&blobs_per_tx) {
             return Err(eyre::eyre!("blobs_per_tx must be between 1 and 1024"));
         }
-        let signers = ultramarine_genesis::make_signers();
-        let signer =
-            signers.get(signer_index).ok_or_else(|| eyre::eyre!("Invalid signer index"))?.clone();
+        let signer = if let Some(pk) = private_key {
+            let pk = pk.strip_prefix("0x").unwrap_or(&pk);
+            let bytes = <[u8; 32]>::from_hex(pk)
+                .map_err(|e| eyre::eyre!("invalid --private-key (expected 32-byte hex): {e}"))?;
+            PrivateKeySigner::from_slice(&bytes)
+                .map_err(|e| eyre::eyre!("failed to build signer from --private-key: {e}"))?
+        } else {
+            let signers = ultramarine_genesis::make_signers();
+            signers
+                .get(signer_index)
+                .ok_or_else(|| eyre::eyre!("Invalid signer index"))?
+                .clone()
+        };
         Ok(Self {
             client: RpcClient::new(url),
             chain_id,
@@ -142,7 +158,9 @@ impl Spammer {
             async move { self_arc.tracker(result_receiver, report_receiver, finish_receiver).await }
         });
 
-        let _ = tokio::join!(spammer_handle, tracker_handle);
+        let (spammer_res, tracker_res) = tokio::join!(spammer_handle, tracker_handle);
+        spammer_res.map_err(|e| eyre::eyre!("spammer task failed: {e}"))??;
+        tracker_res.map_err(|e| eyre::eyre!("tracker task failed: {e}"))??;
         Ok(())
     }
 
