@@ -1,13 +1,10 @@
 {
   "alloc": {
-    "0x6512b55f1debdabeb01fe96d891971cc23e24ecb": {
-      "balance": "0x32d26d12e980b600000"
+    "0x197f818c1313dc58b32d88078ecdfb40ea822614": {
+      "balance": "0x422ca8b0a00a425000000"
     },
-    "0x9858effd232b4033e47d90003d41ec34ecaeda94": {
-      "balance": "0x32d26d12e980b600000"
-    },
-    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
-      "balance": "0x32d26d12e980b600000"
+    "0x2411c6e43299a09d2225d58e9e7977237b3e4c49": {
+      "balance": "0x422ca8b0a00a425000000"
     }
   },
   "baseFeePerGas": "0x7",

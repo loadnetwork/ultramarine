@@ -57,6 +57,7 @@ enum Cmd {
 struct Manifest {
     schema_version: u32,
     network: Network,
+    execution: Option<ExecutionGenesis>,
     images: Images,
     hosts: Vec<Host>,
     nodes: Vec<Node>,
@@ -71,6 +72,18 @@ struct Manifest {
 struct Network {
     name: String,
     chain_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ExecutionGenesis {
+    alloc: Vec<ExecutionAlloc>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ExecutionAlloc {
+    address: String,
+    /// Balance as a decimal string in wei (e.g. "15000000000000000000000").
+    balance_wei: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -338,6 +351,22 @@ fn validate_manifest(m: &Manifest, allow_unsafe_failure_domains: bool) -> Result
     }
     if !m.sync.enabled {
         bail!("sync.enabled must be true for multi-host networks");
+    }
+    if let Some(exe) = &m.execution {
+        if exe.alloc.is_empty() {
+            bail!("execution.alloc must be non-empty when execution section is provided");
+        }
+        for a in &exe.alloc {
+            if !a.address.starts_with("0x") || a.address.len() != 42 {
+                bail!(
+                    "execution.alloc.address must be a 0x-prefixed 20-byte hex address (got {})",
+                    a.address
+                );
+            }
+            if a.balance_wei.trim().is_empty() {
+                bail!("execution.alloc.balance_wei must be non-empty for {}", a.address);
+            }
+        }
     }
     if !m.archiver.enabled {
         bail!("archiver.enabled must be true (validators require archiver)");
@@ -686,7 +715,17 @@ fn generate(
     let ultra_homes_dir = private_dir.join("ultramarine").join("homes");
 
     // Public artifact: EL genesis.
-    let genesis = ultramarine_genesis::build_dev_genesis(manifest.network.chain_id)?;
+    let genesis = if let Some(exe) = &manifest.execution {
+        let pairs = exe
+            .alloc
+            .iter()
+            .map(|a| (a.address.clone(), a.balance_wei.clone()))
+            .collect::<Vec<_>>();
+        ultramarine_genesis::build_genesis_from_alloc_strings(manifest.network.chain_id, pairs)
+            .map_err(|e| eyre!("failed to build execution genesis from manifest: {e}"))?
+    } else {
+        ultramarine_genesis::build_dev_genesis(manifest.network.chain_id)?
+    };
     let genesis_path = public_dir.join("genesis.json");
     ultramarine_genesis::write_genesis(&genesis_path, &genesis)?;
     let genesis_sha = sha256_file(&genesis_path)?;

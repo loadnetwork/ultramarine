@@ -4,6 +4,16 @@ network:
   name: fibernet
   chain_id: 16384
 
+# Execution genesis (alloc) for fibernet.
+execution:
+  alloc:
+    # Treasury / operator address (50% of supply: 5_000_000 / 10_000_000).
+    - address: "0x197f818c1313dc58b32d88078ecdfb40ea822614"
+      balance_wei: "5000000000000000000000000"
+    # Spam/blobs funding account (remaining supply: 50%).
+    - address: "0x2411c6e43299a09d2225d58e9e7977237b3e4c49"
+      balance_wei: "5000000000000000000000000"
+
 # Container images pinned by tag (MVP). M4 can add optional digests.
 images:
   ultramarine: "docker.io/loadnetwork/ultramarine:fibernet"

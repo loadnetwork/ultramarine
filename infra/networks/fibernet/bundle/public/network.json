@@ -64,7 +64,7 @@
     "public": {
       "genesis_json": {
         "path": "bundle/public/genesis.json",
-        "sha256": "d1ed2cbf8f6219188ddf15cc8d3f4420eabda0acf9c94a75db19a0d640e1a2a4"
+        "sha256": "561eeedd42623090d34ff0e9c45b1177772e2468011440103d8323456fd1c120"
       }
     }
   }
