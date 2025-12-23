@@ -1,13 +1,45 @@
 ---
+- name: Optionally disable apt proxy
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99loadnet-no-proxy
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Acquire::http::Proxy "false";
+      Acquire::https::Proxy "false";
+      Acquire::ftp::Proxy "false";
+  when: loadnet_apt_disable_proxy | default(false) | bool
+
 - name: Install dependencies
-  ansible.builtin.apt:
-    name:
-      - docker.io
-      - curl
-      - jq
-      - chrony
-    state: present
-    update_cache: true
+  block:
+    - name: Install dependencies (with cache update)
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - curl
+          - jq
+          - chrony
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ loadnet_apt_cache_valid_time | default(3600) }}"
+        update_cache_retries: "{{ loadnet_apt_update_retries | default(10) }}"
+        update_cache_retry_max_delay: "{{ loadnet_apt_update_max_delay | default(30) }}"
+        lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
+  rescue:
+    - name: Warn about apt cache update failure
+      ansible.builtin.debug:
+        msg: "apt cache update failed; retrying install without update_cache."
+    - name: Install dependencies (without cache update)
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - curl
+          - jq
+          - chrony
+        state: present
+        update_cache: false
+        lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
 
 - name: Enable and start docker
   ansible.builtin.systemd:
@@ -58,3 +90,5 @@
   loop:
     - { src: "load-reth@.service.j2", dest: "load-reth@.service" }
     - { src: "ultramarine@.service.j2", dest: "ultramarine@.service" }
+    - { src: "prometheus.service.j2", dest: "prometheus.service" }
+    - { src: "grafana.service.j2", dest: "grafana.service" }

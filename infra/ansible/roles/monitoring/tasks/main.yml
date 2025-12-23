@@ -1,0 +1,97 @@
+---
+- name: Resolve repo root fallback
+  ansible.builtin.set_fact:
+    loadnet_repo_root: "{{ loadnet_repo_root | default(playbook_dir | dirname | dirname | dirname) }}"
+
+- name: Validate monitoring asset paths on controller
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ loadnet_repo_root }}/monitoring/config-grafana/grafana.ini"
+    - "{{ loadnet_repo_root }}/monitoring/config-grafana/provisioning/dashboards/default.yml"
+    - "{{ loadnet_repo_root }}/monitoring/config-grafana/provisioning/dashboards-data/default.json"
+  register: loadnet_monitoring_assets
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Assert monitoring assets exist on controller
+  ansible.builtin.assert:
+    that:
+      - loadnet_monitoring_assets.results | map(attribute='stat.exists') | min
+    fail_msg: "monitoring assets missing on controller; run deploy from repo checkout with ultramarine/monitoring present"
+  run_once: true
+
+- name: Build node->details map (from lockfile)
+  ansible.builtin.set_fact:
+    loadnet_nodes_by_id: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes)) }}"
+
+- name: Build host node list for monitoring
+  ansible.builtin.set_fact:
+    loadnet_host_nodes: "{{ loadnet_nodes | map('extract', loadnet_nodes_by_id) | list }}"
+
+- name: Ensure monitoring directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ loadnet_net_dir }}/monitoring"
+    - "{{ loadnet_net_dir }}/monitoring/grafana"
+    - "{{ loadnet_net_dir }}/monitoring/grafana/provisioning"
+    - "{{ loadnet_net_dir }}/monitoring/grafana/provisioning/dashboards"
+    - "{{ loadnet_net_dir }}/monitoring/grafana/provisioning/dashboards-data"
+    - "{{ loadnet_net_dir }}/monitoring/grafana/provisioning/datasources"
+
+- name: Ensure monitoring data directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "0755"
+  loop:
+    - { path: "/var/lib/grafana", owner: "472", group: "472" }
+    - { path: "/var/lib/prometheus", owner: "65534", group: "65534" }
+
+- name: Render Prometheus config for host nodes
+  ansible.builtin.template:
+    src: "prometheus.yml.j2"
+    dest: "{{ loadnet_net_dir }}/monitoring/prometheus.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Render Grafana base config
+  ansible.builtin.template:
+    src: "grafana.ini.j2"
+    dest: "{{ loadnet_net_dir }}/monitoring/grafana/grafana.ini"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy Grafana dashboards provisioning config
+  ansible.builtin.copy:
+    src: "{{ loadnet_repo_root }}/monitoring/config-grafana/provisioning/dashboards/default.yml"
+    dest: "{{ loadnet_net_dir }}/monitoring/grafana/provisioning/dashboards/default.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy Grafana dashboards data
+  ansible.builtin.copy:
+    src: "{{ loadnet_repo_root }}/monitoring/config-grafana/provisioning/dashboards-data/default.json"
+    dest: "{{ loadnet_net_dir }}/monitoring/grafana/provisioning/dashboards-data/default.json"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Render Grafana Prometheus datasource
+  ansible.builtin.template:
+    src: "grafana-prometheus.yml.j2"
+    dest: "{{ loadnet_net_dir }}/monitoring/grafana/provisioning/datasources/prometheus.yml"
+    owner: root
+    group: root
+    mode: "0644"

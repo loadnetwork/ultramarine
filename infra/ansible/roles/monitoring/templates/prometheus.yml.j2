@@ -1,0 +1,25 @@
+global:
+  scrape_interval: {{ loadnet_prometheus_scrape_interval | default('5s') }}
+scrape_configs:
+{% for node in loadnet_host_nodes %}
+  - job_name: "load-reth-{{ node.id }}"
+    metrics_path: "/metrics"
+    scrape_interval: {{ loadnet_prometheus_scrape_interval | default('5s') }}
+    static_configs:
+      - targets: ['127.0.0.1:{{ node.ports.el_metrics }}']
+        labels:
+          client_name: "load-reth"
+          client_type: "execution"
+          node_id: "{{ node.id }}"
+{% endfor %}
+{% for node in loadnet_host_nodes %}
+  - job_name: "ultramarine-{{ node.id }}"
+    metrics_path: "/metrics"
+    scrape_interval: {{ loadnet_prometheus_scrape_interval | default('5s') }}
+    static_configs:
+      - targets: ['127.0.0.1:{{ node.ports.cl_metrics }}']
+        labels:
+          client_name: "ultramarine"
+          client_type: "consensus"
+          node_id: "{{ node.id }}"
+{% endfor %}

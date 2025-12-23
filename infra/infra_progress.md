@@ -11,7 +11,7 @@ Goal: make it easy, safe, and reproducible to generate a “network bundle”, d
 - **Manifest-driven infra**: `ultramarine/infra/manifests/<net>.yaml` is the single source of truth for CL+EL topology/config.
 - **Two canonical inputs**: manifest + `ultramarine/infra/networks/<net>/secrets.sops.yaml`; everything else is derived.
 - **Atomic unit is a paired node**: one Ultramarine (CL) + one load-reth (EL) per instance, co-located on the same host.
-- **Engine is local-only**: default **Engine IPC**; HTTP+JWT is an explicit opt-in and must bind localhost only.
+- **Engine is local-only**: **Engine IPC-only** for M3/MVP; HTTP+JWT is deferred to M4 (must bind localhost only).
 - **Validators require archiver**: archiver config + bearer token are baseline requirements for validator nodes (generator enforces).
 - **Strict persistence**: never wipe home dirs / WAL / DBs / keys unless explicitly requested.
 - **Reproducible deploys**: generator emits `ultramarine/infra/networks/<net>/network.lock.json`; deploy/ops consume the lockfile and fail fast on drift.
@@ -42,8 +42,7 @@ Path note: this repo keeps infra under `ultramarine/infra/`. If extracted into a
   - Code reality: Malachite’s default quorum is `ThresholdParam::TWO_F_PLUS_ONE` with strict `>` semantics (`min_expected(total)` computes `1 + floor(2/3 * total)`) in `malachite/code/crates/core-types/src/threshold.rs`. Ultramarine uses default threshold params via `ConsensusParams { threshold_params: Default::default(), .. }` in Malachite app spawn code (`malachite/code/crates/app/src/spawn.rs`).
 - **CL↔EL pairing is non-optional**: each Ultramarine node must reach a co-located Engine API endpoint on the same host.
   - Infra default: **Engine IPC** (local-only; Ultramarine does not require JWT for IPC), i.e. load-reth `--auth-ipc` / `--auth-ipc.path=...` and Ultramarine `--engine-ipc-path=...`.
-  - HTTP Engine is supported but must be localhost-only and guarded by a shared `jwtsecret` file (same secret for CL and EL). (Note: local Docker may bind Engine to `0.0.0.0` for container networking; infra must not.)
-  - Code reality: Ultramarine supports `--engine-http-url`, `--engine-ipc-path`, `--eth1-rpc-url`, `--jwt-path` (`ultramarine/crates/cli/src/cmd/start.rs`) and selects IPC over HTTP when both are provided (`ultramarine/crates/node/src/node.rs`). JWT is only read/required for HTTP Engine (`ultramarine/crates/node/src/node.rs`).
+  - HTTP+JWT Engine mode is deferred to M4. Code supports it, but infra generator/deploy are IPC-only today.
   - Code reality: Ultramarine has local-dev fallback defaults for Engine/Eth RPC if endpoints are not provided (moniker `test-0/1/2` → localhost ports) in `ultramarine/crates/node/src/node.rs`; infra must always provide explicit endpoints and must not rely on these dev defaults.
   - Code reality: Ultramarine performs fail-fast preflight checks for Engine capabilities and Eth RPC reachability during startup (`ultramarine/crates/node/src/node.rs`).
 - **Archiver is mandatory for validators** (current Ultramarine behavior): validator nodes must have archiver enabled + configured (provider URL/ID + bearer token), or they will fail fast on startup.
@@ -73,7 +72,7 @@ Path note: this repo keeps infra under `ultramarine/infra/`. If extracted into a
   - Ultramarine validator state includes (at minimum): `<home>/wal/consensus.wal`, `<home>/store.db`, `<home>/blob_store.db` (RocksDB dir), and `<home>/config/{config.toml,genesis.json,priv_validator_key.json}`.
     - Code reality: Ultramarine opens `store.db` and `blob_store.db` under `home_dir` in `ultramarine/crates/node/src/node.rs`. Malachite WAL is created at `<home>/wal/consensus.wal` in `malachite/code/crates/app/src/spawn.rs`.
     - Code reality: Ultramarine derives its libp2p identity keypair from the validator private key (`ultramarine/crates/node/src/node.rs` `get_keypair`), so validator key material is also network identity material.
-  - load-reth state includes its datadir and its P2P secret key (stable enode identity). If HTTP Engine is used, the `jwtsecret` file is also required state for the pair.
+  - load-reth state includes its datadir and its P2P secret key (stable enode identity).
 - **Provider-agnostic deploy**: deploy layer works anywhere with SSH (Latitude, AWS, DO, …).
 - **Pinned versions**: prod-like runs pin binaries/images by version (prefer digests).
 - **No config drift**: generated artifacts are derived; humans edit only the manifest.
@@ -138,13 +137,14 @@ Notes:
 - Input: `ultramarine/infra/manifests/<net>.yaml`
 - Output:
   - Ultramarine node homes (config + genesis + keys, per node)
-  - load-reth config per node (ports, datadir, p2p key, bootnodes; if HTTP Engine is selected, provision `jwtsecret` and wire both CL+EL to the same file)
+  - load-reth config per node (ports, datadir, p2p key, bootnodes; Engine is IPC-only)
   - `network.json` manifest (machine-readable inventory: endpoints, roles, ports)
   - `network.lock.json` (resolved, deterministic: versions/digests, placements, ports/endpoints, peer lists, checksums)
 
 ### Deploy
 
-- Target runtime: **systemd + binaries** (preferred for multi-host reliability).
+- Target runtime (MVP): **systemd-managed Docker containers** pinned by image tag (digests later).
+  - Note: a “systemd + binaries” runtime is still a valid future profile, but the deploy layer currently assumes container images.
 - Deploy method: **Ansible** over SSH.
 - Health checks:
   - CL: process up + metrics reachable
@@ -203,7 +203,7 @@ Notes:
     - [ ] Engine transport: `ipc` or `http`
     - [ ] `engine_ipc_path` or `engine_http_url` (localhost/private only)
     - [ ] `eth1_rpc_url` (usually localhost/private)
-    - [ ] `jwt_secret_ref` (private) and `jwt_path` wiring (if HTTP Engine auth)
+    - [ ] `jwt_secret_ref` (private) and `jwt_path` wiring (deferred; for HTTP Engine auth)
   - [ ] archiver config (enabled/provider/token reference)
     - [ ] validated rule: `role=validator` implies archiver is enabled and configured (provider_url/id + token reference). Generator rejects missing/invalid archiver config for validators, matching Ultramarine startup strictness.
 - [ ] logging/metrics exposure policy
@@ -255,7 +255,15 @@ Notes:
 - [x] `net-deploy` restarts services by default to apply new artifacts/env (opt-out supported via `RESTART_ON_DEPLOY=false`)
 - [x] `net-up` is restart-safe (always restarts instances to apply current env/artifacts).
 - [x] Deploy verifies copied `genesis.json` sha256 against `network.lock.json`.
-- [x] Add `net-doctor` preflight (fast diagnostics): time sync, limits, unit presence, and (optional) listener checks.
+- [x] Add `net-doctor-pre` (pre-deploy) and `net-doctor` (post-deploy) diagnostics: time sync, limits, unit presence, and (optional) listener checks.
+- [x] Add storage bootstrap as a separate, opt-in layer (`make net-storage`):
+  - [x] non-destructive by default (refuses to use OS disk; expects `/var/lib/loadnet` or auto-adopts provider-mounted data via bind-mount)
+  - [x] destructive mode requires explicit wipe flag + explicit `/dev/disk/by-id/...` device list
+- [x] Add UX wrapper commands:
+  - [x] `make net-bootstrap` (plan + storage + pre-doctor)
+  - [x] `make net-launch` (gen + storage + deploy + post-doctor + health)
+  - [x] `make net-update` (gen + deploy + health)
+  - [x] `make net-wipe` (destructive cleanup with explicit confirmation)
 - [ ] MVP acceptance checklist (automation or a documented runbook step):
   - [ ] all nodes reach height `H`
   - [ ] restart one node → it catches up to `H`
@@ -328,3 +336,5 @@ Notes:
 - 2025-12-18: Implemented M3 deploy layer: Ansible roles + playbooks, systemd unit templates (Docker + Engine IPC), Makefile operator targets, and health checks for service status, Engine IPC socket, and “height moving”.
 - 2025-12-18: Added deploy-time drift checks: Ansible refuses to deploy if the manifest sha differs from `network.lock.json`.
 - 2025-12-18: Fixed netgen inventory output to be a standard static YAML inventory (no dynamic `_meta`), added `net-doctor`, and documented firewall/ports guidance.
+- 2025-12-22: Added `net-plan` (dry-run generation without secrets), and added `net-storage` (safe-by-default storage bootstrap with optional auto-adopt of provider-mounted data volumes).
+- 2025-12-22: Added operator UX wrappers (`net-bootstrap`, `net-launch`, `net-update`) and a destructive `net-wipe` playbook gated by explicit confirmation.
