@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use thiserror::Error;
+use ultramarine_types::aliases::BlockHash;
 
 /// Defines the specific error types for the execution client.
 ///
@@ -26,4 +27,15 @@ pub enum ExecutionError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Execution layer is syncing (forkchoiceUpdated): head={head:?}")]
+    SyncingForkchoice { head: BlockHash },
+
+    #[error("Execution layer did not start payload build (no payloadId) for head={head:?}")]
+    NoPayloadIdForBuild { head: BlockHash },
+
+    #[error(
+        "Built payload does not match requested head={head:?}: parent={parent:?} number={block_number} timestamp={timestamp}"
+    )]
+    BuiltPayloadMismatch { head: BlockHash, parent: BlockHash, block_number: u64, timestamp: u64 },
 }

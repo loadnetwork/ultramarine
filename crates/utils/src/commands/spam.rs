@@ -121,10 +121,7 @@ impl Spammer {
                 .map_err(|e| eyre::eyre!("failed to build signer from --private-key: {e}"))?
         } else {
             let signers = ultramarine_genesis::make_signers();
-            signers
-                .get(signer_index)
-                .ok_or_else(|| eyre::eyre!("Invalid signer index"))?
-                .clone()
+            signers.get(signer_index).ok_or_else(|| eyre::eyre!("Invalid signer index"))?.clone()
         };
         Ok(Self {
             client: RpcClient::new(url),

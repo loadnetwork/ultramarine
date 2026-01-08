@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -13,7 +13,7 @@ use malachitebft_app_channel::app::types::LocallyProposedValue;
 use ssz::Encode;
 use tempfile::{TempDir, tempdir};
 use ultramarine_blob_engine::error::BlobEngineError;
-use ultramarine_execution::notifier::ExecutionNotifier;
+use ultramarine_execution::{error::ExecutionError, notifier::ExecutionNotifier};
 use ultramarine_types::{
     address::Address,
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
@@ -148,9 +148,21 @@ pub async fn propose_blobbed_value(
         .expect("metadata stored");
 
     let (_signed_header, sidecars) =
-        state.prepare_blob_sidecar_parts(&proposed, Some(&bundle)).expect("sidecars");
+        state.prepare_blob_sidecar_parts(&proposed, Some(&bundle)).await.expect("sidecars");
 
     (proposed, metadata, sidecars, bundle, payload_bytes)
+}
+
+pub async fn seed_decided_blob_metadata(
+    state: &mut State<MockBlobEngine>,
+    height: Height,
+    parent_root: B256,
+) -> eyre::Result<B256> {
+    let header = sample_execution_payload_header();
+    let metadata = BlobMetadata::blobless(height, parent_root, &header, Some(0));
+    state.store.put_blob_metadata_undecided(height, Round::new(0), &metadata).await?;
+    state.store.mark_blob_metadata_decided(height, Round::new(0)).await?;
+    Ok(metadata.to_beacon_header().hash_tree_root())
 }
 
 pub fn build_state(
@@ -286,6 +298,8 @@ struct MockExecutionNotifierState {
     new_block_calls: Vec<(ExecutionPayloadV3, Vec<AlloyBytes>, Vec<BlockHash>)>,
     forkchoice_calls: Vec<BlockHash>,
     payload_status: PayloadStatus,
+    payload_statuses: VecDeque<PayloadStatus>,
+    forkchoice_errors: VecDeque<ExecutionError>,
 }
 
 impl Default for MockExecutionNotifierState {
@@ -294,6 +308,8 @@ impl Default for MockExecutionNotifierState {
             new_block_calls: Vec::new(),
             forkchoice_calls: Vec::new(),
             payload_status: PayloadStatus::from_status(PayloadStatusEnum::Valid),
+            payload_statuses: VecDeque::new(),
+            forkchoice_errors: VecDeque::new(),
         }
     }
 }
@@ -301,6 +317,23 @@ impl Default for MockExecutionNotifierState {
 impl MockExecutionNotifier {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_payload_statuses(statuses: Vec<PayloadStatus>) -> Self {
+        let inner = MockExecutionNotifierState {
+            payload_statuses: statuses.into(),
+            ..MockExecutionNotifierState::default()
+        };
+        Self { inner: Arc::new(Mutex::new(inner)) }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_forkchoice_errors(errors: Vec<ExecutionError>) -> Self {
+        let inner = MockExecutionNotifierState {
+            forkchoice_errors: errors.into(),
+            ..MockExecutionNotifierState::default()
+        };
+        Self { inner: Arc::new(Mutex::new(inner)) }
     }
 }
 
@@ -314,6 +347,9 @@ impl ExecutionNotifier for MockExecutionNotifier {
     ) -> color_eyre::Result<PayloadStatus> {
         let mut inner = self.inner.lock().unwrap();
         inner.new_block_calls.push((payload, execution_requests, versioned_hashes));
+        if let Some(status) = inner.payload_statuses.pop_front() {
+            return Ok(status);
+        }
         Ok(inner.payload_status.clone())
     }
 
@@ -323,6 +359,9 @@ impl ExecutionNotifier for MockExecutionNotifier {
     ) -> color_eyre::Result<BlockHash> {
         let mut inner = self.inner.lock().unwrap();
         inner.forkchoice_calls.push(block_hash);
+        if let Some(error) = inner.forkchoice_errors.pop_front() {
+            return Err(color_eyre::Report::new(error));
+        }
         Ok(block_hash)
     }
 }

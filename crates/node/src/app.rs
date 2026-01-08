@@ -12,6 +12,7 @@ use malachitebft_app_channel::{
 use malachitebft_engine::host::Next;
 use ssz::Encode;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::State;
@@ -33,17 +34,24 @@ pub async fn run(
     execution_layer: ExecutionClient,
     archiver_job_tx: Option<ArchiveJobSubmitter>,
     mut archive_notice_rx: Option<mpsc::Receiver<ArchiveNotice>>,
+    shutdown: CancellationToken,
 ) -> eyre::Result<()> {
     info!("🚀 App message loop starting");
     state.rehydrate_pending_prunes().await?;
 
     loop {
-        // Use tokio::select! to poll both consensus channel and archive notice channel
+        // Use tokio::select! to poll shutdown, consensus channel, and archive notice channel
+        // The shutdown branch ensures we exit immediately when signaled, not just at loop start
         let msg = tokio::select! {
+            // Check for shutdown signal - this allows immediate exit when signaled
+            _ = shutdown.cancelled() => {
+                info!("Shutdown signal detected, exiting main loop...");
+                None
+            }
             // Poll consensus channel
             consensus_msg = channels.consensus.recv() => {
                 match consensus_msg {
-                    Some(msg) => msg,
+                    Some(msg) => Some(msg),
                     None => {
                         // Consensus channel closed - exit the loop
                         return Err(eyre!("Consensus channel closed unexpectedly"));
@@ -105,6 +113,11 @@ pub async fn run(
                 // Continue polling - don't exit the loop
                 continue;
             }
+        };
+
+        // Exit loop if shutdown was signaled
+        let Some(msg) = msg else {
+            break;
         };
 
         debug!("📨 Received message: {:?}", std::mem::discriminant(&msg));
@@ -961,6 +974,19 @@ pub async fn run(
             }
         }
     }
+
+    // Graceful shutdown cleanup
+    info!("Performing graceful shutdown cleanup...");
+
+    // Flush blob engine to ensure all data is persisted
+    if let Err(e) = state.blob_engine().flush_sync() {
+        warn!("Failed to flush blob engine during shutdown: {}", e);
+    } else {
+        info!("Blob engine flushed successfully");
+    }
+
+    info!("Graceful shutdown complete");
+    Ok(())
 }
 
 async fn restream_archive_notices(

@@ -7089,6 +7089,7 @@ dependencies = [
  "sha3",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "tracing",
  "ultramarine-blob-engine",
  "ultramarine-cli",

@@ -299,6 +299,40 @@
     - mount_check.rc != 0
     - mount_check_after.rc != 0
 
+- name: Check existing /var/log mount
+  ansible.builtin.command: "findmnt -n -o SOURCE /var/log"
+  changed_when: false
+  failed_when: false
+  register: loadnet_var_log_source
+
+- name: Bind-mount /var/log to data volume (optional)
+  when:
+    - loadnet_bind_var_log | bool
+    - loadnet_var_log_source.rc != 0 or loadnet_var_log_source.stdout != loadnet_log_dir
+  block:
+    - name: Ensure log dir on data volume exists
+      ansible.builtin.file:
+        path: "{{ loadnet_log_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Sync existing logs to data volume
+      ansible.builtin.command: "rsync -aHAX /var/log/ {{ loadnet_log_dir }}/"
+      changed_when: true
+
+    - name: Bind-mount log dir onto /var/log
+      ansible.builtin.command: "mount --bind {{ loadnet_log_dir }} /var/log"
+      changed_when: true
+
+    - name: Persist /var/log bind-mount in fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        create: true
+        line: "{{ loadnet_log_dir }} /var/log none bind,x-systemd.requires-mounts-for={{ loadnet_data_mountpoint }} 0 0"
+        regexp: "^{{ loadnet_log_dir | regex_escape() }}\\s+/var/log\\s+none\\s+"
+
 - name: Ensure chain state dirs exist under data mount
   ansible.builtin.file:
     path: "{{ item }}"

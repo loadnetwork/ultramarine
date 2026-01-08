@@ -1,0 +1,82 @@
+---
+- name: Clean logs (vacuum journald, rotate syslog, restart EL/CL)
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    loadnet_root: /opt/loadnet
+    loadnet_networks: "{{ loadnet_root }}/networks"
+    loadnet_net: "{{ net }}"
+    loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+    loadnet_journal_vacuum_size_value: "{{ loadnet_journal_vacuum_size | default('1G') }}"
+    loadnet_syslog_truncate_value: "{{ loadnet_syslog_truncate | default(true) }}"
+    loadnet_forward_journal_to_syslog_value: "{{ loadnet_forward_journal_to_syslog | default(false) }}"
+  tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - net is defined
+          - net_dir is defined
+
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', net_dir + '/network.lock.json') | from_json }}"
+
+    - name: Assert lockfile matches selected network
+      ansible.builtin.assert:
+        that:
+          - loadnet_lock.network.name == net
+        fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
+
+    - name: Vacuum journald to target size
+      ansible.builtin.command: "journalctl --vacuum-size={{ loadnet_journal_vacuum_size_value }}"
+      changed_when: true
+
+    - name: Check if syslog exists
+      ansible.builtin.stat:
+        path: /var/log/syslog
+      register: loadnet_syslog_stat
+
+    - name: Force logrotate for rsyslog
+      ansible.builtin.command: logrotate -f /etc/logrotate.d/rsyslog
+      changed_when: true
+      failed_when: false
+      when:
+        - loadnet_syslog_stat.stat.exists
+        - loadnet_forward_journal_to_syslog_value | bool
+
+    - name: Truncate syslog after rotation
+      ansible.builtin.shell: |
+        set -euo pipefail
+        shopt -s nullglob
+        for file in /var/log/syslog /var/log/syslog.*; do
+          truncate -s 0 "$file"
+        done
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when:
+        - loadnet_syslog_truncate_value | bool
+        - loadnet_syslog_stat.stat.exists
+
+    - name: Restart journald to ensure rotation state is clean
+      ansible.builtin.systemd:
+        name: systemd-journald
+        state: restarted
+      when: loadnet_syslog_stat.stat.exists
+
+    - name: Restart load-reth instances
+      ansible.builtin.systemd:
+        name: "load-reth@{{ item }}.service"
+        state: restarted
+        enabled: true
+      loop: "{{ loadnet_nodes | default([]) }}"
+      failed_when: false
+
+    - name: Restart ultramarine instances
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        state: restarted
+        enabled: true
+      loop: "{{ loadnet_nodes | default([]) }}"
+      failed_when: false

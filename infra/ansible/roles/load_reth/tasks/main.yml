@@ -42,3 +42,15 @@
   loop: "{{ loadnet_nodes }}"
   loop_control:
     loop_var: node_id
+
+- name: Install load-reth tmpfiles config
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../../templates/tmpfiles/load-reth.conf.j2"
+    dest: /etc/tmpfiles.d/load-reth.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create load-reth runtime directories via tmpfiles
+  ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/load-reth.conf
+  changed_when: false

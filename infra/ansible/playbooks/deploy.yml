@@ -17,8 +17,13 @@
     loadnet_prometheus_bind: "127.0.0.1"
     loadnet_prometheus_scrape_interval: "5s"
     loadnet_grafana_port: 3000
-    loadnet_grafana_bind: "0.0.0.0"
+    loadnet_grafana_bind: "127.0.0.1"
     loadnet_el_http_bind: "0.0.0.0"
+    loadnet_load_reth_uid: 10001
+    loadnet_load_reth_gid: 10001
+    loadnet_ultramarine_uid: 10002
+    loadnet_ultramarine_gid: 10002
+    loadnet_fix_ownership: true
   pre_tasks:
     - name: Assert required vars
       ansible.builtin.assert:

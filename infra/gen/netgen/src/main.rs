@@ -154,6 +154,7 @@ struct Exposure {
 #[derive(Clone, Debug, Deserialize)]
 struct Secrets {
     schema_version: u32,
+    grafana_admin_password: Option<String>,
     nodes: BTreeMap<String, NodeSecrets>,
 }
 
@@ -388,16 +389,16 @@ fn validate_manifest(m: &Manifest, allow_unsafe_failure_domains: bool) -> Result
         for n in &m.nodes {
             *counts.entry(n.host.as_str()).or_default() += 1;
         }
-        if let Some((host, count)) = counts.into_iter().max_by_key(|(_, c)| *c) {
-            if count > stride as usize {
-                bail!(
-                    "ports.host_block_stride={} is too small: host {} has {} nodes; need >= {} to avoid port collisions",
-                    stride,
-                    host,
-                    count,
-                    count
-                );
-            }
+        if let Some((host, count)) = counts.into_iter().max_by_key(|(_, c)| *c) &&
+            count > stride as usize
+        {
+            bail!(
+                "ports.host_block_stride={} is too small: host {} has {} nodes; need >= {} to avoid port collisions",
+                stride,
+                host,
+                count,
+                count
+            );
         }
     }
 
@@ -487,14 +488,14 @@ fn port_offset_host_block(m: &Manifest, node: &Node) -> Result<u16> {
         .ok_or_else(|| eyre!("node not found in host set"))?;
     let base = (host_index as u32) * (stride as u32);
     let off = base + (local_index as u32);
-    Ok(u16::try_from(off).map_err(|_| eyre!("port offset overflow"))?)
+    u16::try_from(off).map_err(|_| eyre!("port offset overflow"))
 }
 
 fn port_offset_by_index(m: &Manifest, node: &Node) -> Result<u16> {
     let mut nodes: Vec<&Node> = m.nodes.iter().collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     let idx = nodes.iter().position(|n| n.id == node.id).ok_or_else(|| eyre!("node not found"))?;
-    Ok(u16::try_from(idx).map_err(|_| eyre!("node index overflow"))?)
+    u16::try_from(idx).map_err(|_| eyre!("node index overflow"))
 }
 
 fn ports_for_node(m: &Manifest, node: &Node) -> Result<PortsOut> {
@@ -712,6 +713,7 @@ fn generate(
     let public_dir = out_dir.join("bundle").join("public");
     let private_dir = out_dir.join("bundle").join("private");
     let env_dir = private_dir.join("env");
+    let monitoring_secret_dir = private_dir.join("monitoring");
     let ultra_homes_dir = private_dir.join("ultramarine").join("homes");
 
     // Public artifact: EL genesis.
@@ -752,7 +754,7 @@ fn generate(
             pk
         };
         if n.role == "validator" {
-            genesis_validators.push(Validator::new(pk.public_key(), 1u64.into()));
+            genesis_validators.push(Validator::new(pk.public_key(), 1u64));
         }
     }
     let consensus_genesis =
@@ -771,8 +773,8 @@ fn generate(
         )?;
 
         // config.toml (Ultramarine CLI config wrapper)
-        let mut cfg = ultramarine_cli::config::Config::default();
-        cfg.moniker = n.id.clone();
+        let mut cfg =
+            ultramarine_cli::config::Config { moniker: n.id.clone(), ..Default::default() };
         cfg.metrics.enabled = true;
         cfg.metrics.listen_addr =
             format!("{}:{}", manifest.exposure.metrics_bind, ports.cl_metrics)
@@ -950,6 +952,14 @@ fn generate(
     write_atomic(&out_dir.join("inventory.yml"), inv.as_bytes())?;
 
     // Per-node runtime env files (consumed by systemd/Ansible).
+    if let Some(s) = &secrets &&
+        let Some(pw) =
+            s.grafana_admin_password.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty())
+    {
+        let secret_path = monitoring_secret_dir.join("grafana_admin_password.env");
+        write_env_file(&secret_path, &[("GRAFANA_ADMIN_PASSWORD", pw.to_string())], Some(0o600))?;
+    }
+
     for node in &lock.nodes {
         let ultramarine_env_path = env_dir.join(format!("ultramarine-{}.env", node.id));
         let load_reth_env_path = env_dir.join(format!("load-reth-{}.env", node.id));
@@ -968,6 +978,9 @@ fn generate(
         ultra_entries.push(("ULTRAMARINE_CL_MEMPOOL_PORT", node.ports.cl_mempool.to_string()));
         ultra_entries.push(("ULTRAMARINE_CL_METRICS_PORT", node.ports.cl_metrics.to_string()));
         ultra_entries.push(("ULTRAMARINE_IMAGE", node.images.ultramarine.clone()));
+        ultra_entries.push(("ULTRAMARINE_UID", "10002".to_string()));
+        ultra_entries.push(("ULTRAMARINE_GID", "10002".to_string()));
+        ultra_entries.push(("RUST_LOG", "info".to_string()));
 
         if node.role == "validator" {
             ultra_entries.push(("ULTRAMARINE_ARCHIVER_ENABLED", "true".to_string()));
@@ -1002,18 +1015,22 @@ fn generate(
         }
         write_env_file(&ultramarine_env_path, &ultra_entries, None)?;
 
-        let mut reth_entries: Vec<(&str, String)> = Vec::new();
-        reth_entries.push(("LOAD_RETH_NODE_ID", node.id.clone()));
-        reth_entries.push(("LOAD_RETH_IMAGE", node.images.load_reth.clone()));
-        reth_entries.push(("LOAD_RETH_PUBLIC_IP", host_ip(&manifest, &node.host)?));
-        reth_entries.push(("LOAD_RETH_HTTP_PORT", node.ports.el_http.to_string()));
-        reth_entries.push(("LOAD_RETH_P2P_PORT", node.ports.el_p2p.to_string()));
-        reth_entries.push(("LOAD_RETH_METRICS_PORT", node.ports.el_metrics.to_string()));
-        reth_entries.push(("LOAD_RETH_ENGINE_IPC_PATH", node.engine.ipc_path.clone()));
-        reth_entries.push(("LOAD_RETH_P2P_KEY_PATH", node.load_reth.p2p_key_path.clone()));
-        reth_entries.push(("LOAD_RETH_BOOTNODES", node.load_reth.bootnodes.join(",")));
-        reth_entries
-            .push(("LOAD_RETH_GENESIS_JSON", lock.artifacts.public.genesis_json.path.clone()));
+        let reth_public_ip = host_ip(&manifest, &node.host)?;
+        let reth_entries: Vec<(&str, String)> = vec![
+            ("LOAD_RETH_NODE_ID", node.id.clone()),
+            ("LOAD_RETH_IMAGE", node.images.load_reth.clone()),
+            ("LOAD_RETH_PUBLIC_IP", reth_public_ip),
+            ("LOAD_RETH_HTTP_PORT", node.ports.el_http.to_string()),
+            ("LOAD_RETH_P2P_PORT", node.ports.el_p2p.to_string()),
+            ("LOAD_RETH_METRICS_PORT", node.ports.el_metrics.to_string()),
+            ("LOAD_RETH_ENGINE_IPC_PATH", node.engine.ipc_path.clone()),
+            ("LOAD_RETH_P2P_KEY_PATH", node.load_reth.p2p_key_path.clone()),
+            ("LOAD_RETH_BOOTNODES", node.load_reth.bootnodes.join(",")),
+            ("LOAD_RETH_GENESIS_JSON", lock.artifacts.public.genesis_json.path.clone()),
+            ("LOAD_RETH_UID", "10001".to_string()),
+            ("LOAD_RETH_GID", "10001".to_string()),
+            ("RUST_LOG", "info".to_string()),
+        ];
         write_env_file(&load_reth_env_path, &reth_entries, None)?;
     }
 

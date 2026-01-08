@@ -17,5 +17,7 @@
     loadnet_fs_type: "{{ loadnet_fs_type | default('xfs') }}"
     loadnet_move_docker_dataroot: "{{ loadnet_move_docker_dataroot | default(false) }}"
     loadnet_docker_dataroot: "{{ loadnet_docker_dataroot | default(loadnet_data_mountpoint + '/docker') }}"
+    loadnet_bind_var_log: "{{ loadnet_bind_var_log | default(false) }}"
+    loadnet_log_dir: "{{ loadnet_log_dir | default(loadnet_data_mountpoint + '/log') }}"
   roles:
     - storage

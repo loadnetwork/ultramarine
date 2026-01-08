@@ -1,3 +1,7 @@
 [default.extend-words]
 # Common shorthand used to avoid the Rust keyword `type`.
 typ = "typ"
+# rsync flags: -H (hard links), -A (ACLs), -X (extended attributes)
+HAX = "HAX"
+# Recovery Time Objective - standard devops term
+RTO = "RTO"

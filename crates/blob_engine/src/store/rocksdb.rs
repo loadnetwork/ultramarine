@@ -60,6 +60,18 @@ impl RocksDbBlobStore {
         Ok(Self { db: Arc::new(db) })
     }
 
+    /// Flush all writes to disk
+    ///
+    /// Forces a sync of all pending writes to ensure durability.
+    /// This is useful during graceful shutdown to ensure all data is persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the flush operation fails.
+    pub fn flush(&self) -> Result<(), BlobStoreError> {
+        self.db.flush().map_err(BlobStoreError::from)
+    }
+
     /// Open the blob store in read-only mode without taking a lock.
     ///
     /// This is primarily used by integration tests that inspect on-disk state

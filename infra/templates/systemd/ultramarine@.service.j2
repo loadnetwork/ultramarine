@@ -20,6 +20,12 @@ ExecStartPre=/bin/bash -lc 'for i in {1..60}; do if [ -S "$ULTRAMARINE_ENGINE_IP
 ExecStartPre=/bin/bash -lc 'docker rm -f ultramarine-%i >/dev/null 2>&1 || true'
 
 ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name ultramarine-%i --network host --platform=linux/amd64 \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --log-driver={{ loadnet_docker_log_driver | default("local") }} \
+  --log-opt max-size={{ loadnet_docker_log_max_size | default("50m") }} \
+  --log-opt max-file={{ loadnet_docker_log_max_file | default("5") }} \
+  --user $ULTRAMARINE_UID:$ULTRAMARINE_GID \
   --env ULTRAMARINE_ARCHIVER_ENABLED \
   --env ULTRAMARINE_ARCHIVER_PROVIDER_URL \
   --env ULTRAMARINE_ARCHIVER_PROVIDER_ID \
@@ -31,7 +37,8 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name ultramarine-%i --networ
     --engine-ipc-path=$ULTRAMARINE_ENGINE_IPC_PATH \
     --eth1-rpc-url=$ULTRAMARINE_ETH1_RPC_URL'
 
-ExecStop=/usr/bin/docker stop -t 10 ultramarine-%i
+# Allow 30 seconds for graceful shutdown (flush blob engine, drain archiver queue)
+ExecStop=/usr/bin/docker stop -t 30 ultramarine-%i
 
 [Install]
 WantedBy=multi-user.target

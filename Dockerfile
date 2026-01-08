@@ -79,11 +79,19 @@ RUN apt-get update && \
   apt-get install -y --no-install-recommends ca-certificates && \
   rm -rf /var/lib/apt/lists/*
 
+# Create non-root user for runtime (fixed UID/GID for host volume ownership).
+ARG ULTRAMARINE_UID=10002
+ARG ULTRAMARINE_GID=10002
+RUN groupadd -r -g "${ULTRAMARINE_GID}" ultramarine && \
+  useradd -r -u "${ULTRAMARINE_UID}" -g ultramarine -d /home/ultramarine -m ultramarine
+
 # Copy the built binary from the previous stage.
 COPY --from=builder /usr/src/ultramarine/ultramarine /usr/local/bin/ultramarine
 
 # Expose ports commonly used by Ethereum consensus/execution clients.  Adjust
 # as the ultramarine API evolves.
 EXPOSE 30303 9001
+
+USER ultramarine
 
 ENTRYPOINT ["/usr/local/bin/ultramarine"]

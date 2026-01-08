@@ -13,6 +13,7 @@ use malachitebft_app_channel::app::{
 };
 use rand::{CryptoRng, RngCore};
 use tokio::{sync::mpsc, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 use ultramarine_blob_engine::{BlobEngineImpl, store::rocksdb::RocksDbBlobStore};
 use ultramarine_cli::{config::Config, metrics};
 use ultramarine_consensus::{metrics::DbMetrics, state::State, store::Store};
@@ -103,6 +104,7 @@ pub struct Handle {
     pub engine: EngineHandle,
     pub tx_event: TxEvent<LoadContext>,
     pub archiver: Option<ArchiverHandle>,
+    pub shutdown: CancellationToken,
 }
 
 impl std::fmt::Debug for Handle {
@@ -510,6 +512,37 @@ impl Node for App {
             None => (None, None, None),
         };
 
+        // Create shutdown token for graceful shutdown coordination
+        let shutdown = CancellationToken::new();
+        let shutdown_for_signal = shutdown.clone();
+        let shutdown_for_app = shutdown.clone();
+
+        // Spawn signal handler for graceful shutdown
+        // Unix: handle both SIGTERM and SIGINT (Ctrl+C)
+        // Windows: handle only Ctrl+C
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::SignalKind;
+                let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown...");
+                    }
+                    _ = sigterm.recv() => {
+                        tracing::info!("Received SIGTERM, initiating graceful shutdown...");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+            }
+            shutdown_for_signal.cancel();
+        });
+
         let app_handle = tokio::spawn(async move {
             if let Err(e) = crate::app::run(
                 &mut state,
@@ -517,6 +550,7 @@ impl Node for App {
                 execution_client,
                 archiver_job_tx,
                 archive_notice_rx,
+                shutdown_for_app,
             )
             .await
             {
@@ -524,7 +558,13 @@ impl Node for App {
             }
         });
 
-        Ok(Handle { app: app_handle, engine: engine_handle, tx_event, archiver: archiver_handle })
+        Ok(Handle {
+            app: app_handle,
+            engine: engine_handle,
+            tx_event,
+            archiver: archiver_handle,
+            shutdown,
+        })
     }
 
     async fn run(self) -> eyre::Result<()> {

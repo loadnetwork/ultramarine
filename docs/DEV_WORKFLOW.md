@@ -115,6 +115,13 @@ Notes:
     - `load_reth_blob_cache_items`, `load_reth_blob_cache_bytes`: blob cache occupancy
   - Throughput and error state panels provide quick health checks.
 
+- Multi-host (infra) monitoring:
+  - Grafana/Prometheus bind to localhost on the remote host by default.
+  - Use an SSH tunnel:
+    - `ssh -L 3000:127.0.0.1:3000 ubuntu@<host-ip>`
+    - `ssh -L 9090:127.0.0.1:9090 ubuntu@<host-ip>`
+  - See `ultramarine/infra/README.md` for operator commands and overrides.
+
 - Logs:
   - Nodes are started via tmux. Inspect sessions:
     - `tmux ls` → list sessions

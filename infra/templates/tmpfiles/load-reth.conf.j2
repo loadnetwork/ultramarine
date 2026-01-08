@@ -1,0 +1,4 @@
+d /run/load-reth 0755 root root -
+{% for node_id in loadnet_nodes %}
+d /run/load-reth/{{ node_id }} 0755 {{ loadnet_load_reth_uid | default(10001) }} {{ loadnet_load_reth_gid | default(10001) }} -
+{% endfor %}
