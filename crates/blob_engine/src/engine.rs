@@ -3,7 +3,11 @@ use async_trait::async_trait;
 use tracing::{debug, info, warn};
 use ultramarine_types::{blob::BYTES_PER_BLOB, height::Height, proposal_part::BlobSidecar};
 
-use crate::{error::BlobEngineError, store::BlobStore, verifier::BlobVerifier};
+use crate::{
+    error::BlobEngineError,
+    store::{BlobStore, rocksdb::RocksDbBlobStore},
+    verifier::BlobVerifier,
+};
 
 /// Blob lifecycle management: verification, storage, and archival
 ///
@@ -197,6 +201,21 @@ where
         })?;
 
         Ok(Self { verifier, store, metrics })
+    }
+}
+
+impl BlobEngineImpl<RocksDbBlobStore> {
+    /// Flush all pending writes to disk synchronously
+    ///
+    /// This method forces all pending RocksDB writes to be persisted to disk.
+    /// It should be called during graceful shutdown to ensure data durability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the flush operation fails.
+    pub fn flush_sync(&self) -> Result<(), BlobEngineError> {
+        self.store.flush()?;
+        Ok(())
     }
 }
 

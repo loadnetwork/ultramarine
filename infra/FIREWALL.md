@@ -22,13 +22,23 @@ For each host running a node:
 
 The exact per-host port numbers are in `infra/networks/<net>/network.lock.json` (and `bundle/public/network.json`).
 
-## Inbound ports (should stay private / localhost)
+## Inbound ports (private by default)
 
-These are intentionally bound to `127.0.0.1` by default and should not be opened publicly:
+These should remain private unless you explicitly opt in to public exposure:
 
-- EL JSON-RPC HTTP: `ports.el.http`
 - EL metrics: `ports.el.metrics`
 - CL metrics: `ports.cl.metrics`
+
+## EL JSON-RPC (public by default in infra)
+
+For testnets, EL JSON-RPC is intentionally exposed for Web3 access. Infra defaults bind
+`load-reth` HTTP to `0.0.0.0`, and the firewall role will open `ports.el.http` unless you
+explicitly override the bind address.
+
+To keep EL JSON-RPC private:
+
+- Set `EL_HTTP_BIND=127.0.0.1` when running `make net-deploy` (or `make net-launch` / `make net-update`).
+- The firewall role will then **not** open `ports.el.http`.
 
 ## Engine API
 
@@ -64,7 +74,8 @@ Policy:
 
 - Never lock out SSH (always allows `ansible_port`/22).
 - Opens only P2P ports required for CL/EL connectivity.
-- Keeps RPC/metrics closed by default (should remain bound to localhost).
+- Keeps metrics closed by default (bind localhost).
+- EL JSON-RPC is opened only when `load-reth` binds to a public interface.
 
 ## Storage note
 

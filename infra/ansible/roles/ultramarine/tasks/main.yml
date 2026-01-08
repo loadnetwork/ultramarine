@@ -3,8 +3,8 @@
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    owner: root
-    group: root
+    owner: "{{ loadnet_ultramarine_uid | default(10002) }}"
+    group: "{{ loadnet_ultramarine_gid | default(10002) }}"
     mode: "0755"
   loop:
     - "{{ loadnet_net_dir }}/bundle/private/env"
@@ -95,12 +95,24 @@
   ansible.builtin.file:
     path: "/var/lib/ultramarine/{{ node_id }}/config"
     state: directory
-    owner: root
-    group: root
+    owner: "{{ loadnet_ultramarine_uid | default(10002) }}"
+    group: "{{ loadnet_ultramarine_gid | default(10002) }}"
     mode: "0755"
   loop: "{{ loadnet_nodes }}"
   loop_control:
     loop_var: node_id
+
+- name: Fix ultramarine data ownership (recursive)
+  ansible.builtin.file:
+    path: "/var/lib/ultramarine/{{ node_id }}"
+    state: directory
+    owner: "{{ loadnet_ultramarine_uid | default(10002) }}"
+    group: "{{ loadnet_ultramarine_gid | default(10002) }}"
+    recurse: true
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+  when: loadnet_fix_ownership | default(true) | bool
 
 - name: Copy ultramarine config.toml + genesis.json (managed)
   ansible.builtin.copy:
@@ -140,8 +152,8 @@
   ansible.builtin.copy:
     src: "{{ net_dir }}/bundle/private/ultramarine/homes/{{ node_id }}/config/priv_validator_key.json"
     dest: "/var/lib/ultramarine/{{ node_id }}/config/priv_validator_key.json"
-    owner: root
-    group: root
+    owner: "{{ loadnet_ultramarine_uid | default(10002) }}"
+    group: "{{ loadnet_ultramarine_gid | default(10002) }}"
     mode: "0600"
   loop: "{{ loadnet_nodes }}"
   loop_control:

@@ -22,6 +22,10 @@ networks/*/secrets.plain.yaml
 # Optional per-network SSH helper files (local only).
 networks/*/ssh_config
 networks/*/known_hosts
+networks/*/net.mk
+
+# Default net selector (local only).
+.net
 
 # Optional local SOPS config (if you don't want to commit it)
 .sops.yaml.local

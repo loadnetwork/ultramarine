@@ -15,6 +15,9 @@ WorkingDirectory=/opt/loadnet/current
 ExecStartPre=/bin/bash -lc 'docker rm -f loadnet-grafana >/dev/null 2>&1 || true'
 
 ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name loadnet-grafana --network host --platform=linux/amd64 \
+  --log-driver={{ loadnet_docker_log_driver | default("local") }} \
+  --log-opt max-size={{ loadnet_docker_log_max_size | default("50m") }} \
+  --log-opt max-file={{ loadnet_docker_log_max_file | default("5") }} \
   -e GF_SERVER_HTTP_ADDR={{ loadnet_grafana_bind | default("0.0.0.0") }} \
   -e GF_SERVER_HTTP_PORT={{ loadnet_grafana_port | default(3000) }} \
   -v /opt/loadnet/current/monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro \

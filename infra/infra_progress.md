@@ -24,10 +24,10 @@ Path note: this repo keeps infra under `ultramarine/infra/`. If extracted into a
 
 - Treat `ultramarine/infra/manifests/<net>.yaml` + `ultramarine/infra/networks/<net>/secrets.sops.yaml` as the only human-edited inputs; everything else is derived output.
 - Build in dependency order (so work parallelizes cleanly):
-  1) **Manifest + validation**: define schema + add `ultramarine/infra/manifests/example.yaml` + implement `netgen validate` (reject unsafe failure-domain layouts unless explicitly allowed).
-  2) **Lockfile**: define `network.lock.json` schema (include `schema_version` + tool version + resolved placements/ports/peers + artifact checksums) and ensure generation is deterministic.
-  3) **Generator**: implement `ultramarine/infra/gen/netgen` (Rust) to emit `network.json`, `network.lock.json`, `bundle/public/` + `bundle/private/`, and an Ansible inventory from the lockfile (no dev defaults).
-  4) **Deploy**: implement Ansible+systemd consumption of the lockfile/bundle; add `make net-deploy/net-up/net-health`.
+  1. **Manifest + validation**: define schema + add `ultramarine/infra/manifests/example.yaml` + implement `netgen validate` (reject unsafe failure-domain layouts unless explicitly allowed).
+  2. **Lockfile**: define `network.lock.json` schema (include `schema_version` + tool version + resolved placements/ports/peers + artifact checksums) and ensure generation is deterministic.
+  3. **Generator**: implement `ultramarine/infra/gen/netgen` (Rust) to emit `network.json`, `network.lock.json`, `bundle/public/` + `bundle/private/`, and an Ansible inventory from the lockfile (no dev defaults).
+  4. **Deploy**: implement Ansible+systemd consumption of the lockfile/bundle; add `make net-deploy/net-up/net-health`.
 - PR safety checklist (must hold for every infra change):
   - No secrets committed (private bundle stays gitignored; secrets only via SOPS + host-local root-owned files).
   - Engine API never exposed publicly (HTTP binds `127.0.0.1`; IPC preferred).
@@ -59,7 +59,7 @@ Path note: this repo keeps infra under `ultramarine/infra/`. If extracted into a
 - **Only two human-edited inputs** (canonical state):
   - `ultramarine/infra/manifests/<net>.yaml`
   - `ultramarine/infra/networks/<net>/secrets.sops.yaml`
-  Everything else is derived output and must be safe to delete/regenerate.
+    Everything else is derived output and must be safe to delete/regenerate.
 - **Bundle split**:
   - `public/` is safe to commit/share.
   - `private/` is never committed. It is derived output produced from the canonical inputs (manifest + encrypted secrets) and should be treated as an ephemeral deploy artifact.
@@ -123,6 +123,7 @@ ultramarine/infra/
 ```
 
 Notes:
+
 - Keep this tree self-contained so it can be extracted to a dedicated “ops” repo later if needed.
 - Local dev workflows (`make all`, `make all-ipc`) stay as-is; infra is for multi-host.
 - Secret material should live encrypted at `ultramarine/infra/networks/<net>/secrets.sops.yaml`; `bundle/private/` is a generated deploy artifact and is always treated as private.
@@ -189,7 +190,7 @@ Notes:
   - [ ] topology intent:
     - [ ] `failure_domain`: e.g. `host` (for now)
     - [ ] `allow_halt_on_failure_domain_loss`: `true|false` (explicit acknowledgement knob)
-      - [ ] **Evaluation rule** (machine-checkable): when `false`, the generator must reject any layout where removing *any single* failure-domain unit (e.g. one host) would drop **online validator voting power below Malachite quorum** (strict `> 2/3`, see `malachite/code/crates/core-types/src/threshold.rs`). When `true`, allow such layouts but emit a prominent warning in generated artifacts.
+      - [ ] **Evaluation rule** (machine-checkable): when `false`, the generator must reject any layout where removing _any single_ failure-domain unit (e.g. one host) would drop **online validator voting power below Malachite quorum** (strict `> 2/3`, see `malachite/code/crates/core-types/src/threshold.rs`). When `true`, allow such layouts but emit a prominent warning in generated artifacts.
   - [ ] instance list (atomic CL+EL pairs): `id`, `role` (validator/full), `host`, `index`
     - [ ] (future-proof) optional `voting_power` (default 1), so failure-domain/quorum checks can evolve without redesign
   - [ ] address/port contract:
@@ -221,7 +222,7 @@ Notes:
     - [ ] enforce TCP transport by default (unless explicitly configured)
     - [ ] do not rely on `ultramarine testnet` / `ultramarine distributed-testnet` output for multi-host; netgen owns remote-ready config generation.
   - [x] Emits EL genesis/chainspec deterministically (shared library `ultramarine-genesis`; `bundle/public/genesis.json`).
-  - [x] Emits per-node *rendered runtime config*:
+  - [x] Emits per-node _rendered runtime config_:
     - [x] systemd env files for Ultramarine (`--engine-*`, `--eth1-rpc-url`, `--jwt-path`, `ULTRAMARINE_ARCHIVER_*`)
     - [x] systemd env files for load-reth (ports, nat/extip, bootnodes/static peers)
   - [x] Derives stable EL `enode://…` bootnodes from generated EL P2P keys and emits them into the lockfile (no runtime `admin_nodeInfo` scraping in the happy path).
@@ -338,3 +339,6 @@ Notes:
 - 2025-12-18: Fixed netgen inventory output to be a standard static YAML inventory (no dynamic `_meta`), added `net-doctor`, and documented firewall/ports guidance.
 - 2025-12-22: Added `net-plan` (dry-run generation without secrets), and added `net-storage` (safe-by-default storage bootstrap with optional auto-adopt of provider-mounted data volumes).
 - 2025-12-22: Added operator UX wrappers (`net-bootstrap`, `net-launch`, `net-update`) and a destructive `net-wipe` playbook gated by explicit confirmation.
+- 2026-01-07: Improved operator UX (default `NET` via `net-use`, optional per-network `net.mk`, auto-detect `secrets.sops.yaml` for `net-gen`).
+- 2026-01-07: Hardened logging defaults (journald caps, Docker log rotation, optional syslog rotation) and added `net-clean-logs` plus disk-pressure checks.
+- 2026-01-07: Fixed Engine IPC permissions for non-root EL/CL by resetting stale sockets, chmod on start, and aligning ownership for runtime directories and keys.

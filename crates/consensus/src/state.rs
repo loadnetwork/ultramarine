@@ -6,9 +6,10 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     convert::TryFrom,
     sync::Arc,
+    time::Duration,
 };
 
-use alloy_rpc_types_engine::{ExecutionPayloadV3, PayloadStatus};
+use alloy_rpc_types_engine::{ExecutionPayloadV3, PayloadStatus, PayloadStatusEnum};
 use bytes::Bytes;
 use color_eyre::eyre;
 use ethereum_hashing::hash32_concat;
@@ -24,13 +25,13 @@ use malachitebft_app_channel::app::{
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest as Sha2Digest, Sha256 as Sha2Sha256};
 use ssz::Decode;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 use tree_hash::TreeHash;
 use ultramarine_blob_engine::{
     BlobEngine, BlobEngineError, BlobEngineImpl, store::rocksdb::RocksDbBlobStore,
 };
-use ultramarine_execution::notifier::ExecutionNotifier;
+use ultramarine_execution::{error::ExecutionError, notifier::ExecutionNotifier};
 use ultramarine_types::{
     address::Address,
     // Phase 3: Import blob types for streaming
@@ -105,6 +106,11 @@ where
     pub peers: HashSet<PeerId>,
 
     pub latest_block: Option<ExecutionBlock>,
+    pub executed_height: Height,
+    pub el_degraded: bool,
+    pub el_degraded_since: Option<Instant>,
+    pub el_last_error: Option<String>,
+    execution_retry: ExecutionRetryConfig,
 
     // Track rounds with blobs for cleanup
     // Key: height, Value: set of rounds that have blobs
@@ -146,6 +152,8 @@ pub struct DecidedOutcome {
     pub execution_block: ExecutionBlock,
     /// Payload status returned by the execution layer.
     pub payload_status: PayloadStatus,
+    /// Whether execution finalization is pending due to EL backpressure.
+    pub execution_pending: bool,
     /// Number of transactions in the execution payload.
     pub tx_count: usize,
     /// Size in bytes of the SSZ-encoded execution payload.
@@ -158,6 +166,25 @@ pub struct DecidedOutcome {
     /// Archive job for the archiver worker (if proposer and has blobs).
     /// When present, the app should send this to the archiver instead of using archive_notices.
     pub archive_job: Option<ArchiveJob>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionRetryConfig {
+    pub new_payload_timeout: Duration,
+    pub forkchoice_timeout: Duration,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl Default for ExecutionRetryConfig {
+    fn default() -> Self {
+        Self {
+            new_payload_timeout: Duration::from_secs(30),
+            forkchoice_timeout: Duration::from_secs(30),
+            initial_backoff: Duration::from_millis(250),
+            max_backoff: Duration::from_secs(2),
+        }
+    }
 }
 
 /// Represents errors that can occur during the verification of a proposal's signature.
@@ -226,6 +253,11 @@ where
             peers: HashSet::new(),
 
             latest_block: None,
+            executed_height: Height::new(0),
+            el_degraded: false,
+            el_degraded_since: None,
+            el_last_error: None,
+            execution_retry: ExecutionRetryConfig::default(),
             blob_rounds: HashMap::new(),
             last_blob_sidecar_root: B256::ZERO,
             last_blob_sidecar_height: Height::new(0),
@@ -243,6 +275,28 @@ where
     /// Enable archiver worker mode.
     pub fn set_archiver_enabled(&mut self, enabled: bool) {
         self.archiver_enabled = enabled;
+    }
+
+    pub fn set_execution_retry_config(&mut self, config: ExecutionRetryConfig) {
+        self.execution_retry = config;
+    }
+
+    pub fn is_el_degraded(&self) -> bool {
+        self.el_degraded
+    }
+
+    pub fn mark_el_degraded(&mut self, error: impl Into<String>) {
+        if !self.el_degraded {
+            self.el_degraded_since = Some(Instant::now());
+        }
+        self.el_degraded = true;
+        self.el_last_error = Some(error.into());
+    }
+
+    pub fn clear_el_degraded(&mut self) {
+        self.el_degraded = false;
+        self.el_degraded_since = None;
+        self.el_last_error = None;
     }
 
     /// Returns the earliest height available in the state.
@@ -721,10 +775,8 @@ where
         proposer: &Address,
         metadata: &ValueMetadata,
         body_root: B256,
+        parent_root: B256,
     ) -> Result<BeaconBlockHeader, String> {
-        let parent_root =
-            if height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
-
         let proposer_index = self
             .validator_index(proposer)
             .ok_or_else(|| format!("Proposer {} not found in validator set", proposer))?;
@@ -738,8 +790,24 @@ where
         ))
     }
 
-    pub fn prepare_blob_sidecar_parts(
-        &self,
+    async fn resolve_parent_root_for_height(&mut self, height: Height) -> eyre::Result<B256> {
+        if height.as_u64() == 0 {
+            return Ok(B256::ZERO);
+        }
+
+        let prev_height = Height::new(height.as_u64() - 1);
+        if let Some(prev_metadata) = self.store.get_blob_metadata(prev_height).await? {
+            let root = prev_metadata.to_beacon_header().hash_tree_root();
+            self.last_blob_sidecar_root = root;
+            self.last_blob_sidecar_height = prev_height;
+            return Ok(root);
+        }
+
+        eyre::bail!("Missing decided BlobMetadata for parent height {}", prev_height.as_u64())
+    }
+
+    pub async fn prepare_blob_sidecar_parts(
+        &mut self,
         value: &LocallyProposedValue<LoadContext>,
         bundle: Option<&BlobsBundle>,
     ) -> eyre::Result<(SignedBeaconBlockHeader, Vec<BlobSidecar>)> {
@@ -773,8 +841,16 @@ where
         );
         let body_root = body.compute_body_root();
 
+        let parent_root = self.resolve_parent_root_for_height(value.height).await?;
+
         let header_message = self
-            .build_sidecar_header_message(value.height, &self.address, metadata, body_root)
+            .build_sidecar_header_message(
+                value.height,
+                &self.address,
+                metadata,
+                body_root,
+                parent_root,
+            )
             .map_err(|e| eyre::eyre!(e))?;
 
         let signing_root = header_message.hash_tree_root();
@@ -1587,6 +1663,47 @@ where
             )
             .await
             .map_err(|e| eyre::eyre!("Execution layer new_payload failed: {}", e))?;
+        let mut execution_pending = false;
+        // After EL restarts (or heavy load), Engine API can return SYNCING while it catches up on
+        // internal validation. Treat SYNCING as transient and retry instead of forcing a full
+        // consensus restart loop.
+        let payload_status = if matches!(payload_status.status, PayloadStatusEnum::Syncing) {
+            let start = Instant::now();
+            let mut last = payload_status;
+            let mut backoff = self.execution_retry.initial_backoff;
+            loop {
+                if !matches!(last.status, PayloadStatusEnum::Syncing) {
+                    break last;
+                }
+                if start.elapsed() > self.execution_retry.new_payload_timeout {
+                    self.mark_el_degraded(format!(
+                        "new_payload SYNCING for {:?} at height {} (block_hash={:?})",
+                        self.execution_retry.new_payload_timeout,
+                        height,
+                        execution_payload.payload_inner.payload_inner.block_hash
+                    ));
+                    execution_pending = true;
+                    break PayloadStatus::from_status(PayloadStatusEnum::Syncing);
+                }
+                warn!(
+                    height = %height,
+                    block_hash = ?execution_payload.payload_inner.payload_inner.block_hash,
+                    "Execution layer new_payload returned SYNCING; retrying"
+                );
+                sleep(backoff).await;
+                backoff = (backoff * 2).min(self.execution_retry.max_backoff);
+                last = notifier
+                    .notify_new_block(
+                        execution_payload.clone(),
+                        execution_requests.clone(),
+                        versioned_hashes.clone(),
+                    )
+                    .await
+                    .map_err(|e| eyre::eyre!("Execution layer new_payload failed: {}", e))?;
+            }
+        } else {
+            payload_status
+        };
         if payload_status.is_invalid() {
             return Err(eyre::eyre!("Invalid payload status: {}", payload_status.status));
         }
@@ -1617,7 +1734,9 @@ where
         let tx_count = payload_inner.transactions.len();
 
         let expected_parent = self.latest_block.as_ref().map(|block| block.block_hash);
-        if let Some(expected_parent_hash) = expected_parent &&
+        let executed_is_parent = self.executed_height.as_u64().saturating_add(1) == height.as_u64();
+        if executed_is_parent &&
+            let Some(expected_parent_hash) = expected_parent &&
             expected_parent_hash != parent_block_hash
         {
             return Err(eyre::eyre!(
@@ -1628,10 +1747,48 @@ where
             ));
         }
 
-        let _latest_valid_hash = notifier
-            .set_latest_forkchoice_state(block_hash)
-            .await
-            .map_err(|e| eyre::eyre!("Failed to update forkchoice: {}", e))?;
+        let mut forkchoice_applied = false;
+        if !execution_pending {
+            let start = Instant::now();
+            let mut backoff = self.execution_retry.initial_backoff;
+            loop {
+                match notifier.set_latest_forkchoice_state(block_hash).await {
+                    Ok(_v) => {
+                        forkchoice_applied = true;
+                        break;
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let looks_transient = matches!(
+                            e.downcast_ref::<ExecutionError>(),
+                            Some(ExecutionError::SyncingForkchoice { .. })
+                        );
+                        if looks_transient &&
+                            start.elapsed() <= self.execution_retry.forkchoice_timeout
+                        {
+                            warn!(
+                                height = %height,
+                                ?block_hash,
+                                %msg,
+                                "Forkchoice update returned SYNCING/unknown-payload; retrying"
+                            );
+                            sleep(backoff).await;
+                            backoff = (backoff * 2).min(self.execution_retry.max_backoff);
+                            continue;
+                        }
+                        if looks_transient {
+                            self.mark_el_degraded(format!(
+                                "forkchoice SYNCING for {:?} at height {} (block_hash={:?})",
+                                self.execution_retry.forkchoice_timeout, height, block_hash
+                            ));
+                            execution_pending = true;
+                            break;
+                        }
+                        return Err(eyre::eyre!("Failed to update forkchoice: {}", e));
+                    }
+                }
+            }
+        }
 
         debug!(
             height = %height,
@@ -1667,7 +1824,11 @@ where
             timestamp: execution_payload.timestamp(),
             prev_randao: expected_prev_randao,
         };
-        self.latest_block = Some(execution_block);
+        if forkchoice_applied {
+            self.latest_block = Some(execution_block);
+            self.executed_height = height;
+            self.clear_el_degraded();
+        }
 
         let archive_notices = Vec::new();
 
@@ -1691,9 +1852,16 @@ where
             self.pending_archive_heights.insert(height);
         }
 
+        let outcome_status = if execution_pending {
+            PayloadStatus::from_status(PayloadStatusEnum::Syncing)
+        } else {
+            payload_status
+        };
+
         Ok(DecidedOutcome {
             execution_block,
-            payload_status,
+            payload_status: outcome_status,
+            execution_pending,
             tx_count,
             block_bytes: execution_payload_ssz.len(),
             blob_count,
@@ -1830,6 +1998,12 @@ where
         // Only perform persistence and metadata operations on first commit (not WAL replay)
         if !is_idempotent_replay {
             self.store.store_decided_value(&certificate, proposal.value.clone()).await?;
+            if self.store.get_decided_value(certificate.height).await?.is_none() {
+                return Err(eyre::eyre!(
+                    "Decided value not persisted at height {}",
+                    certificate.height
+                ));
+            }
 
             // Phase 4: Three-layer metadata promotion (Layer 1 → Layer 2 → Layer 3)
             // This follows the architectural principle: Consensus → Ethereum → Blobs
@@ -2259,8 +2433,7 @@ where
         // Phase 4: Build and store BlobMetadata (Layer 2) as undecided
         // This MUST be stored before commit can promote it to decided
         let proposer_index = self.validator_index(&self.address);
-        let parent_blob_root =
-            if height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
+        let parent_blob_root = self.resolve_parent_root_for_height(height).await?;
 
         let blob_metadata = if commitments.is_empty() {
             // Blobless block - still need metadata for parent-root chaining
@@ -2551,7 +2724,7 @@ where
                 parts.round
             );
 
-            let _signed_header = self
+            let signed_header = self
                 .verify_blob_sidecars(parts.height, &parts.proposer, metadata, &blob_sidecars)
                 .await?;
 
@@ -2564,8 +2737,7 @@ where
 
             // Phase 4: Store BlobMetadata (Layer 2) as undecided after verification
             let proposer_index = self.validator_index(&parts.proposer);
-            let parent_blob_root =
-                if parts.height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
+            let parent_blob_root = signed_header.message.parent_root;
             let blob_keccak_hashes: Vec<B256> =
                 blob_sidecars.iter().map(|sidecar| sidecar.blob_keccak()).collect();
 
@@ -2594,8 +2766,27 @@ where
         if !has_blobs && let Some(metadata) = metadata_opt.as_ref() {
             // Store blobless BlobMetadata (Layer 2) for parent-root chaining
             let proposer_index = self.validator_index(&parts.proposer);
-            let parent_blob_root =
-                if parts.height.as_u64() == 0 { B256::ZERO } else { self.last_blob_sidecar_root };
+            let parent_blob_root = if parts.height.as_u64() == 0 {
+                B256::ZERO
+            } else {
+                let prev_height = Height::new(parts.height.as_u64() - 1);
+                match self.store.get_blob_metadata(prev_height).await {
+                    Ok(Some(prev_metadata)) => prev_metadata.to_beacon_header().hash_tree_root(),
+                    Ok(None) => {
+                        return Err(format!(
+                            "Missing decided BlobMetadata for parent height {}",
+                            prev_height.as_u64()
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to load BlobMetadata for parent height {}: {}",
+                            prev_height.as_u64(),
+                            e
+                        ));
+                    }
+                }
+            };
 
             let blob_metadata = BlobMetadata::blobless(
                 parts.height,
@@ -2715,30 +2906,18 @@ where
                     parent_root
                 }
                 Ok(None) => {
-                    if prev_height == self.last_blob_sidecar_height {
-                        warn!(
-                            height = %height,
-                            parent_height = %prev_height,
-                            cached_root = ?self.last_blob_sidecar_root,
-                            "⚠️  VALIDATION: Missing decided BlobMetadata for parent height {}; using cached blob root",
-                            prev_height.as_u64()
-                        );
-                        self.last_blob_sidecar_root
-                    } else {
-                        error!(
-                            height = %height,
-                            parent_height = %prev_height,
-                            cache_height = %self.last_blob_sidecar_height,
-                            cache_root = ?self.last_blob_sidecar_root,
-                            "❌ VALIDATION: Cache mismatch - cache points to height {} but need height {}",
-                            self.last_blob_sidecar_height.as_u64(),
-                            prev_height.as_u64()
-                        );
-                        return Err(format!(
-                            "Missing decided BlobMetadata for parent height {}",
-                            prev_height.as_u64()
-                        ));
-                    }
+                    error!(
+                        height = %height,
+                        parent_height = %prev_height,
+                        cache_height = %self.last_blob_sidecar_height,
+                        cache_root = ?self.last_blob_sidecar_root,
+                        "❌ VALIDATION: Missing decided BlobMetadata for parent height {}",
+                        prev_height.as_u64()
+                    );
+                    return Err(format!(
+                        "Missing decided BlobMetadata for parent height {}",
+                        prev_height.as_u64()
+                    ));
                 }
                 Err(e) => {
                     error!(
@@ -2757,7 +2936,10 @@ where
         };
 
         if signed_header.message.parent_root != expected_parent_root {
-            return Err("Beacon header parent_root mismatch".to_string());
+            return Err(format!(
+                "Beacon header parent_root mismatch: expected {:?}, got {:?}",
+                expected_parent_root, signed_header.message.parent_root
+            ));
         }
 
         for sidecar in sidecars {

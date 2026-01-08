@@ -74,7 +74,7 @@
           exit 1
         fi
         h1="$(curl -fsS "http://{{ loadnet_metrics_scrape_host }}:${port}/metrics" | awk '/^malachitebft_core_consensus_height / {print $2; exit}')"
-        sleep 5
+        sleep 15
         h2="$(curl -fsS "http://{{ loadnet_metrics_scrape_host }}:${port}/metrics" | awk '/^malachitebft_core_consensus_height / {print $2; exit}')"
         echo "$node $h1 $h2"
         test "$h1" != "$h2"
@@ -83,3 +83,6 @@
       loop: "{{ loadnet_nodes }}"
       register: height_checks
       changed_when: false
+      retries: 3
+      delay: 0
+      until: height_checks.rc == 0

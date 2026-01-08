@@ -59,7 +59,10 @@ pub fn build_genesis_from_alloc_strings(
     build_genesis_from_alloc(chain_id, map)
 }
 
-fn build_genesis_from_alloc(chain_id: u64, alloc: BTreeMap<Address, GenesisAccount>) -> Result<Genesis> {
+fn build_genesis_from_alloc(
+    chain_id: u64,
+    alloc: BTreeMap<Address, GenesisAccount>,
+) -> Result<Genesis> {
     // The Ethereum Cancun-Deneb (Dencun) upgrade was activated on the mainnet on March 13, 2024.
     // We keep the timestamp reference handy for future policy, but Load activates forks at genesis.
     let date = NaiveDate::from_ymd_opt(2024, 3, 14).unwrap();
@@ -119,13 +122,10 @@ pub fn write_genesis(path: &std::path::Path, genesis: &Genesis) -> Result<()> {
             ),
         );
     }
-    if let Some(config) = genesis_value
-        .get_mut("config")
-        .and_then(serde_json::Value::as_object_mut)
+    if let Some(config) = genesis_value.get_mut("config").and_then(serde_json::Value::as_object_mut) &&
+        matches!(config.get("daoForkSupport"), Some(serde_json::Value::Bool(false)))
     {
-        if matches!(config.get("daoForkSupport"), Some(serde_json::Value::Bool(false))) {
-            config.remove("daoForkSupport");
-        }
+        config.remove("daoForkSupport");
     }
     let genesis_json = serde_json::to_string_pretty(&genesis_value)?;
     std::fs::write(path, genesis_json)?;

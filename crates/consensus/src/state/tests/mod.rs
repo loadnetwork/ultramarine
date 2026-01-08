@@ -1,6 +1,6 @@
 mod support;
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use alloy_primitives::B256;
 use bytes::Bytes as NetworkBytes;
@@ -89,6 +89,7 @@ async fn verify_blob_sidecars_roundtrip_canonical_proof() {
 
     let (_signed_header, sidecars) = state
         .prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))
+        .await
         .expect("prepare sidecars");
     assert_eq!(sidecars.len(), commitments.len());
 
@@ -216,6 +217,8 @@ async fn load_blob_metadata_for_round_falls_back_to_decided() {
 async fn propose_value_with_blobs_stores_blob_metadata() {
     let mock_engine = MockBlobEngine::default();
     let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
 
     let payload = sample_execution_payload_v3();
     let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(&[] as &[BlobBytes]));
@@ -225,7 +228,14 @@ async fn propose_value_with_blobs_stores_blob_metadata() {
     let metadata_before =
         state.store.get_blob_metadata_undecided(Height::new(1), Round::new(0)).await.expect("get");
     assert!(metadata_before.is_none());
-    assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+    let genesis = state
+        .store
+        .get_blob_metadata(Height::new(0))
+        .await
+        .expect("get genesis")
+        .expect("genesis metadata");
+    let expected_parent_root = genesis.to_beacon_header().hash_tree_root();
+    assert_eq!(state.last_blob_sidecar_root, expected_parent_root);
 
     state
         .propose_value_with_blobs(
@@ -245,22 +255,28 @@ async fn propose_value_with_blobs_stores_blob_metadata() {
         .await
         .expect("get")
         .expect("metadata");
-
     assert_eq!(stored.height(), Height::new(1));
     assert_eq!(stored.blob_count(), 1);
-    assert_eq!(stored.parent_blob_root(), B256::ZERO);
+    assert_eq!(stored.parent_blob_root(), expected_parent_root);
     assert_eq!(stored.blob_kzg_commitments(), bundle.commitments.as_slice());
     assert_eq!(stored.execution_payload_header(), &expected_header);
     assert_eq!(stored.proposer_index_hint(), Some(0));
-    assert_eq!(state.last_blob_sidecar_root, B256::ZERO);
+    assert_eq!(state.last_blob_sidecar_root, expected_parent_root);
 }
 
 #[tokio::test]
 async fn propose_blobless_value_uses_parent_root_hint() {
     let mock_engine = MockBlobEngine::default();
     let (mut state, _tmp) = build_state(mock_engine, Height::new(2));
-    let parent_root = B256::from([7u8; 32]);
-    state.last_blob_sidecar_root = parent_root;
+    let prev_height = Height::new(1);
+    let parent_metadata = sample_blob_metadata(prev_height, B256::from([7u8; 32]));
+    state
+        .store
+        .put_blob_metadata_undecided(prev_height, Round::new(0), &parent_metadata)
+        .await
+        .expect("store parent metadata");
+    state.store.mark_blob_metadata_decided(prev_height, Round::new(0)).await.expect("mark decided");
+    let parent_root = parent_metadata.to_beacon_header().hash_tree_root();
 
     let payload = sample_execution_payload_v3();
     let requests_hash = Some(ExecutionPayloadHeader::compute_requests_hash(&[] as &[BlobBytes]));
@@ -448,9 +464,72 @@ async fn commit_promotes_blobless_metadata_updates_parent_root() {
 }
 
 #[tokio::test]
+async fn process_decided_certificate_marks_el_degraded_on_syncing() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(10));
+    let height = Height::new(10);
+    let round = Round::new(0);
+
+    state.set_execution_retry_config(ExecutionRetryConfig {
+        new_payload_timeout: Duration::from_millis(2),
+        forkchoice_timeout: Duration::from_millis(2),
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(1),
+    });
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+    seed_decided_blob_metadata(&mut state, Height::new(9), B256::ZERO)
+        .await
+        .expect("seed parent metadata");
+
+    let (proposed, _metadata, sidecars, _bundle, payload_bytes) =
+        propose_blobbed_value(&mut state, height, round, 1).await;
+
+    mock_engine
+        .verify_and_store(height, round.as_i64(), &sidecars)
+        .await
+        .expect("seed undecided blobs");
+
+    state
+        .store
+        .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
+        .await
+        .expect("store block bytes");
+
+    let certificate = CommitCertificate {
+        height,
+        round,
+        value_id: proposed.value.id(),
+        commit_signatures: Vec::new(),
+    };
+
+    let syncing_status = PayloadStatus::from_status(PayloadStatusEnum::Syncing);
+    let mut notifier = MockExecutionNotifier::with_payload_statuses(vec![
+        syncing_status.clone(),
+        syncing_status.clone(),
+        syncing_status,
+    ]);
+
+    let outcome = state
+        .process_decided_certificate(&certificate, payload_bytes, &mut notifier)
+        .await
+        .expect("process decided certificate");
+
+    assert!(outcome.execution_pending, "execution should be pending while EL syncs");
+    assert!(state.is_el_degraded(), "state should be marked EL-degraded");
+    assert!(
+        state.store.get_decided_value(height).await.expect("decided value").is_some(),
+        "decided value should be persisted even when execution is pending"
+    );
+}
+
+#[tokio::test]
 async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
     let mock_engine = MockBlobEngine::default();
-    let (state, _tmp) = build_state(mock_engine, Height::new(1));
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
 
     let height = Height::new(1);
     let round = Round::new(0);
@@ -463,7 +542,7 @@ async fn rebuild_blob_sidecars_for_restream_reconstructs_headers() {
     let locally_proposed = LocallyProposedValue::new(height, round, value);
 
     let (_signed_header, sidecars) =
-        state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle)).expect("prepare");
+        state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle)).await.expect("prepare");
 
     let blob_hashes = bundle.blob_keccak_hashes();
     let blob_metadata = BlobMetadata::new(
@@ -630,6 +709,8 @@ async fn multi_round_proposal_isolation_and_commit() {
     let mock_engine = MockBlobEngine::default();
     let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
     let height = Height::new(1);
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
 
     // Propose at round 0
     state.current_height = height;
@@ -878,6 +959,8 @@ async fn commit_fails_fast_if_blob_metadata_missing() {
 async fn parent_root_chain_continuity_across_mixed_blocks() {
     let mock_engine = MockBlobEngine::default();
     let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
 
     // Height 1: Blobbed block
     let payload_h1 = sample_execution_payload_v3();
@@ -1032,8 +1115,9 @@ async fn parent_root_chain_continuity_across_mixed_blocks() {
     // Verify full chain: h1 → h2 (blobless) → h3
     let decided_h1 = state.store.get_blob_metadata(Height::new(1)).await.expect("d1").expect("m1");
     let decided_h2 = state.store.get_blob_metadata(Height::new(2)).await.expect("d2").expect("m2");
+    let decided_h0 = state.store.get_blob_metadata(Height::new(0)).await.expect("d0").expect("m0");
 
-    assert_eq!(decided_h1.parent_blob_root(), B256::ZERO);
+    assert_eq!(decided_h1.parent_blob_root(), decided_h0.to_beacon_header().hash_tree_root());
     assert_eq!(decided_h2.parent_blob_root(), decided_h1.to_beacon_header().hash_tree_root());
     assert_eq!(meta_h3.parent_blob_root(), decided_h2.to_beacon_header().hash_tree_root());
 }

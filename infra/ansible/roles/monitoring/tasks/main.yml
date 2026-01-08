@@ -22,6 +22,44 @@
     fail_msg: "monitoring assets missing on controller; run deploy from repo checkout with ultramarine/monitoring present"
   run_once: true
 
+- name: Check for Grafana admin password env (controller-side)
+  ansible.builtin.stat:
+    path: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
+  register: loadnet_grafana_secret_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Read Grafana admin password env (controller-side)
+  ansible.builtin.slurp:
+    src: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
+  register: loadnet_grafana_secret
+  delegate_to: localhost
+  become: false
+  no_log: true
+  run_once: true
+  when: loadnet_grafana_secret_stat.stat.exists
+
+- name: Set Grafana admin password (from secrets)
+  ansible.builtin.set_fact:
+    loadnet_grafana_admin_password: >-
+      {{
+        (loadnet_grafana_secret.content | b64decode)
+        | regex_search('^GRAFANA_ADMIN_PASSWORD=\"?(.*)\"?$', '\\1', multiline=True)
+      }}
+  no_log: true
+  run_once: true
+  when: loadnet_grafana_secret_stat.stat.exists
+
+- name: Assert Grafana admin password is present when provided
+  ansible.builtin.assert:
+    that:
+      - (loadnet_grafana_admin_password | default('') | length) > 0
+    fail_msg: "grafana admin password env exists but is empty"
+  no_log: true
+  run_once: true
+  when: loadnet_grafana_secret_stat.stat.exists
+
 - name: Build node->details map (from lockfile)
   ansible.builtin.set_fact:
     loadnet_nodes_by_id: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes)) }}"

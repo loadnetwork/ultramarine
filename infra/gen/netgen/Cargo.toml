@@ -15,11 +15,11 @@ rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+toml = { workspace = true }
+ultramarine-cli = { path = "../../../crates/cli" }
 ultramarine-genesis = { path = "../../../crates/genesis" }
 ultramarine-types = { path = "../../../crates/types" }
-ultramarine-cli = { path = "../../../crates/cli" }
 which = "8.0.0"
-toml = { workspace = true }
 
 # YAML parsing for manifests/secrets.
 serde_yaml = "0.9.34"

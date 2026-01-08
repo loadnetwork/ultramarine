@@ -12,15 +12,15 @@ Primary references:
 
 ## 1) Phase 6 completeness (what’s shipped vs. sign-off gaps)
 
-### What Phase 6 *implements now* (V0)
+### What Phase 6 _implements now_ (V0)
 
 Per `docs/PHASE6_ARCHIVE_PRUNE_FINAL.md`, Phase 6 is real, end-to-end, and source-linked:
 
 - **ArchiveNotice protocol**: proposer signs an `ArchiveNotice` per blob after upload; validators verify and persist an `ArchiveRecord`.
-- **Proposer-only acceptance**: receivers reject notices not signed by the *expected proposer* for that height (prevents “random validator publishes locator” ambiguity).
+- **Proposer-only acceptance**: receivers reject notices not signed by the _expected proposer_ for that height (prevents “random validator publishes locator” ambiguity).
 - **Prune gating**: prune local blob bytes for a height only when:
-  1) height is “finalized” by the app’s finality tracking, and
-  2) all blob indices at that height have verified archive records.
+  1. height is “finalized” by the app’s finality tracking, and
+  2. all blob indices at that height have verified archive records.
 - **Restart recovery**: pending uploads / pending prunes are rehydrated on restart.
 - **Operational strictness**:
   - production nodes fail fast if archiver is enabled but misconfigured;
@@ -33,18 +33,18 @@ Per `docs/PHASE6_ARCHIVE_PRUNE_FINAL.md`, Phase 6 is real, end-to-end, and sourc
 
 These are explicitly called out in `docs/PHASE6_ARCHIVE_PRUNE_FINAL.md` as “Remaining to add/expand”:
 
-1) **Negative-path harness coverage**:
+1. **Negative-path harness coverage**:
    - invalid signature
    - non-proposer notices (should be rejected)
    - conflicting notices (same `(height, blob_index)` with different locator/provider)
-2) **Retention policy clarity**:
-   - “no retention window” currently applies to *blob bytes* only; consensus store history pruning is separate and should be intentionally configured.
-3) **Manual retry / ops UX**:
+2. **Retention policy clarity**:
+   - “no retention window” currently applies to _blob bytes_ only; consensus store history pruning is separate and should be intentionally configured.
+3. **Manual retry / ops UX**:
    - no manual retry CLI yet (useful for provider outages / stuck uploads).
-4) **Provider-strengthening is optional but important**:
+4. **Provider-strengthening is optional but important**:
    - V0 binds locators to blob bytes via `blob_keccak`, but there is no provider receipt / provider signature requirement.
 
-**Assessment**: Phase 6 is “implemented and usable”, but still “V0 hardening” rather than a final production-grade DA pipeline. The missing items are mostly *safety hardening and operability*, not architecture.
+**Assessment**: Phase 6 is “implemented and usable”, but still “V0 hardening” rather than a final production-grade DA pipeline. The missing items are mostly _safety hardening and operability_, not architecture.
 
 ---
 
@@ -67,7 +67,7 @@ Right now, validators ultimately behave like “full download” participants:
 - For safety, they tend to **fetch/verify full blob bytes** (proposal sidecars or sync packages) before considering the block valid.
 - That means validator bandwidth still scales with total DA throughput, which caps you well before “10–100×”.
 
-Phase 6’s archive/prune pipeline improves *storage sustainability*, but it does not yet create a *scalable availability protocol* (it mainly ensures “bytes can be moved out of RAM/disk after finality, and recovered elsewhere”).
+Phase 6’s archive/prune pipeline improves _storage sustainability_, but it does not yet create a _scalable availability protocol_ (it mainly ensures “bytes can be moved out of RAM/disk after finality, and recovered elsewhere”).
 
 ### One key technical constraint to keep explicit
 
@@ -120,7 +120,7 @@ Below are options ordered by “highest leverage per complexity”, with notes o
 
 ### Option B — True sampling (PeerDAS-like) but tuned for BFT sets (max scaling, higher complexity)
 
-**Idea**: implement sampling of erasure-coded data with proofs and aggregate attestations, but tune it to a *small-ish BFT validator set*.
+**Idea**: implement sampling of erasure-coded data with proofs and aggregate attestations, but tune it to a _small-ish BFT validator set_.
 
 - Similar commitment surface as Option A (a DA data root + sampling proofs).
 - Instead of fixed custody assignments, validators sample pseudo-random shard indices.
@@ -140,9 +140,9 @@ Phase 6 makes the proposer the sole uploader and sole accepted notice signer. Th
 
 Two upgrades:
 
-1) **Provider receipts**: the external store signs a receipt binding `(blob_keccak, locator, provider_id, expiry)`; validators require receipt validity before accepting an archive record.
-2) **Fallback uploaders**: after a timeout, allow *non-proposers* to upload and present a provider receipt, but keep the “proposer is canonical locator authority” by:
-   - allowing the proposer to sign *multiple* locators over time, or
+1. **Provider receipts**: the external store signs a receipt binding `(blob_keccak, locator, provider_id, expiry)`; validators require receipt validity before accepting an archive record.
+2. **Fallback uploaders**: after a timeout, allow _non-proposers_ to upload and present a provider receipt, but keep the “proposer is canonical locator authority” by:
+   - allowing the proposer to sign _multiple_ locators over time, or
    - allowing a 2f+1 validator quorum to sign a “recovery locator” if the proposer is offline.
 
 This doesn’t increase raw throughput, but it **enables much shorter on-node retention windows** safely, which becomes important once DA volume is large.
@@ -172,16 +172,16 @@ This keeps compatibility while letting the protocol evolve beyond Ethereum’s c
 
 If the goal is a step-function DA increase, prioritize Option A first:
 
-1) Implement **erasure coding + DA root** for blob bundles.
-2) Implement **deterministic custody assignments** + attestations.
-3) Gate “valid block” on an **availability certificate** derived from BFT signatures.
-4) Only then consider probabilistic sampling (Option B) if you need another order-of-magnitude.
+1. Implement **erasure coding + DA root** for blob bundles.
+2. Implement **deterministic custody assignments** + attestations.
+3. Gate “valid block” on an **availability certificate** derived from BFT signatures.
+4. Only then consider probabilistic sampling (Option B) if you need another order-of-magnitude.
 
 ---
 
 ## 5) Open questions to resolve early (they strongly affect design)
 
-1) **Validator set size & churn**: how big do you expect the active set to be, and how frequently does it change?
-2) **DA threat model**: are you optimizing for “validators are the DA layer” (like Celestia) or “validators just finalize, DA is outsourced” (like pure archival providers)?
-3) **Light client goals**: do you want light clients to verify DA availability (sampling proofs), or is DA primarily for full nodes/apps?
-4) **Compatibility boundary**: do you require that *all* DA be expressible as EIP-4844 blobs, or can you introduce a native DA transaction format/lane?
+1. **Validator set size & churn**: how big do you expect the active set to be, and how frequently does it change?
+2. **DA threat model**: are you optimizing for “validators are the DA layer” (like Celestia) or “validators just finalize, DA is outsourced” (like pure archival providers)?
+3. **Light client goals**: do you want light clients to verify DA availability (sampling proofs), or is DA primarily for full nodes/apps?
+4. **Compatibility boundary**: do you require that _all_ DA be expressible as EIP-4844 blobs, or can you introduce a native DA transaction format/lane?

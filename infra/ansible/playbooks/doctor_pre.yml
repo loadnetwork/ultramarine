@@ -9,6 +9,9 @@
     loadnet_networks: "{{ loadnet_root }}/networks"
     loadnet_net: "{{ net }}"
     loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+    loadnet_root_fs_max_pct_value: "{{ loadnet_root_fs_max_pct | default(85) }}"
+    loadnet_log_dir_path: "{{ loadnet_log_dir | default('/var/log') }}"
+    loadnet_log_dir_max_mb_value: "{{ loadnet_log_dir_max_mb | default(4096) }}"
   tasks:
     - name: Assert required vars
       ansible.builtin.assert:
@@ -51,6 +54,32 @@
         that:
           - (fs_file_max.stdout | int) >= 1048576
         fail_msg: "fs.file-max={{ fs_file_max.stdout }} is too low; expected >= 1048576"
+
+    - name: Check root filesystem usage
+      ansible.builtin.shell: "df -P / | awk 'NR==2 {print int($5)}'"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: loadnet_root_pct
+
+    - name: Assert root filesystem usage below threshold
+      ansible.builtin.assert:
+        that:
+          - (loadnet_root_pct.stdout | int) < (loadnet_root_fs_max_pct_value | int)
+        fail_msg: "root filesystem usage {{ loadnet_root_pct.stdout }}% exceeds limit {{ loadnet_root_fs_max_pct_value }}%"
+
+    - name: Check /var/log size
+      ansible.builtin.shell: "du -sm {{ loadnet_log_dir_path }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: loadnet_log_dir_size
+
+    - name: Assert /var/log size below threshold
+      ansible.builtin.assert:
+        that:
+          - (loadnet_log_dir_size.stdout.split()[0] | int) < (loadnet_log_dir_max_mb_value | int)
+        fail_msg: "/var/log size {{ loadnet_log_dir_size.stdout.split()[0] | default('0') }}MB exceeds limit {{ loadnet_log_dir_max_mb_value }}MB"
 
     - name: Check data mount exists (/var/lib/loadnet)
       ansible.builtin.command: "findmnt -n /var/lib/loadnet"

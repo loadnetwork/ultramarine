@@ -3,13 +3,23 @@
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    owner: root
-    group: root
+    owner: "{{ loadnet_load_reth_uid | default(10001) }}"
+    group: "{{ loadnet_load_reth_gid | default(10001) }}"
     mode: "0755"
   loop:
     - "{{ loadnet_net_dir }}/bundle/private/env"
     - "{{ loadnet_net_dir }}/bundle/private/load-reth/p2p-keys"
     - "/var/lib/load-reth/{{ node_id }}"
+    - "/var/lib/load-reth/{{ node_id }}/.cache"
+
+- name: Fix load-reth data ownership (recursive)
+  ansible.builtin.file:
+    path: "/var/lib/load-reth/{{ node_id }}"
+    state: directory
+    owner: "{{ loadnet_load_reth_uid | default(10001) }}"
+    group: "{{ loadnet_load_reth_gid | default(10001) }}"
+    recurse: true
+  when: loadnet_fix_ownership | default(true) | bool
 
 - name: Copy env file
   ansible.builtin.copy:
@@ -23,7 +33,15 @@
   ansible.builtin.copy:
     src: "{{ net_dir }}/bundle/private/load-reth/p2p-keys/{{ node_id }}.key"
     dest: "{{ loadnet_net_dir }}/bundle/private/load-reth/p2p-keys/{{ node_id }}.key"
-    owner: root
-    group: root
+    owner: "{{ loadnet_load_reth_uid | default(10001) }}"
+    group: "{{ loadnet_load_reth_gid | default(10001) }}"
     mode: "0600"
   no_log: true
+
+- name: Fix load-reth p2p key ownership
+  ansible.builtin.file:
+    path: "{{ loadnet_net_dir }}/bundle/private/load-reth/p2p-keys/{{ node_id }}.key"
+    owner: "{{ loadnet_load_reth_uid | default(10001) }}"
+    group: "{{ loadnet_load_reth_gid | default(10001) }}"
+    mode: "0600"
+  when: loadnet_fix_ownership | default(true) | bool
