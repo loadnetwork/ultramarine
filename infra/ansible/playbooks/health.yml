@@ -51,38 +51,84 @@
         extended: true
 
     - name: Check EL JSON-RPC responds
-      ansible.builtin.shell: |
-        set -euo pipefail
-        node="{{ item }}"
-        port="{{ loadnet_ports_by_node[node].el_http }}"
-        resp="$(curl -fsS --max-time 2 -H 'Content-Type: application/json' \
-          --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-          "http://127.0.0.1:${port}")"
-        echo "$resp" | jq -e '.result' >/dev/null
-      args:
-        executable: /bin/bash
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ loadnet_ports_by_node[item].el_http }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 1
+          method: "web3_clientVersion"
+          params: []
+        return_content: true
+        timeout: 2
       loop: "{{ loadnet_nodes }}"
+      register: el_rpc
       changed_when: false
 
-    - name: Scrape height twice and ensure it changes
-      ansible.builtin.shell: |
-        set -euo pipefail
-        node="{{ item }}"
-        port="{{ (loadnet_ports_by_node[node].cl_metrics) | default(0) }}"
-        if [ "$port" = "0" ]; then
-          echo "missing cl_metrics port for $node" >&2
-          exit 1
-        fi
-        h1="$(curl -fsS "http://{{ loadnet_metrics_scrape_host }}:${port}/metrics" | awk '/^malachitebft_core_consensus_height / {print $2; exit}')"
-        sleep 15
-        h2="$(curl -fsS "http://{{ loadnet_metrics_scrape_host }}:${port}/metrics" | awk '/^malachitebft_core_consensus_height / {print $2; exit}')"
-        echo "$node $h1 $h2"
-        test "$h1" != "$h2"
-      args:
-        executable: /bin/bash
+    - name: Assert EL JSON-RPC returned result
+      ansible.builtin.assert:
+        that:
+          - el_rpc.results[ansible_loop.index0].status == 200
+          - el_rpc.results[ansible_loop.index0].json is defined
+          - el_rpc.results[ansible_loop.index0].json.result is defined
+        fail_msg: "EL JSON-RPC did not return result for {{ item }}"
       loop: "{{ loadnet_nodes }}"
-      register: height_checks
+      loop_control:
+        extended: true
+
+    - name: Assert CL metrics ports are set
+      ansible.builtin.assert:
+        that:
+          - (loadnet_ports_by_node[item].cl_metrics | default(0) | int) > 0
+        fail_msg: "missing cl_metrics port for {{ item }}"
+      loop: "{{ loadnet_nodes }}"
+
+    - name: Fetch initial CL metrics
+      ansible.builtin.uri:
+        url: "http://{{ loadnet_metrics_scrape_host }}:{{ loadnet_ports_by_node[item].cl_metrics }}/metrics"
+        return_content: true
+        timeout: 2
+      loop: "{{ loadnet_nodes }}"
+      register: cl_metrics_first
+      changed_when: false
+
+    - name: Record initial CL heights
+      ansible.builtin.set_fact:
+        loadnet_cl_height_first: >-
+          {{
+            loadnet_cl_height_first | default({})
+            | combine({item.item: (item.content | regex_findall('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)', multiline=True) | first | default('0', true) | int)})
+          }}
+      loop: "{{ cl_metrics_first.results }}"
+      changed_when: false
+      failed_when: item.content is not search('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+\\d+', multiline=True)
+
+    - name: Fetch CL metrics until height advances
+      ansible.builtin.uri:
+        url: "http://{{ loadnet_metrics_scrape_host }}:{{ loadnet_ports_by_node[item].cl_metrics }}/metrics"
+        return_content: true
+        timeout: 2
+      loop: "{{ loadnet_nodes }}"
+      register: cl_metrics_second
       changed_when: false
       retries: 3
-      delay: 0
-      until: height_checks.rc == 0
+      delay: 15
+      until: >-
+        (cl_metrics_second.content is defined)
+        and (cl_metrics_second.content is search('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+\\d+', multiline=True))
+        and
+        (
+          (cl_metrics_second.content | regex_findall('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)', multiline=True) | first | default('0', true) | int)
+          != (loadnet_cl_height_first[item] | int)
+        )
+
+    - name: Record updated CL heights
+      ansible.builtin.set_fact:
+        loadnet_cl_height_second: >-
+          {{
+            loadnet_cl_height_second | default({})
+            | combine({item.item: (item.content | regex_findall('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)', multiline=True) | first | default('0', true) | int)})
+          }}
+      loop: "{{ cl_metrics_second.results }}"
+      changed_when: false

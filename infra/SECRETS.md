@@ -62,7 +62,9 @@ copy to hosts as root-owned `0600` environment files.
 
 If `grafana_admin_password` is provided, `netgen` also emits:
 
-- `ultramarine/infra/networks/<net>/bundle/private/monitoring/grafana_admin_password.env` (0600)
+- `ultramarine/infra/networks/<net>/bundle/private/monitoring/grafana_admin_password.env` (0600, base64-encoded value)
+
+If it is not provided, deploy will generate a per-network password and write the same file (0600, base64-encoded).
 
 ## Consensus node keys
 

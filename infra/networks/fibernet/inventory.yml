@@ -4,11 +4,19 @@ all:
       ansible_host: 64.34.87.1
       ansible_user: ubuntu
       loadnet_nodes:
-      - node-1
-    lon2-0:
+      - node-2
+      - node-3
+    f4-metal-medium-fra2-fibernet-2:
+      ansible_host: 67.213.121.57
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-4
+      - node-5
+    f4-metal-medium-lon2-fibernet-1:
       ansible_host: 67.213.117.143
       ansible_user: ubuntu
       loadnet_nodes:
       - node-0
+      - node-1
   vars: {}
   children: {}

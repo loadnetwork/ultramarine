@@ -623,6 +623,154 @@ where
         Ok(())
     }
 
+    /// Number of stale rounds to retain blobs for before cleanup.
+    /// Set to 3 to allow for valid_round re-proposals (POL locking).
+    /// Rounds older than (current_round - STALE_ROUND_BLOB_RETENTION) will be cleaned up.
+    pub const STALE_ROUND_BLOB_RETENTION: u32 = 3;
+
+    /// Runtime cleanup of stale round blobs at the current height.
+    ///
+    /// Called when a new round starts to clean up blobs from rounds that are too old
+    /// to be relevant for re-proposal (via valid_round/POL).
+    ///
+    /// # Policy
+    ///
+    /// Drops blobs from rounds where: `round < (current_round - STALE_ROUND_BLOB_RETENTION)`
+    ///
+    /// # Safety
+    ///
+    /// This is safe because:
+    /// - Tendermint/Malachite POL (Proof-of-Lock) only references recent rounds
+    /// - After N rounds without commit, old proposals are unlikely to be re-proposed
+    /// - valid_round is always <= the round where lock was acquired (recent)
+    ///
+    /// # Arguments
+    ///
+    /// * `height` - The height to clean up stale rounds for
+    /// * `current_round` - The round we just entered
+    ///
+    /// # Returns
+    ///
+    /// Number of rounds cleaned up, or error
+    pub async fn cleanup_stale_round_blobs(
+        &mut self,
+        height: Height,
+        current_round: Round,
+    ) -> eyre::Result<usize> {
+        let retention = Self::STALE_ROUND_BLOB_RETENTION;
+        let current_round_i64 = current_round.as_i64();
+
+        // Calculate the cutoff: rounds below this will be cleaned
+        let cutoff_round = current_round_i64.saturating_sub(retention as i64);
+
+        if cutoff_round <= 0 {
+            // No rounds old enough to clean
+            return Ok(0);
+        }
+
+        // Get the rounds tracked for this height
+        let Some(rounds) = self.blob_rounds.get(&height) else {
+            return Ok(0);
+        };
+
+        // Find rounds that are stale (below cutoff)
+        let stale_rounds: Vec<i64> = rounds
+            .iter()
+            .copied()
+            .filter(|&r| r < cutoff_round)
+            .collect();
+
+        if stale_rounds.is_empty() {
+            return Ok(0);
+        }
+
+        info!(
+            height = %height,
+            current_round = %current_round,
+            cutoff_round = cutoff_round,
+            stale_count = stale_rounds.len(),
+            "Cleaning up stale round blobs"
+        );
+
+        let mut cleaned = 0;
+
+        for round_i64 in stale_rounds.iter().copied() {
+            let Some(round_u32) = u32::try_from(round_i64).ok() else {
+                warn!(
+                    height = %height,
+                    round = round_i64,
+                    "Invalid negative round encountered during stale cleanup"
+                );
+                continue;
+            };
+            let round = Round::new(round_u32);
+
+            // Clean up blob metadata from store (RocksDB)
+            if let Err(e) = self.store.delete_blob_metadata_undecided(height, round).await {
+                warn!(
+                    height = %height,
+                    round = %round,
+                    error = %e,
+                    "Failed to delete stale undecided BlobMetadata"
+                );
+                // Continue with blob engine cleanup even if metadata delete fails
+            }
+
+            if let Err(e) = self.store.delete_undecided_proposal(height, round).await {
+                warn!(
+                    height = %height,
+                    round = %round,
+                    error = %e,
+                    "Failed to delete stale undecided proposal"
+                );
+            }
+
+            if let Err(e) = self.store.delete_undecided_block_data(height, round).await {
+                warn!(
+                    height = %height,
+                    round = %round,
+                    error = %e,
+                    "Failed to delete stale undecided block data"
+                );
+            }
+
+            // Clean up blobs from blob engine (RocksDB CF_UNDECIDED)
+            if let Err(e) = self.blob_engine.drop_round(height, round_i64).await {
+                error!(
+                    height = %height,
+                    round = round_i64,
+                    error = %e,
+                    "Failed to drop stale blobs from blob engine"
+                );
+                // Continue to next round
+            } else {
+                debug!(
+                    height = %height,
+                    round = round_i64,
+                    "Dropped stale round blobs"
+                );
+                cleaned += 1;
+            }
+        }
+
+        // Remove cleaned rounds from in-memory tracking
+        if let Some(rounds) = self.blob_rounds.get_mut(&height) {
+            rounds.retain(|&r| r >= cutoff_round);
+        }
+
+        if cleaned > 0 {
+            self.blob_metrics.record_stale_round_cleanup(cleaned);
+            info!(
+                height = %height,
+                cleaned = cleaned,
+                retention_window = retention,
+                "Completed stale round blob cleanup"
+            );
+        }
+
+        Ok(cleaned)
+    }
+
     /// Recover pending archive jobs on startup.
     ///
     /// Scans decided heights for blobs that have not been archived yet and returns
@@ -790,7 +938,11 @@ where
         ))
     }
 
-    async fn resolve_parent_root_for_height(&mut self, height: Height) -> eyre::Result<B256> {
+    /// Resolve the parent root for a given height without mutating the cache.
+    ///
+    /// Cache updates are intentionally handled only after values become decided
+    /// (commit/WAL replay/sync promotion) or on startup hydration.
+    async fn resolve_parent_root_for_height(&self, height: Height) -> eyre::Result<B256> {
         if height.as_u64() == 0 {
             return Ok(B256::ZERO);
         }
@@ -798,8 +950,6 @@ where
         let prev_height = Height::new(height.as_u64() - 1);
         if let Some(prev_metadata) = self.store.get_blob_metadata(prev_height).await? {
             let root = prev_metadata.to_beacon_header().hash_tree_root();
-            self.last_blob_sidecar_root = root;
-            self.last_blob_sidecar_height = prev_height;
             return Ok(root);
         }
 
@@ -1360,7 +1510,7 @@ where
                 )
                 .await?;
 
-                if !blob_sidecars.is_empty() {
+                let validated_signed_header = if !blob_sidecars.is_empty() {
                     let round_i64 = round.as_i64();
 
                     if let Err(e) =
@@ -1413,20 +1563,23 @@ where
                         return Ok(None);
                     }
 
-                    if let Err(e) = self
+                    let header = match self
                         .verify_blob_sidecars(height, &proposer, &value_metadata, &blob_sidecars)
                         .await
                     {
-                        error!(
-                            height = %height,
-                            round = %round,
-                            error = %e,
-                            "Blob sidecar verification failed during sync"
-                        );
-                        self.blob_engine.drop_round(height, round_i64).await.ok();
-                        self.record_sync_failure();
-                        return Ok(None);
-                    }
+                        Ok(h) => h,
+                        Err(e) => {
+                            error!(
+                                height = %height,
+                                round = %round,
+                                error = %e,
+                                "Blob sidecar verification failed during sync"
+                            );
+                            self.blob_engine.drop_round(height, round_i64).await.ok();
+                            self.record_sync_failure();
+                            return Ok(None);
+                        }
+                    };
 
                     if let Err(e) = self.blob_engine.mark_decided(height, round_i64).await {
                         error!(
@@ -1437,10 +1590,40 @@ where
                         );
                         // Continue despite the error – blobs are verified and stored.
                     }
-                }
 
-                let parent_blob_root =
-                    if height.as_u64() == 0 { B256::ZERO } else { self.blob_parent_root() };
+                    Some(header)
+                } else {
+                    None
+                };
+
+                let parent_blob_root = match self.resolve_parent_root_for_height(height).await {
+                    Ok(root) => root,
+                    Err(e) => {
+                        error!(
+                            height = %height,
+                            round = %round,
+                            error = %e,
+                            "Failed to resolve parent root for synced value"
+                        );
+                        self.record_sync_failure();
+                        return Ok(None);
+                    }
+                };
+
+                // Hardening: Assert that validated signed header's parent_root matches store-derived root.
+                // This invariant must always hold: the proposer's parent_root (from blob sidecars)
+                // should equal what we derive from our decided store.
+                if let Some(ref signed_header) = validated_signed_header {
+                    debug_assert_eq!(
+                        signed_header.message.parent_root,
+                        parent_blob_root,
+                        "INVARIANT VIOLATION: Validated blob sidecar parent_root {:?} does not match \
+                         store-derived parent_root {:?} at height {}",
+                        signed_header.message.parent_root,
+                        parent_blob_root,
+                        height
+                    );
+                }
 
                 let proposer_index = self
                     .get_validator_set()

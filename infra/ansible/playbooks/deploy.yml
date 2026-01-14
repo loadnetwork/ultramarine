@@ -13,17 +13,6 @@
     # Extra-vars (from `make net-deploy ...`) override these safely.
     restart_on_deploy: true
     apply_firewall: false
-    loadnet_prometheus_port: 9090
-    loadnet_prometheus_bind: "127.0.0.1"
-    loadnet_prometheus_scrape_interval: "5s"
-    loadnet_grafana_port: 3000
-    loadnet_grafana_bind: "127.0.0.1"
-    loadnet_el_http_bind: "0.0.0.0"
-    loadnet_load_reth_uid: 10001
-    loadnet_load_reth_gid: 10001
-    loadnet_ultramarine_uid: 10002
-    loadnet_ultramarine_gid: 10002
-    loadnet_fix_ownership: true
   pre_tasks:
     - name: Assert required vars
       ansible.builtin.assert:
@@ -82,18 +71,17 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: Restart load-reth instances (apply new env/artifacts)
+    - name: Ensure load-reth instances are running
       ansible.builtin.systemd:
         name: "load-reth@{{ item }}.service"
         enabled: true
-        state: restarted
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
       loop: "{{ loadnet_nodes }}"
-      when: restart_on_deploy | bool
 
     - name: Check for stale load-reth containers that block restarts
       ansible.builtin.command:
-        cmd: "docker inspect -f '{{\"{{\"}}.Id{{\"}}\"}}' load-reth-{{ item }}"
-      register: load_reth_container
+        cmd: "docker inspect -f '{{\"{{\"}}.State.Status{{\"}}\"}}' load-reth-{{ item }}"
+      register: load_reth_container_status
       loop: "{{ loadnet_nodes }}"
       changed_when: false
       failed_when: false
@@ -102,12 +90,13 @@
     - name: Remove stale load-reth containers
       ansible.builtin.command:
         cmd: "docker rm -f load-reth-{{ item.item }}"
-      loop: "{{ load_reth_container.results }}"
+      loop: "{{ load_reth_container_status.results }}"
       loop_control:
         label: "{{ item.item }}"
       when:
         - restart_on_deploy | bool
         - item.rc == 0
+        - item.stdout in ['exited', 'dead', 'created']
 
     - name: Wait for load-reth engine IPC sockets
       ansible.builtin.wait_for:
@@ -115,26 +104,58 @@
         state: present
         timeout: 90
       loop: "{{ loadnet_nodes }}"
-      when: restart_on_deploy | bool
 
-    - name: Restart ultramarine instances (apply new env/artifacts)
+    - name: Ensure ultramarine instances are running
       ansible.builtin.systemd:
         name: "ultramarine@{{ item }}.service"
         enabled: true
-        state: restarted
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
       loop: "{{ loadnet_nodes }}"
-      when: restart_on_deploy | bool
 
-    - name: Restart Prometheus (monitoring)
+    - name: Ensure Prometheus is running (monitoring)
       ansible.builtin.systemd:
         name: prometheus.service
         enabled: true
-        state: restarted
-      when: restart_on_deploy | bool
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
 
-    - name: Restart Grafana (monitoring)
+    - name: Ensure Grafana is running (monitoring)
       ansible.builtin.systemd:
         name: grafana.service
         enabled: true
-        state: restarted
-      when: restart_on_deploy | bool
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
+
+    - name: Wait for Grafana container to be running
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - -f
+          - '{{"{{"}}.State.Running{{"}}"}}'
+          - loadnet-grafana
+      register: loadnet_grafana_container_state
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: loadnet_grafana_container_state.rc == 0 and loadnet_grafana_container_state.stdout == "true"
+      when:
+        - loadnet_grafana_admin_password_value is defined
+        - (loadnet_grafana_admin_password_value | length) > 0
+
+    - name: Enforce Grafana admin password from deploy bundle
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - loadnet-grafana
+          - grafana-cli
+          - admin
+          - reset-admin-password
+          - "{{ loadnet_grafana_admin_password_value }}"
+      register: loadnet_grafana_password_reset
+      retries: 5
+      delay: 2
+      until: loadnet_grafana_password_reset.rc == 0
+      no_log: true
+      when:
+        - loadnet_grafana_admin_password_value is defined
+        - (loadnet_grafana_admin_password_value | length) > 0

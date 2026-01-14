@@ -10,12 +10,13 @@
   },
   "inputs": {
     "manifest_path": "infra/manifests/fibernet.yaml",
-    "manifest_sha256": "631ecf0ea62cd3111fa164b52a8ad1b37980d24d5799babfef359a22cbc6c5f3"
+    "manifest_sha256": "d9d58dae0872bf9ebedb2840fb3549f8520dc3201450810db2bd7aa098769e91"
   },
   "policy": {
     "engine": "ipc-only",
     "sync_enabled": true,
-    "metrics_bind": "127.0.0.1"
+    "metrics_bind": "127.0.0.1",
+    "unsafe_failure_domains_allowed": true
   },
   "hosts": [
     {
@@ -24,7 +25,12 @@
       "ssh_user": "ubuntu"
     },
     {
-      "id": "lon2-0",
+      "id": "f4-metal-medium-fra2-fibernet-2",
+      "public_ip": "67.213.121.57",
+      "ssh_user": "ubuntu"
+    },
+    {
+      "id": "f4-metal-medium-lon2-fibernet-1",
       "public_ip": "67.213.117.143",
       "ssh_user": "ubuntu"
     }
@@ -32,7 +38,7 @@
   "nodes": [
     {
       "id": "node-0",
-      "host": "lon2-0",
+      "host": "f4-metal-medium-lon2-fibernet-1",
       "role": "validator",
       "images": {
         "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
@@ -44,6 +50,7 @@
       },
       "ports": {
         "el_http": 8545,
+        "el_authrpc": 8551,
         "el_p2p": 30303,
         "el_metrics": 9001,
         "cl_p2p": 27000,
@@ -54,19 +61,23 @@
         "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-0.key",
         "enode": "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
         "bootnodes": [
-          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@64.34.87.1:31303"
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@67.213.117.143:30304",
+          "enode://96ba08af99d694218743fb4838a4c27ef36283bf1b1e621ff0d9e03e272cc74d31737ddca999329213b51fb1de9b917509a036f7d139b1686d07672ae3635783@64.34.87.1:31303",
+          "enode://b6afab72f0b820e27f98a25f5d1aced98e655d292101ad9eaf666dab0c57c9d778b27dfda16601e5489b876de04a61a70d62ebf64a02d83d18204244dc51768a@64.34.87.1:31304",
+          "enode://bf9d91378abb271be5a22ca842222b6660c171d00b730570d039f3e4c99abf31de5b711fe46db024d775c1ec8efedd20c2cea913373c94603f062e61532bf25e@67.213.121.57:32303",
+          "enode://8f46c95abfe0a2d17707df7ecc5e8ae4cc65ed5532a9826b0c46f27f0f2c186ddf4b3bef4c64756643d7532d05587924f6babe2db14f45645f05349f00dc56ee@67.213.121.57:32304"
         ]
       },
       "archiver": {
         "enabled": true,
-        "provider_url": "https://archiver.example.com",
-        "provider_id": "loads3",
+        "provider_url": "https://load-s3-agent.load.network",
+        "provider_id": "load-s3-agent",
         "bearer_token_present": true
       }
     },
     {
       "id": "node-1",
-      "host": "f4-metal-medium-ams-fibernet-2",
+      "host": "f4-metal-medium-lon2-fibernet-1",
       "role": "validator",
       "images": {
         "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
@@ -77,7 +88,47 @@
         "ipc_path": "/run/load-reth/node-1/engine.ipc"
       },
       "ports": {
+        "el_http": 8546,
+        "el_authrpc": 8552,
+        "el_p2p": 30304,
+        "el_metrics": 9002,
+        "cl_p2p": 27001,
+        "cl_mempool": 28001,
+        "cl_metrics": 29001
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-1.key",
+        "enode": "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@67.213.117.143:30304",
+        "bootnodes": [
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+          "enode://96ba08af99d694218743fb4838a4c27ef36283bf1b1e621ff0d9e03e272cc74d31737ddca999329213b51fb1de9b917509a036f7d139b1686d07672ae3635783@64.34.87.1:31303",
+          "enode://b6afab72f0b820e27f98a25f5d1aced98e655d292101ad9eaf666dab0c57c9d778b27dfda16601e5489b876de04a61a70d62ebf64a02d83d18204244dc51768a@64.34.87.1:31304",
+          "enode://bf9d91378abb271be5a22ca842222b6660c171d00b730570d039f3e4c99abf31de5b711fe46db024d775c1ec8efedd20c2cea913373c94603f062e61532bf25e@67.213.121.57:32303",
+          "enode://8f46c95abfe0a2d17707df7ecc5e8ae4cc65ed5532a9826b0c46f27f0f2c186ddf4b3bef4c64756643d7532d05587924f6babe2db14f45645f05349f00dc56ee@67.213.121.57:32304"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://load-s3-agent.load.network",
+        "provider_id": "load-s3-agent",
+        "bearer_token_present": true
+      }
+    },
+    {
+      "id": "node-2",
+      "host": "f4-metal-medium-ams-fibernet-2",
+      "role": "validator",
+      "images": {
+        "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
+        "load_reth": "docker.io/loadnetwork/load-reth:fibernet"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-2/engine.ipc"
+      },
+      "ports": {
         "el_http": 9545,
+        "el_authrpc": 9551,
         "el_p2p": 31303,
         "el_metrics": 10001,
         "cl_p2p": 28000,
@@ -85,16 +136,137 @@
         "cl_metrics": 30000
       },
       "load_reth": {
-        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-1.key",
-        "enode": "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@64.34.87.1:31303",
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-2.key",
+        "enode": "enode://96ba08af99d694218743fb4838a4c27ef36283bf1b1e621ff0d9e03e272cc74d31737ddca999329213b51fb1de9b917509a036f7d139b1686d07672ae3635783@64.34.87.1:31303",
         "bootnodes": [
-          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303"
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@67.213.117.143:30304",
+          "enode://b6afab72f0b820e27f98a25f5d1aced98e655d292101ad9eaf666dab0c57c9d778b27dfda16601e5489b876de04a61a70d62ebf64a02d83d18204244dc51768a@64.34.87.1:31304",
+          "enode://bf9d91378abb271be5a22ca842222b6660c171d00b730570d039f3e4c99abf31de5b711fe46db024d775c1ec8efedd20c2cea913373c94603f062e61532bf25e@67.213.121.57:32303",
+          "enode://8f46c95abfe0a2d17707df7ecc5e8ae4cc65ed5532a9826b0c46f27f0f2c186ddf4b3bef4c64756643d7532d05587924f6babe2db14f45645f05349f00dc56ee@67.213.121.57:32304"
         ]
       },
       "archiver": {
         "enabled": true,
-        "provider_url": "https://archiver.example.com",
-        "provider_id": "loads3",
+        "provider_url": "https://load-s3-agent.load.network",
+        "provider_id": "load-s3-agent",
+        "bearer_token_present": true
+      }
+    },
+    {
+      "id": "node-3",
+      "host": "f4-metal-medium-ams-fibernet-2",
+      "role": "validator",
+      "images": {
+        "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
+        "load_reth": "docker.io/loadnetwork/load-reth:fibernet"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-3/engine.ipc"
+      },
+      "ports": {
+        "el_http": 9546,
+        "el_authrpc": 9552,
+        "el_p2p": 31304,
+        "el_metrics": 10002,
+        "cl_p2p": 28001,
+        "cl_mempool": 29001,
+        "cl_metrics": 30001
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-3.key",
+        "enode": "enode://b6afab72f0b820e27f98a25f5d1aced98e655d292101ad9eaf666dab0c57c9d778b27dfda16601e5489b876de04a61a70d62ebf64a02d83d18204244dc51768a@64.34.87.1:31304",
+        "bootnodes": [
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@67.213.117.143:30304",
+          "enode://96ba08af99d694218743fb4838a4c27ef36283bf1b1e621ff0d9e03e272cc74d31737ddca999329213b51fb1de9b917509a036f7d139b1686d07672ae3635783@64.34.87.1:31303",
+          "enode://bf9d91378abb271be5a22ca842222b6660c171d00b730570d039f3e4c99abf31de5b711fe46db024d775c1ec8efedd20c2cea913373c94603f062e61532bf25e@67.213.121.57:32303",
+          "enode://8f46c95abfe0a2d17707df7ecc5e8ae4cc65ed5532a9826b0c46f27f0f2c186ddf4b3bef4c64756643d7532d05587924f6babe2db14f45645f05349f00dc56ee@67.213.121.57:32304"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://load-s3-agent.load.network",
+        "provider_id": "load-s3-agent",
+        "bearer_token_present": true
+      }
+    },
+    {
+      "id": "node-4",
+      "host": "f4-metal-medium-fra2-fibernet-2",
+      "role": "validator",
+      "images": {
+        "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
+        "load_reth": "docker.io/loadnetwork/load-reth:fibernet"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-4/engine.ipc"
+      },
+      "ports": {
+        "el_http": 10545,
+        "el_authrpc": 10551,
+        "el_p2p": 32303,
+        "el_metrics": 11001,
+        "cl_p2p": 29000,
+        "cl_mempool": 30000,
+        "cl_metrics": 31000
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-4.key",
+        "enode": "enode://bf9d91378abb271be5a22ca842222b6660c171d00b730570d039f3e4c99abf31de5b711fe46db024d775c1ec8efedd20c2cea913373c94603f062e61532bf25e@67.213.121.57:32303",
+        "bootnodes": [
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@67.213.117.143:30304",
+          "enode://96ba08af99d694218743fb4838a4c27ef36283bf1b1e621ff0d9e03e272cc74d31737ddca999329213b51fb1de9b917509a036f7d139b1686d07672ae3635783@64.34.87.1:31303",
+          "enode://b6afab72f0b820e27f98a25f5d1aced98e655d292101ad9eaf666dab0c57c9d778b27dfda16601e5489b876de04a61a70d62ebf64a02d83d18204244dc51768a@64.34.87.1:31304",
+          "enode://8f46c95abfe0a2d17707df7ecc5e8ae4cc65ed5532a9826b0c46f27f0f2c186ddf4b3bef4c64756643d7532d05587924f6babe2db14f45645f05349f00dc56ee@67.213.121.57:32304"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://load-s3-agent.load.network",
+        "provider_id": "load-s3-agent",
+        "bearer_token_present": true
+      }
+    },
+    {
+      "id": "node-5",
+      "host": "f4-metal-medium-fra2-fibernet-2",
+      "role": "validator",
+      "images": {
+        "ultramarine": "docker.io/loadnetwork/ultramarine:fibernet",
+        "load_reth": "docker.io/loadnetwork/load-reth:fibernet"
+      },
+      "engine": {
+        "mode": "ipc",
+        "ipc_path": "/run/load-reth/node-5/engine.ipc"
+      },
+      "ports": {
+        "el_http": 10546,
+        "el_authrpc": 10552,
+        "el_p2p": 32304,
+        "el_metrics": 11002,
+        "cl_p2p": 29001,
+        "cl_mempool": 30001,
+        "cl_metrics": 31001
+      },
+      "load_reth": {
+        "p2p_key_path": "bundle/private/load-reth/p2p-keys/node-5.key",
+        "enode": "enode://8f46c95abfe0a2d17707df7ecc5e8ae4cc65ed5532a9826b0c46f27f0f2c186ddf4b3bef4c64756643d7532d05587924f6babe2db14f45645f05349f00dc56ee@67.213.121.57:32304",
+        "bootnodes": [
+          "enode://7b40084dbcc14a0ee9119c8d31c3bfc82d9999a685ad5c738f60f028767bd6ec50958a41aa8e928300c457536bee4666d300bbf2ba898ff7793326673239647e@67.213.117.143:30303",
+          "enode://d4dcdd9e94ac204136b020a4711a248c782dc6c0ca093e082abf5dde015b8c787c859b7e479c1db47df2e2861f629abf0b8f37bdd7186039478df6991a9cb21b@67.213.117.143:30304",
+          "enode://96ba08af99d694218743fb4838a4c27ef36283bf1b1e621ff0d9e03e272cc74d31737ddca999329213b51fb1de9b917509a036f7d139b1686d07672ae3635783@64.34.87.1:31303",
+          "enode://b6afab72f0b820e27f98a25f5d1aced98e655d292101ad9eaf666dab0c57c9d778b27dfda16601e5489b876de04a61a70d62ebf64a02d83d18204244dc51768a@64.34.87.1:31304",
+          "enode://bf9d91378abb271be5a22ca842222b6660c171d00b730570d039f3e4c99abf31de5b711fe46db024d775c1ec8efedd20c2cea913373c94603f062e61532bf25e@67.213.121.57:32303"
+        ]
+      },
+      "archiver": {
+        "enabled": true,
+        "provider_url": "https://load-s3-agent.load.network",
+        "provider_id": "load-s3-agent",
         "bearer_token_present": true
       }
     }

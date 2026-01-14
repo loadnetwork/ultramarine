@@ -941,7 +941,7 @@ net-health: require-net ## Health check: services active + Engine IPC socket + h
 .PHONY: net-doctor
 net-doctor: require-net ## Post-deploy diagnostics (units/current/layout/listeners) (NET=<net>, NET_DIR=<dir>).
 	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) $(if $(LIMIT),-l $(LIMIT),) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/doctor.yml \
-		-e "net=$(NET) net_dir=$(NET_DIR)"
+		-e "net=$(NET) net_dir=$(NET_DIR) loadnet_el_http_bind=$(EL_HTTP_BIND)"
 
 .PHONY: net-doctor-pre
 net-doctor-pre: require-net ## Pre-deploy checks (OS/storage/docker) (NET=<net>, NET_DIR=<dir>).

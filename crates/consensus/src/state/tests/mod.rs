@@ -283,6 +283,8 @@ async fn propose_blobless_value_uses_parent_root_hint() {
     let expected_header =
         ExecutionPayloadHeader::from_payload(&payload, requests_hash).expect("build header");
 
+    let initial_cache_root = state.last_blob_sidecar_root;
+
     state
         .propose_value_with_blobs(
             Height::new(2),
@@ -307,7 +309,7 @@ async fn propose_blobless_value_uses_parent_root_hint() {
     assert_eq!(stored.parent_blob_root(), parent_root);
     assert_eq!(stored.execution_payload_header(), &expected_header);
     assert_eq!(stored.proposer_index_hint(), Some(0));
-    assert_eq!(state.last_blob_sidecar_root, parent_root);
+    assert_eq!(state.last_blob_sidecar_root, initial_cache_root);
 }
 
 #[tokio::test]
@@ -1249,6 +1251,225 @@ async fn proposer_rotation_updates_metadata_hint() {
 }
 
 #[tokio::test]
+async fn cleanup_stale_round_blobs_removes_old_rounds() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+    let height = Height::new(1);
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    // Create blobs at rounds 0, 1, 2, 3
+    for round_num in 0..=3u32 {
+        state.current_height = height;
+        state.current_round = Round::new(round_num);
+        let payload = sample_execution_payload_v3();
+        let bundle = sample_blob_bundle(1);
+        state
+            .propose_value_with_blobs(
+                height,
+                Round::new(round_num),
+                NetworkBytes::new(),
+                &payload,
+                &[],
+                Some(&bundle),
+            )
+            .await
+            .expect("propose");
+
+        state
+            .store
+            .store_undecided_block_data(
+                height,
+                Round::new(round_num),
+                NetworkBytes::from_static(b"block"),
+                Vec::new(),
+            )
+            .await
+            .expect("store block data");
+    }
+
+    // Verify all rounds are tracked in blob_rounds
+    assert_eq!(state.blob_rounds.get(&height).unwrap().len(), 4);
+
+    // At round 6 with default retention=3, cutoff = 6-3 = 3
+    // Should cleanup rounds < 3, i.e., rounds 0, 1, 2
+    let cleaned = state
+        .cleanup_stale_round_blobs(height, Round::new(6))
+        .await
+        .expect("cleanup");
+
+    assert_eq!(cleaned, 3, "Should clean 3 stale rounds");
+
+    // Only round 3 should remain in tracking
+    let remaining = state.blob_rounds.get(&height).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining.contains(&3));
+
+    // Verify drop_round was called for rounds 0, 1, 2
+    let drop_calls = mock_engine.drop_calls();
+    assert!(drop_calls.contains(&(height, 0)), "Should drop round 0");
+    assert!(drop_calls.contains(&(height, 1)), "Should drop round 1");
+    assert!(drop_calls.contains(&(height, 2)), "Should drop round 2");
+    assert!(!drop_calls.contains(&(height, 3)), "Should NOT drop round 3");
+
+    for round_num in 0..=2u32 {
+        let round = Round::new(round_num);
+        assert!(
+            state
+                .store
+                .get_undecided_proposal(height, round)
+                .await
+                .expect("load proposal")
+                .is_none(),
+            "proposal should be removed for stale round {}",
+            round_num
+        );
+        assert!(
+            state.store.get_block_data(height, round).await.expect("load block").is_none(),
+            "block data should be removed for stale round {}",
+            round_num
+        );
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(height, round)
+                .await
+                .expect("load metadata")
+                .is_none(),
+            "metadata should be removed for stale round {}",
+            round_num
+        );
+    }
+
+    let retained_round = Round::new(3);
+    assert!(
+        state
+            .store
+            .get_undecided_proposal(height, retained_round)
+            .await
+            .expect("load proposal")
+            .is_some(),
+        "proposal should remain for retained round"
+    );
+    assert!(
+        state
+            .store
+            .get_block_data(height, retained_round)
+            .await
+            .expect("load block")
+            .is_some(),
+        "block data should remain for retained round"
+    );
+    assert!(
+        state
+            .store
+            .get_blob_metadata_undecided(height, retained_round)
+            .await
+            .expect("load metadata")
+            .is_some(),
+        "metadata should remain for retained round"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_stale_round_blobs_no_cleanup_when_retention_window_covers_all() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+    let height = Height::new(1);
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    // Create blobs at rounds 0, 1
+    for round_num in 0..=1u32 {
+        state.current_height = height;
+        state.current_round = Round::new(round_num);
+        let payload = sample_execution_payload_v3();
+        let bundle = sample_blob_bundle(1);
+        state
+            .propose_value_with_blobs(
+                height,
+                Round::new(round_num),
+                NetworkBytes::new(),
+                &payload,
+                &[],
+                Some(&bundle),
+            )
+            .await
+            .expect("propose");
+
+        state
+            .store
+            .store_undecided_block_data(
+                height,
+                Round::new(round_num),
+                NetworkBytes::from_static(b"block"),
+                Vec::new(),
+            )
+            .await
+            .expect("store block data");
+    }
+
+    // At round 3 with retention=3, cutoff = 3-3 = 0
+    // Nothing should be cleaned since rounds 0, 1 are >= cutoff(0) is false for round 0
+    // Actually cutoff < 0 would return early, and cutoff = 0 means rounds < 0 cleaned
+    // Let's test with round 2: cutoff = 2-3 = -1, so nothing cleaned
+    let cleaned = state
+        .cleanup_stale_round_blobs(height, Round::new(2))
+        .await
+        .expect("cleanup");
+
+    assert_eq!(cleaned, 0, "No rounds should be cleaned");
+    assert_eq!(state.blob_rounds.get(&height).unwrap().len(), 2);
+    assert!(mock_engine.drop_calls().is_empty());
+
+    for round_num in 0..=1u32 {
+        let round = Round::new(round_num);
+        assert!(
+            state
+                .store
+                .get_undecided_proposal(height, round)
+                .await
+                .expect("load proposal")
+                .is_some(),
+            "proposal should remain for round {}",
+            round_num
+        );
+        assert!(
+            state.store.get_block_data(height, round).await.expect("load block").is_some(),
+            "block data should remain for round {}",
+            round_num
+        );
+        assert!(
+            state
+                .store
+                .get_blob_metadata_undecided(height, round)
+                .await
+                .expect("load metadata")
+                .is_some(),
+            "metadata should remain for round {}",
+            round_num
+        );
+    }
+}
+
+#[tokio::test]
+async fn cleanup_stale_round_blobs_handles_empty_state() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+
+    // No blobs created, should not panic
+    let cleaned = state
+        .cleanup_stale_round_blobs(Height::new(1), Round::new(10))
+        .await
+        .expect("cleanup");
+
+    assert_eq!(cleaned, 0);
+    assert!(mock_engine.drop_calls().is_empty());
+}
+
+#[tokio::test]
 async fn get_blobs_with_status_check_returns_pruned_error() {
     let mock_engine = MockBlobEngine::default();
     let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
@@ -1308,4 +1529,103 @@ async fn get_blobs_with_status_check_returns_pruned_error() {
         }
         other => panic!("expected BlobsPruned error, got {:?}", other),
     }
+}
+
+/// Regression test: Ensure `process_synced_package` uses the store-derived parent_root,
+/// NOT the in-memory cache. This test sets the cache to a WRONG value and verifies
+/// that the written BlobMetadata.parent_blob_root matches the store, not the corrupted cache.
+///
+/// Background: A bug existed where `process_synced_package` used `self.blob_parent_root()`
+/// (the cache) instead of loading from the store. This caused nodes to diverge when
+/// the cache was stale, leading to chain halts during high-traffic scenarios.
+///
+/// This test uses a BLOBLESS sync to isolate the parent_root logic without blob verification
+/// complexity.
+#[tokio::test]
+async fn sync_path_uses_store_not_cache_for_parent_root() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(0));
+
+    // Seed genesis metadata
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis");
+    state.hydrate_blob_parent_root().await.expect("hydrate");
+
+    // Commit height 1 (blobless) to establish a known parent
+    let height_1 = Height::new(1);
+    let round = Round::new(0);
+
+    // Use helper to create decided blobless metadata at h1
+    let genesis_root = state.blob_parent_root();
+    let correct_parent_root = seed_decided_blob_metadata(&mut state, height_1, genesis_root)
+        .await
+        .expect("seed h1");
+
+    // Update state to point to h1
+    state.last_blob_sidecar_root = correct_parent_root;
+    state.last_blob_sidecar_height = height_1;
+
+    // CORRUPT the in-memory cache to a WRONG value
+    let wrong_root = B256::from([0xDE; 32]);
+    state.last_blob_sidecar_root = wrong_root;
+
+    // Verify cache is corrupted
+    assert_eq!(state.blob_parent_root(), wrong_root);
+    assert_ne!(wrong_root, correct_parent_root, "test setup: roots must differ");
+
+    // Now sync height 2 (blobless) via process_synced_package
+    let height_2 = Height::new(2);
+    state.current_height = height_2;
+    state.current_round = round;
+
+    // Build a blobless value for h2
+    let payload_h2 = sample_execution_payload_v3();
+    let payload_bytes_h2 = NetworkBytes::from(payload_h2.as_ssz_bytes());
+    let metadata_h2 = ValueMetadata::new(sample_execution_payload_header(), vec![]); // No blobs
+    let value_h2 = ultramarine_types::value::Value::new(metadata_h2.clone());
+
+    // Store the payload for sync
+    state
+        .store
+        .store_undecided_block_data(height_2, round, payload_bytes_h2.clone(), Vec::new())
+        .await
+        .expect("store h2 payload");
+
+    // Process the synced value - this should use STORE, not CACHE
+    let package = SyncedValuePackage::Full {
+        value: value_h2,
+        execution_payload_ssz: payload_bytes_h2.clone(),
+        blob_sidecars: vec![], // No blobs
+        execution_requests: Vec::new(),
+        archive_notices: Vec::new(),
+    };
+
+    let result = state
+        .process_synced_package(height_2, round, state.address, package)
+        .await
+        .expect("process sync")
+        .expect("sync succeeded");
+
+    assert_eq!(result.height, height_2);
+
+    // THE KEY ASSERTION: The written BlobMetadata must use the STORE-derived parent_root,
+    // NOT the corrupted cache value
+    let synced_metadata = state
+        .store
+        .get_blob_metadata(height_2)
+        .await
+        .expect("load h2")
+        .expect("h2 metadata");
+
+    assert_eq!(
+        synced_metadata.parent_blob_root(),
+        correct_parent_root,
+        "BUG: process_synced_package used cache ({:?}) instead of store ({:?})",
+        wrong_root,
+        correct_parent_root
+    );
+    assert_ne!(
+        synced_metadata.parent_blob_root(),
+        wrong_root,
+        "INVARIANT VIOLATED: parent_root must NOT match corrupted cache"
+    );
 }

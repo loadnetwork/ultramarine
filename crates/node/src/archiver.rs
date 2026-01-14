@@ -575,9 +575,9 @@ impl<E: BlobEngine + 'static> ArchiverWorker<E> {
 
         let parsed = serde_json::from_slice::<UploadResponse>(&bytes).map_err(|e| {
             color_eyre::eyre::eyre!(
-                "Provider {} response was not valid JSON ({e}). Raw body: {}",
+                "Provider {} response was not valid JSON ({e}). Body length: {} bytes",
                 self.config.provider_url,
-                String::from_utf8_lossy(&bytes)
+                bytes.len()
             )
         })?;
 

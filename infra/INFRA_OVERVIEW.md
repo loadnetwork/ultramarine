@@ -593,6 +593,10 @@ validators_per_host < n/3
 
 Example: With 4 validators, place at most 1 per host.
 
+For testnets that need higher density, you can opt out by setting
+`validation.allow_unsafe_failure_domains: true` in the manifest; netgen will
+warn and record the override in `network.lock.json`.
+
 ### Archiver Requirement
 
 Validators **must** have archiver configuration. The system fails fast without it:
