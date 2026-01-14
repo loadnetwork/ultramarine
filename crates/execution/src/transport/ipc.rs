@@ -34,7 +34,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
-use tracing::{debug, info};
+use tracing::{debug, trace};
 
 use super::{JsonRpcRequest, JsonRpcResponse, Transport};
 
@@ -52,10 +52,10 @@ impl IpcTransport {
     }
 
     async fn connect(&self) -> eyre::Result<UnixStream> {
-        info!("Connecting to IPC socket at {:?}", &self.path);
+        debug!(path = %self.path.display(), "Connecting to IPC socket");
         let stream_future = UnixStream::connect(&self.path);
         let stream = tokio::time::timeout(REQUEST_TIMEOUT, stream_future).await??;
-        info!("Successfully connected to IPC socket");
+        debug!("IPC socket connected");
         Ok(stream)
     }
 }
@@ -63,11 +63,13 @@ impl IpcTransport {
 #[async_trait]
 impl Transport for IpcTransport {
     async fn send(&self, req: &JsonRpcRequest) -> eyre::Result<JsonRpcResponse> {
-        info!("Sending IPC request");
+        let span = tracing::debug_span!("ipc_request", method = %req.method, id = req.id);
+        let _enter = span.enter();
+        let start = std::time::Instant::now();
+
         // Establish a fresh connection per request and half-close after write so the server
         // can terminate its side, allowing us to read a single full JSON response to EOF.
         let mut stream = self.connect().await?;
-        info!("IPC stream connected");
 
         // Quick fix: many Engine API IPC servers (e.g., reth) expect newline-delimited
         // JSON-RPC frames and keep the connection open for multiple requests. Without
@@ -78,17 +80,23 @@ impl Transport for IpcTransport {
         // or a length-delimited codec) and optional connection pooling to support
         // multiple requests per connection.
         let mut req_bytes = serde_json::to_vec(req)?;
+        let request_len = req_bytes.len();
         req_bytes.push(b'\n');
-        debug!("Request bytes: {}", String::from_utf8_lossy(&req_bytes));
+        debug!(request_len, "Sending IPC request");
         tokio::time::timeout(REQUEST_TIMEOUT, stream.write_all(&req_bytes)).await??;
         tokio::time::timeout(REQUEST_TIMEOUT, stream.flush()).await??;
-        debug!("Request bytes sent");
+        trace!("IPC request sent");
 
         // Read a single newline-delimited JSON response frame.
         let mut reader = BufReader::new(stream);
         let mut resp_bytes = Vec::new();
         tokio::time::timeout(REQUEST_TIMEOUT, reader.read_until(b'\n', &mut resp_bytes)).await??;
-        debug!("Response bytes received: {}", String::from_utf8_lossy(&resp_bytes));
+        let response_len = resp_bytes.len();
+        debug!(
+            response_len,
+            elapsed_ms = start.elapsed().as_millis(),
+            "IPC response received"
+        );
 
         serde_json::from_slice(&resp_bytes).map_err(|e| e.into())
     }

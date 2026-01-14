@@ -163,3 +163,15 @@
     - bundle_priv_validator_key_stats.results[node_idx].stat.exists
     - not host_priv_validator_key_stats.results[node_idx].stat.exists
   no_log: true
+
+- name: Enforce priv_validator_key.json permissions (0600)
+  ansible.builtin.file:
+    path: "/var/lib/ultramarine/{{ node_id }}/config/priv_validator_key.json"
+    owner: "{{ loadnet_ultramarine_uid | default(10002) }}"
+    group: "{{ loadnet_ultramarine_gid | default(10002) }}"
+    mode: "0600"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+    index_var: node_idx
+  when: host_priv_validator_key_stats.results[node_idx].stat.exists

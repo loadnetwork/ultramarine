@@ -9,6 +9,7 @@
     loadnet_networks: "{{ loadnet_root }}/networks"
     loadnet_net: "{{ net }}"
     loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+    loadnet_expected_el_http_bind: "{{ loadnet_el_http_bind | default('0.0.0.0') }}"
     loadnet_root_fs_max_pct_value: "{{ loadnet_root_fs_max_pct | default(85) }}"
     loadnet_log_dir_path: "{{ loadnet_log_dir | default('/var/log') }}"
     loadnet_log_dir_max_mb_value: "{{ loadnet_log_dir_max_mb | default(4096) }}"
@@ -58,30 +59,38 @@
         fail_msg: "fs.file-max={{ fs_file_max.stdout }} is too low; expected >= 1048576"
 
     - name: Check root filesystem usage
-      ansible.builtin.shell: "df -P / | awk 'NR==2 {print int($5)}'"
-      args:
-        executable: /bin/bash
+      ansible.builtin.command: "df -P /"
       changed_when: false
-      register: loadnet_root_pct
+      register: loadnet_root_df
+
+    - name: Parse root filesystem usage
+      ansible.builtin.set_fact:
+        loadnet_root_pct: "{{ loadnet_root_df.stdout_lines[1].split()[4] | regex_replace('%', '') | int }}"
+      changed_when: false
+      failed_when: loadnet_root_df.stdout_lines | length < 2
 
     - name: Assert root filesystem usage below threshold
       ansible.builtin.assert:
         that:
-          - (loadnet_root_pct.stdout | int) < (loadnet_root_fs_max_pct_value | int)
-        fail_msg: "root filesystem usage {{ loadnet_root_pct.stdout }}% exceeds limit {{ loadnet_root_fs_max_pct_value }}%"
+          - loadnet_root_pct < (loadnet_root_fs_max_pct_value | int)
+        fail_msg: "root filesystem usage {{ loadnet_root_pct }}% exceeds limit {{ loadnet_root_fs_max_pct_value }}%"
 
     - name: Check /var/log size
-      ansible.builtin.shell: "du -sm {{ loadnet_log_dir_path }}"
-      args:
-        executable: /bin/bash
+      ansible.builtin.command: "du -sm {{ loadnet_log_dir_path }}"
       changed_when: false
       register: loadnet_log_dir_size
+
+    - name: Parse /var/log size
+      ansible.builtin.set_fact:
+        loadnet_log_dir_mb: "{{ loadnet_log_dir_size.stdout.split()[0] | int }}"
+      changed_when: false
+      failed_when: loadnet_log_dir_size.stdout | length == 0
 
     - name: Assert /var/log size below threshold
       ansible.builtin.assert:
         that:
-          - (loadnet_log_dir_size.stdout.split()[0] | int) < (loadnet_log_dir_max_mb_value | int)
-        fail_msg: "/var/log size {{ loadnet_log_dir_size.stdout.split()[0] | default('0') }}MB exceeds limit {{ loadnet_log_dir_max_mb_value }}MB"
+          - loadnet_log_dir_mb < (loadnet_log_dir_max_mb_value | int)
+        fail_msg: "/var/log size {{ loadnet_log_dir_mb }}MB exceeds limit {{ loadnet_log_dir_max_mb_value }}MB"
 
     - name: Check /opt/loadnet/current symlink exists
       ansible.builtin.stat:
@@ -148,9 +157,18 @@
       ansible.builtin.set_fact:
         loadnet_validator_nodes: "{{ loadnet_lock.nodes | selectattr('role', 'equalto', 'validator') | map(attribute='id') | list }}"
 
+    - name: Build local validator node list
+      ansible.builtin.set_fact:
+        loadnet_validator_nodes_local: "{{ loadnet_validator_nodes | intersect(loadnet_nodes) }}"
+
     - name: Build expected metrics bind (from lockfile policy)
       ansible.builtin.set_fact:
         loadnet_expected_metrics_bind: "{{ loadnet_lock.policy.metrics_bind | default('127.0.0.1') }}"
+
+    - name: Normalize expected bind hosts for checks
+      ansible.builtin.set_fact:
+        loadnet_expected_el_http_host: "{{ '127.0.0.1' if loadnet_expected_el_http_bind in ['0.0.0.0', '::'] else loadnet_expected_el_http_bind }}"
+        loadnet_expected_metrics_host: "{{ '127.0.0.1' if loadnet_expected_metrics_bind in ['0.0.0.0', '::'] else loadnet_expected_metrics_bind }}"
 
     - name: Check free disk space under /var/lib (best-effort)
       ansible.builtin.command: "df -Pk /var/lib"
@@ -179,64 +197,153 @@
       loop_control:
         extended: true
 
-    - name: Stat validator priv_validator_key.json files
+    - name: Stat validator priv_validator_key.json files (local nodes only)
       ansible.builtin.stat:
         path: "/var/lib/ultramarine/{{ item }}/config/priv_validator_key.json"
         follow: false
-      loop: "{{ loadnet_validator_nodes }}"
+      loop: "{{ loadnet_validator_nodes_local }}"
       register: validator_key_stats
 
-    - name: Assert validator priv_validator_key.json is 0600
+    - name: Assert validator priv_validator_key.json is 0600 (local nodes only)
       ansible.builtin.assert:
         that:
           - validator_key_stats.results[ansible_loop.index0].stat.exists
           - validator_key_stats.results[ansible_loop.index0].stat.mode == "0600"
         fail_msg: "bad permissions for /var/lib/ultramarine/{{ item }}/config/priv_validator_key.json (expected 0600)"
-      loop: "{{ loadnet_validator_nodes }}"
+      loop: "{{ loadnet_validator_nodes_local }}"
       loop_control:
         extended: true
 
-    - name: Optional postflight - check listeners for each node (if services are active)
-      ansible.builtin.shell: |
-        set -euo pipefail
-        node="{{ item }}"
-        el_p2p="{{ loadnet_ports_by_node[node].el_p2p }}"
-        cl_p2p="{{ loadnet_ports_by_node[node].cl_p2p }}"
-        cl_mempool="{{ loadnet_ports_by_node[node].cl_mempool }}"
-        el_http="{{ loadnet_ports_by_node[node].el_http }}"
-        el_metrics="{{ loadnet_ports_by_node[node].el_metrics }}"
-        cl_metrics="{{ loadnet_ports_by_node[node].cl_metrics }}"
-
-        if systemctl is-active --quiet "load-reth@${node}.service"; then
-          ss -lntu | awk '{print $5}' | grep -Eq ":${el_p2p}$" || {
-            echo "missing listener for load-reth p2p port ${el_p2p} (node=${node})" >&2
-            exit 1
-          }
-          ss -lnt | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:${el_http}$" || {
-            echo "load-reth HTTP is not bound to 127.0.0.1:${el_http} (node=${node})" >&2
-            exit 1
-          }
-          ss -lnt | awk '{print $4}' | grep -Eq "^127\\.0\\.0\\.1:${el_metrics}$" || {
-            echo "load-reth metrics is not bound to 127.0.0.1:${el_metrics} (node=${node})" >&2
-            exit 1
-          }
-        fi
-
-        if systemctl is-active --quiet "ultramarine@${node}.service"; then
-          ss -lntu | awk '{print $5}' | grep -Eq ":${cl_p2p}$" || {
-            echo "missing listener for ultramarine cl_p2p port ${cl_p2p} (node=${node})" >&2
-            exit 1
-          }
-          ss -lntu | awk '{print $5}' | grep -Eq ":${cl_mempool}$" || {
-            echo "missing listener for ultramarine cl_mempool port ${cl_mempool} (node=${node})" >&2
-            exit 1
-          }
-          ss -lnt | awk '{print $4}' | grep -Eq "^{{ loadnet_expected_metrics_bind | regex_escape }}:${cl_metrics}$" || {
-            echo "ultramarine metrics is not bound to {{ loadnet_expected_metrics_bind }}:${cl_metrics} (node=${node})" >&2
-            exit 1
-          }
-        fi
-      args:
-        executable: /bin/bash
+    - name: Check load-reth service active (postflight)
+      ansible.builtin.command: "systemctl is-active --quiet load-reth@{{ item }}.service"
       loop: "{{ loadnet_nodes }}"
+      register: load_reth_active
+      changed_when: false
+      failed_when: false
+
+    - name: Check ultramarine service active (postflight)
+      ansible.builtin.command: "systemctl is-active --quiet ultramarine@{{ item }}.service"
+      loop: "{{ loadnet_nodes }}"
+      register: ultramarine_active
+      changed_when: false
+      failed_when: false
+
+    - name: Read ultramarine config.toml (local nodes)
+      ansible.builtin.slurp:
+        src: "/var/lib/ultramarine/{{ item }}/config/config.toml"
+      loop: "{{ loadnet_nodes }}"
+      register: ultramarine_config
+      failed_when: false
+      changed_when: false
+
+    - name: Build mempool enabled map
+      ansible.builtin.set_fact:
+        loadnet_mempool_enabled: >-
+          {{
+            loadnet_mempool_enabled | default({})
+            | combine({
+                item.item: (
+                  (
+                    item.content is defined
+                    and (
+                      (item.content | b64decode)
+                      | regex_findall('^max_tx_count\\s*=\\s*(\\d+)', multiline=True)
+                      | first
+                      | default('0', true)
+                    ) | int > 0
+                  )
+                )
+              })
+          }}
+      loop: "{{ ultramarine_config.results }}"
+      changed_when: false
+
+    - name: Capture listening sockets
+      ansible.builtin.command: ss -lntu
+      changed_when: false
+      register: ss_listen
+
+    - name: Assert load-reth P2P listener
+      ansible.builtin.assert:
+        that:
+          - ss_listen.stdout is search(':' ~ loadnet_ports_by_node[item].el_p2p ~ '\\b')
+        fail_msg: "missing listener for load-reth p2p port {{ loadnet_ports_by_node[item].el_p2p }} (node={{ item }})"
+      loop: "{{ loadnet_nodes }}"
+      loop_control:
+        extended: true
+      when: load_reth_active.results[ansible_loop.index0].rc == 0
+
+    - name: Wait for load-reth HTTP listener
+      ansible.builtin.wait_for:
+        host: "{{ loadnet_expected_el_http_host }}"
+        port: "{{ loadnet_ports_by_node[item.item].el_http }}"
+        timeout: 2
+      loop: "{{ load_reth_active.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc == 0
+      changed_when: false
+
+    - name: Wait for load-reth metrics listener
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ loadnet_ports_by_node[item.item].el_metrics }}"
+        timeout: 2
+      loop: "{{ load_reth_active.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc == 0
+      changed_when: false
+
+    - name: Assert ultramarine consensus P2P listener
+      ansible.builtin.assert:
+        that:
+          - ss_listen.stdout is search(':' ~ loadnet_ports_by_node[item].cl_p2p ~ '\\b')
+        fail_msg: "missing listener for ultramarine cl_p2p port {{ loadnet_ports_by_node[item].cl_p2p }} (node={{ item }})"
+      loop: "{{ loadnet_nodes }}"
+      loop_control:
+        extended: true
+      when: ultramarine_active.results[ansible_loop.index0].rc == 0
+
+    - name: Assert ultramarine mempool listener (when enabled)
+      ansible.builtin.assert:
+        that:
+          - ss_listen.stdout is search(':' ~ loadnet_ports_by_node[item].cl_mempool ~ '\\b')
+        fail_msg: "missing listener for ultramarine cl_mempool port {{ loadnet_ports_by_node[item].cl_mempool }} (node={{ item }})"
+      loop: "{{ loadnet_nodes }}"
+      loop_control:
+        extended: true
+      when:
+        - ultramarine_active.results[ansible_loop.index0].rc == 0
+        - loadnet_mempool_enabled[item] | default(false)
+
+    - name: Warn if ultramarine mempool is disabled
+      ansible.builtin.debug:
+        msg: "ultramarine mempool disabled (max_tx_count=0), skipping listener check (node={{ item }})"
+      loop: "{{ loadnet_nodes }}"
+      loop_control:
+        extended: true
+      when:
+        - ultramarine_active.results[ansible_loop.index0].rc == 0
+        - not (loadnet_mempool_enabled[item] | default(true))
+
+    - name: Warn if ultramarine mempool config is missing
+      ansible.builtin.debug:
+        msg: "ultramarine config.toml missing or unreadable; skipping mempool listener check (node={{ item }})"
+      loop: "{{ loadnet_nodes }}"
+      loop_control:
+        extended: true
+      when:
+        - ultramarine_active.results[ansible_loop.index0].rc == 0
+        - item not in loadnet_mempool_enabled
+
+    - name: Wait for ultramarine metrics listener
+      ansible.builtin.wait_for:
+        host: "{{ loadnet_expected_metrics_host }}"
+        port: "{{ loadnet_ports_by_node[item.item].cl_metrics }}"
+        timeout: 2
+      loop: "{{ ultramarine_active.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc == 0
       changed_when: false

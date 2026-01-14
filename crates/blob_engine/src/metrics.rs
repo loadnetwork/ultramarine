@@ -42,6 +42,7 @@ pub struct Inner {
     lifecycle_promoted: Counter,
     lifecycle_dropped: Counter,
     lifecycle_pruned: Counter,
+    stale_round_cleanup: Counter,
 
     // Restream/Sync metrics (counters)
     restream_rebuilds: Counter,
@@ -64,6 +65,7 @@ impl Inner {
             lifecycle_promoted: Counter::default(),
             lifecycle_dropped: Counter::default(),
             lifecycle_pruned: Counter::default(),
+            stale_round_cleanup: Counter::default(),
 
             restream_rebuilds: Counter::default(),
             sync_failures: Counter::default(),
@@ -95,6 +97,7 @@ impl BlobEngineMetrics {
             lifecycle_promoted: self.lifecycle_promoted.get(),
             lifecycle_dropped: self.lifecycle_dropped.get(),
             lifecycle_pruned: self.lifecycle_pruned.get(),
+            stale_round_cleanup: self.stale_round_cleanup.get(),
             restream_rebuilds: self.restream_rebuilds.get(),
             sync_failures: self.sync_failures.get(),
         }
@@ -168,6 +171,12 @@ impl BlobEngineMetrics {
                 metrics.lifecycle_pruned.clone(),
             );
 
+            registry.register(
+                "stale_round_cleanup",
+                "Rounds cleaned due to stale round blob cleanup",
+                metrics.stale_round_cleanup.clone(),
+            );
+
             // Restream/Sync metrics
             registry.register(
                 "restream_rebuilds",
@@ -236,6 +245,11 @@ impl BlobEngineMetrics {
         self.lifecycle_pruned.inc_by(blob_count as u64);
     }
 
+    /// Record stale round cleanup
+    pub fn record_stale_round_cleanup(&self, rounds: usize) {
+        self.stale_round_cleanup.inc_by(rounds as u64);
+    }
+
     /// Set blobs per finalized block
     pub fn set_blobs_per_block(&self, count: usize) {
         self.blobs_per_block.set(count as i64);
@@ -279,6 +293,8 @@ pub struct MetricsSnapshot {
     pub lifecycle_dropped: u64,
     /// Total blobs pruned or archived.
     pub lifecycle_pruned: u64,
+    /// Total rounds cleaned due to stale round cleanup.
+    pub stale_round_cleanup: u64,
     /// Total restream rebuild operations performed.
     pub restream_rebuilds: u64,
     /// Total sync failures recorded during blob processing.

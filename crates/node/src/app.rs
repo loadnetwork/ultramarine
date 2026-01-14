@@ -180,6 +180,21 @@ pub async fn run(
             AppMsg::StartedRound { height, round, proposer, role, reply_value } => {
                 info!(%height, %round, %proposer, ?role, "🟢🟢 Started round");
 
+                // Cleanup stale round blobs to prevent memory/storage leak when consensus is stuck.
+                // This handles the case where rounds keep timing out but no commit happens.
+                // Only cleanup after round 0 (we need at least one previous round to have stale data).
+                if round.as_u32().map_or(false, |r| r > 0) {
+                    if let Err(e) = state.cleanup_stale_round_blobs(height, round).await {
+                        warn!(
+                            %height,
+                            %round,
+                            error = %e,
+                            "Failed to cleanup stale round blobs"
+                        );
+                        // Don't fail the round start - this is best-effort cleanup
+                    }
+                }
+
                 // We can use that opportunity to update our internal state
                 state.current_height = height;
                 state.current_round = round;

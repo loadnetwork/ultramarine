@@ -22,6 +22,29 @@
     fail_msg: "monitoring assets missing on controller; run deploy from repo checkout with ultramarine/monitoring present"
   run_once: true
 
+- name: Ensure monitoring secrets dir exists (controller-side)
+  ansible.builtin.file:
+    path: "{{ net_dir }}/bundle/private/monitoring"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Write Grafana admin password env from extra var (controller-side)
+  ansible.builtin.copy:
+    dest: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
+    mode: "0600"
+    content: |
+      GRAFANA_ADMIN_PASSWORD_B64={{ loadnet_grafana_admin_password | b64encode }}
+  no_log: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when:
+    - loadnet_grafana_admin_password is defined
+    - (loadnet_grafana_admin_password | length) > 0
+
 - name: Check for Grafana admin password env (controller-side)
   ansible.builtin.stat:
     path: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
@@ -30,35 +53,87 @@
   become: false
   run_once: true
 
-- name: Read Grafana admin password env (controller-side)
-  ansible.builtin.slurp:
-    src: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
-  register: loadnet_grafana_secret
-  delegate_to: localhost
-  become: false
+- name: Initialize Grafana admin password env body
+  ansible.builtin.set_fact:
+    loadnet_grafana_secret_body: ""
   no_log: true
-  run_once: true
+
+- name: Read Grafana admin password env (controller-side)
+  ansible.builtin.set_fact:
+    loadnet_grafana_secret_body: "{{ lookup('ansible.builtin.file', net_dir + '/bundle/private/monitoring/grafana_admin_password.env') }}"
+  no_log: true
   when: loadnet_grafana_secret_stat.stat.exists
 
-- name: Set Grafana admin password (from secrets)
+- name: Parse Grafana admin password (from secrets)
   ansible.builtin.set_fact:
-    loadnet_grafana_admin_password: >-
+    loadnet_grafana_admin_password_b64: >-
       {{
-        (loadnet_grafana_secret.content | b64decode)
-        | regex_search('^GRAFANA_ADMIN_PASSWORD=\"?(.*)\"?$', '\\1', multiline=True)
+        (loadnet_grafana_secret_body
+        | regex_findall('^GRAFANA_ADMIN_PASSWORD_B64=\"?(.*)\"?$', multiline=True)
+        | first
+        | default('', true))
+      }}
+    loadnet_grafana_admin_password_plain: >-
+      {{
+        (loadnet_grafana_secret_body
+        | regex_findall('^GRAFANA_ADMIN_PASSWORD=\"?(.*)\"?$', multiline=True)
+        | first
+        | default('', true))
       }}
   no_log: true
-  run_once: true
-  when: loadnet_grafana_secret_stat.stat.exists
 
-- name: Assert Grafana admin password is present when provided
+- name: Generate Grafana admin password env (controller-side)
+  ansible.builtin.copy:
+    dest: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
+    mode: "0600"
+    content: |
+      GRAFANA_ADMIN_PASSWORD_B64={{ lookup('ansible.builtin.password', net_dir + '/bundle/private/monitoring/.grafana_admin_password length=32 chars=ascii_letters,digits') | b64encode }}
+  no_log: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when:
+    - (not loadnet_grafana_secret_stat.stat.exists)
+      or ((loadnet_grafana_admin_password_b64 | length) == 0 and (loadnet_grafana_admin_password_plain | length) == 0)
+
+- name: Refresh Grafana admin password env (controller-side)
+  ansible.builtin.set_fact:
+    loadnet_grafana_secret_body: "{{ lookup('ansible.builtin.file', net_dir + '/bundle/private/monitoring/grafana_admin_password.env') }}"
+  no_log: true
+
+- name: Re-parse Grafana admin password (from secrets)
+  ansible.builtin.set_fact:
+    loadnet_grafana_admin_password_b64: >-
+      {{
+        (loadnet_grafana_secret_body
+        | regex_findall('^GRAFANA_ADMIN_PASSWORD_B64=\"?(.*)\"?$', multiline=True)
+        | first
+        | default('', true))
+      }}
+    loadnet_grafana_admin_password_plain: >-
+      {{
+        (loadnet_grafana_secret_body
+        | regex_findall('^GRAFANA_ADMIN_PASSWORD=\"?(.*)\"?$', multiline=True)
+        | first
+        | default('', true))
+      }}
+  no_log: true
+
+- name: Set Grafana admin password value
+  ansible.builtin.set_fact:
+    loadnet_grafana_admin_password_value: >-
+      {{
+        (loadnet_grafana_admin_password_b64 | length > 0)
+        | ternary(loadnet_grafana_admin_password_b64 | b64decode, loadnet_grafana_admin_password_plain)
+      }}
+  no_log: true
+
+- name: Assert Grafana admin password is present
   ansible.builtin.assert:
     that:
-      - (loadnet_grafana_admin_password | default('') | length) > 0
-    fail_msg: "grafana admin password env exists but is empty"
+      - (loadnet_grafana_admin_password_value | default('', true) | length) > 0
+    fail_msg: "grafana admin password is missing or empty (expected {{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env)"
   no_log: true
-  run_once: true
-  when: loadnet_grafana_secret_stat.stat.exists
 
 - name: Build node->details map (from lockfile)
   ansible.builtin.set_fact:
@@ -106,9 +181,9 @@
   ansible.builtin.template:
     src: "grafana.ini.j2"
     dest: "{{ loadnet_net_dir }}/monitoring/grafana/grafana.ini"
-    owner: root
-    group: root
-    mode: "0644"
+    owner: "472"
+    group: "472"
+    mode: "0640"
 
 - name: Copy Grafana dashboards provisioning config
   ansible.builtin.copy:

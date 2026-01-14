@@ -66,6 +66,8 @@ struct Manifest {
     sync: Sync,
     archiver: Archiver,
     exposure: Exposure,
+    #[serde(default)]
+    validation: Validation,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -123,6 +125,7 @@ struct Ports {
 #[derive(Clone, Debug, Deserialize)]
 struct ElPorts {
     http: u16,
+    authrpc: Option<u16>,
     p2p: u16,
     metrics: u16,
 }
@@ -149,6 +152,11 @@ struct Archiver {
 #[derive(Clone, Debug, Deserialize)]
 struct Exposure {
     metrics_bind: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct Validation {
+    allow_unsafe_failure_domains: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -198,6 +206,7 @@ struct Policy {
     engine: &'static str,
     sync_enabled: bool,
     metrics_bind: String,
+    unsafe_failure_domains_allowed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -234,6 +243,7 @@ struct EngineOut {
 #[derive(Clone, Debug, Serialize)]
 struct PortsOut {
     el_http: u16,
+    el_authrpc: u16,
     el_p2p: u16,
     el_metrics: u16,
     cl_p2p: u16,
@@ -504,6 +514,7 @@ fn ports_for_node(m: &Manifest, node: &Node) -> Result<PortsOut> {
         "by-index" => port_offset_by_index(m, node)?,
         other => bail!("unsupported ports.allocation: {other}"),
     };
+    let authrpc_base = m.ports.el.authrpc.unwrap_or(8551);
 
     fn add_port(base: u16, off: u16, what: &str) -> Result<u16> {
         let v = (base as u32) + (off as u32);
@@ -518,6 +529,7 @@ fn ports_for_node(m: &Manifest, node: &Node) -> Result<PortsOut> {
 
     Ok(PortsOut {
         el_http: add_port(m.ports.el.http, off, "el.http")?,
+        el_authrpc: add_port(authrpc_base, off, "el.authrpc")?,
         el_p2p: add_port(m.ports.el.p2p, off, "el.p2p")?,
         el_metrics: add_port(m.ports.el.metrics, off, "el.metrics")?,
         cl_p2p: add_port(m.ports.cl.p2p, off, "cl.p2p")?,
@@ -672,7 +684,9 @@ fn generate(
     allow_unsafe: bool,
 ) -> Result<()> {
     let manifest: Manifest = read_yaml(manifest_path)?;
-    validate_manifest(&manifest, allow_unsafe)?;
+    let allow_unsafe_effective =
+        allow_unsafe || manifest.validation.allow_unsafe_failure_domains;
+    validate_manifest(&manifest, allow_unsafe_effective)?;
 
     let secrets = if let Some(p) = secrets_path {
         let s = read_secrets(p)?;
@@ -890,6 +904,7 @@ fn generate(
             engine: "ipc-only",
             sync_enabled: true,
             metrics_bind: manifest.exposure.metrics_bind.clone(),
+            unsafe_failure_domains_allowed: allow_unsafe_effective,
         },
         hosts,
         nodes: lock_nodes,
@@ -1021,6 +1036,7 @@ fn generate(
             ("LOAD_RETH_IMAGE", node.images.load_reth.clone()),
             ("LOAD_RETH_PUBLIC_IP", reth_public_ip),
             ("LOAD_RETH_HTTP_PORT", node.ports.el_http.to_string()),
+            ("LOAD_RETH_AUTHRPC_PORT", node.ports.el_authrpc.to_string()),
             ("LOAD_RETH_P2P_PORT", node.ports.el_p2p.to_string()),
             ("LOAD_RETH_METRICS_PORT", node.ports.el_metrics.to_string()),
             ("LOAD_RETH_ENGINE_IPC_PATH", node.engine.ipc_path.clone()),
@@ -1052,7 +1068,9 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Validate { manifest, allow_unsafe_failure_domains } => {
             let m: Manifest = read_yaml(&manifest)?;
-            validate_manifest(&m, allow_unsafe_failure_domains)?;
+            let allow_unsafe_effective =
+                allow_unsafe_failure_domains || m.validation.allow_unsafe_failure_domains;
+            validate_manifest(&m, allow_unsafe_effective)?;
             println!("ok");
             Ok(())
         }

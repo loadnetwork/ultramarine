@@ -1,0 +1,33 @@
+---
+loadnet_apt_disable_proxy: false
+loadnet_apt_cache_valid_time: 3600
+loadnet_apt_update_retries: 10
+loadnet_apt_update_max_delay: 30
+loadnet_apt_lock_timeout: 120
+
+loadnet_docker_log_driver: "local"
+loadnet_docker_log_max_size: "50m"
+loadnet_docker_log_max_file: "5"
+
+loadnet_el_http_bind: "0.0.0.0"
+loadnet_el_http_api: "eth,net,web3,txpool"
+
+loadnet_prometheus_bind: "127.0.0.1"
+loadnet_prometheus_port: 9090
+loadnet_prometheus_scrape_interval: "5s"
+
+loadnet_grafana_bind: "127.0.0.1"
+loadnet_grafana_port: 3000
+
+loadnet_load_reth_uid: 10001
+loadnet_load_reth_gid: 10001
+loadnet_ultramarine_uid: 10002
+loadnet_ultramarine_gid: 10002
+loadnet_fix_ownership: true
+
+loadnet_journal_max_use: "2G"
+loadnet_journal_max_file_size: "200M"
+loadnet_journal_max_retention: "7day"
+loadnet_forward_journal_to_syslog: false
+loadnet_syslog_max_size: "100M"
+loadnet_syslog_max_files: 5

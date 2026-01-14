@@ -284,6 +284,26 @@ impl Db {
         Ok(())
     }
 
+    fn delete_undecided_proposal(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let key = (height, round);
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(UNDECIDED_PROPOSALS_TABLE)?;
+            table.remove(&key)?;
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
+
+        Ok(())
+    }
+
     fn height_range<Table>(
         &self,
         table: &Table,
@@ -473,6 +493,26 @@ impl Db {
 
         self.metrics.observe_write_time(start.elapsed());
         self.metrics.add_write_bytes(write_bytes);
+
+        Ok(())
+    }
+
+    fn delete_undecided_block_data(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let start = Instant::now();
+
+        let key = (height, round);
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(UNDECIDED_BLOCK_DATA_TABLE)?;
+            table.remove(&key)?;
+        }
+        tx.commit()?;
+
+        self.metrics.observe_write_time(start.elapsed());
 
         Ok(())
     }
@@ -1051,6 +1091,15 @@ impl Store {
         tokio::task::spawn_blocking(move || db.get_undecided_proposal(height, round)).await?
     }
 
+    pub async fn delete_undecided_proposal(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.delete_undecided_proposal(height, round)).await?
+    }
+
     pub async fn prune(&self, retain_height: Height) -> Result<Vec<Height>, StoreError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || db.prune(retain_height)).await?
@@ -1090,6 +1139,15 @@ impl Store {
             )
         })
         .await?
+    }
+
+    pub async fn delete_undecided_block_data(
+        &self,
+        height: Height,
+        round: Round,
+    ) -> Result<(), StoreError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || db.delete_undecided_block_data(height, round)).await?
     }
 
     pub async fn store_decided_block_data(

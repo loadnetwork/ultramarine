@@ -30,13 +30,19 @@ Generated outputs (current):
 - `infra/networks/<net>/bundle/private/env/ultramarine-<node>.env` (runtime variables for systemd/Ansible)
 - `infra/networks/<net>/bundle/private/env/load-reth-<node>.env` (runtime variables for systemd/Ansible)
 - `infra/networks/<net>/bundle/private/ultramarine/secrets/<node>.env` (archiver bearer token env file; derived from secrets; never commit)
-- `infra/networks/<net>/bundle/private/monitoring/grafana_admin_password.env` (Grafana admin password; derived from secrets; never commit)
+- `infra/networks/<net>/bundle/private/monitoring/grafana_admin_password.env` (Grafana admin password; base64-encoded, derived from secrets or auto-generated on deploy; never commit)
 - `infra/networks/<net>/bundle/private/ultramarine/homes/<node>/config/{config.toml,genesis.json,priv_validator_key.json}` (Ultramarine home skeleton; `priv_validator_key.json` is generated for every node; only `role=validator` nodes are in the genesis validator set; never commit)
 
 Notes:
 
 - Deploys are **Engine IPC-only**.
 - Validators require archiver config; bearer tokens are expected via decrypted secrets (see `SECRETS.md`).
+
+## Ansible Design Choices (Intentional)
+
+- Services are managed as systemd units that invoke `docker run` directly for explicit host-level control.
+- Secrets are managed via SOPS instead of ansible-vault to match team workflows and rotation practices.
+- Some checks still use `command/shell` where no reliable module exists (e.g., UFW or socket inspection).
 
 ## Deploy (M3, systemd + Docker)
 
