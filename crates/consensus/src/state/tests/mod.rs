@@ -474,6 +474,7 @@ async fn process_decided_certificate_marks_el_degraded_on_syncing() {
 
     state.set_execution_retry_config(ExecutionRetryConfig {
         new_payload_timeout: Duration::from_millis(2),
+        new_payload_sync_timeout: Duration::from_millis(1),
         forkchoice_timeout: Duration::from_millis(2),
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(1),
@@ -1294,10 +1295,7 @@ async fn cleanup_stale_round_blobs_removes_old_rounds() {
 
     // At round 6 with default retention=3, cutoff = 6-3 = 3
     // Should cleanup rounds < 3, i.e., rounds 0, 1, 2
-    let cleaned = state
-        .cleanup_stale_round_blobs(height, Round::new(6))
-        .await
-        .expect("cleanup");
+    let cleaned = state.cleanup_stale_round_blobs(height, Round::new(6)).await.expect("cleanup");
 
     assert_eq!(cleaned, 3, "Should clean 3 stale rounds");
 
@@ -1353,12 +1351,7 @@ async fn cleanup_stale_round_blobs_removes_old_rounds() {
         "proposal should remain for retained round"
     );
     assert!(
-        state
-            .store
-            .get_block_data(height, retained_round)
-            .await
-            .expect("load block")
-            .is_some(),
+        state.store.get_block_data(height, retained_round).await.expect("load block").is_some(),
         "block data should remain for retained round"
     );
     assert!(
@@ -1415,10 +1408,7 @@ async fn cleanup_stale_round_blobs_no_cleanup_when_retention_window_covers_all()
     // Nothing should be cleaned since rounds 0, 1 are >= cutoff(0) is false for round 0
     // Actually cutoff < 0 would return early, and cutoff = 0 means rounds < 0 cleaned
     // Let's test with round 2: cutoff = 2-3 = -1, so nothing cleaned
-    let cleaned = state
-        .cleanup_stale_round_blobs(height, Round::new(2))
-        .await
-        .expect("cleanup");
+    let cleaned = state.cleanup_stale_round_blobs(height, Round::new(2)).await.expect("cleanup");
 
     assert_eq!(cleaned, 0, "No rounds should be cleaned");
     assert_eq!(state.blob_rounds.get(&height).unwrap().len(), 2);
@@ -1460,10 +1450,8 @@ async fn cleanup_stale_round_blobs_handles_empty_state() {
     let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
 
     // No blobs created, should not panic
-    let cleaned = state
-        .cleanup_stale_round_blobs(Height::new(1), Round::new(10))
-        .await
-        .expect("cleanup");
+    let cleaned =
+        state.cleanup_stale_round_blobs(Height::new(1), Round::new(10)).await.expect("cleanup");
 
     assert_eq!(cleaned, 0);
     assert!(mock_engine.drop_calls().is_empty());
@@ -1556,9 +1544,8 @@ async fn sync_path_uses_store_not_cache_for_parent_root() {
 
     // Use helper to create decided blobless metadata at h1
     let genesis_root = state.blob_parent_root();
-    let correct_parent_root = seed_decided_blob_metadata(&mut state, height_1, genesis_root)
-        .await
-        .expect("seed h1");
+    let correct_parent_root =
+        seed_decided_blob_metadata(&mut state, height_1, genesis_root).await.expect("seed h1");
 
     // Update state to point to h1
     state.last_blob_sidecar_root = correct_parent_root;
@@ -1609,12 +1596,8 @@ async fn sync_path_uses_store_not_cache_for_parent_root() {
 
     // THE KEY ASSERTION: The written BlobMetadata must use the STORE-derived parent_root,
     // NOT the corrupted cache value
-    let synced_metadata = state
-        .store
-        .get_blob_metadata(height_2)
-        .await
-        .expect("load h2")
-        .expect("h2 metadata");
+    let synced_metadata =
+        state.store.get_blob_metadata(height_2).await.expect("load h2").expect("h2 metadata");
 
     assert_eq!(
         synced_metadata.parent_blob_root(),
@@ -1627,5 +1610,38 @@ async fn sync_path_uses_store_not_cache_for_parent_root() {
         synced_metadata.parent_blob_root(),
         wrong_root,
         "INVARIANT VIOLATED: parent_root must NOT match corrupted cache"
+    );
+}
+
+/// Regression test for BUG-002: get_earliest_height() was returning the pruned minimum
+/// instead of genesis height. The fix makes get_earliest_height() return Height(0) if
+/// genesis metadata exists in BLOB_METADATA_DECIDED_TABLE.
+///
+/// This ensures that peers can sync from genesis even after pruning operations have
+/// removed older blob data, following the Lighthouse pattern where beacon blocks
+/// are kept forever.
+#[tokio::test]
+async fn test_history_min_height_returns_genesis_after_pruning() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(0));
+
+    // Step 1: Seed genesis metadata
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis blob metadata");
+
+    // Step 2: Add blocks up to height 5
+    let mut parent_root = BlobMetadata::genesis().to_beacon_header().hash_tree_root();
+    for h in 1..=5u64 {
+        parent_root =
+            seed_decided_blob_metadata(&mut state, Height::new(h), parent_root).await.expect(
+                &format!("seed decided blob metadata at height {}", h),
+            );
+    }
+
+    // Step 3: Verify get_earliest_height() returns Height(0) even with blocks up to height 5
+    let earliest = state.get_earliest_height().await;
+    assert_eq!(
+        earliest,
+        Height::new(0),
+        "BUG-002: get_earliest_height() should return genesis (Height 0) when genesis metadata exists"
     );
 }

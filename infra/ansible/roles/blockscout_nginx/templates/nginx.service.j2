@@ -1,0 +1,31 @@
+[Unit]
+Description=Nginx Reverse Proxy for Blockscout (Docker)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+
+ExecStartPre=-/usr/bin/docker stop nginx-blockscout
+ExecStartPre=-/usr/bin/docker rm nginx-blockscout
+ExecStartPre=/usr/bin/docker pull nginx:alpine
+
+ExecStart=/usr/bin/docker run \
+    --name nginx-blockscout \
+    --network host \
+    --rm \
+    -v {{ blockscout_nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro \
+    -v {{ blockscout_nginx_config_dir }}/conf.d:/etc/nginx/conf.d:ro \
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
+    -v {{ blockscout_nginx_webroot }}:/var/www/html:ro \
+    nginx:alpine
+
+ExecStop=/usr/bin/docker stop nginx-blockscout
+ExecReload=/usr/bin/docker exec nginx-blockscout nginx -s reload
+
+[Install]
+WantedBy=multi-user.target

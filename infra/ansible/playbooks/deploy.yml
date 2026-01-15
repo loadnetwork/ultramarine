@@ -93,6 +93,7 @@
       loop: "{{ load_reth_container_status.results }}"
       loop_control:
         label: "{{ item.item }}"
+      changed_when: true
       when:
         - restart_on_deploy | bool
         - item.rc == 0
@@ -155,6 +156,7 @@
       retries: 5
       delay: 2
       until: loadnet_grafana_password_reset.rc == 0
+      changed_when: loadnet_grafana_password_reset.rc == 0
       no_log: true
       when:
         - loadnet_grafana_admin_password_value is defined

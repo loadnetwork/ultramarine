@@ -1,0 +1,146 @@
+---
+# Blockscout Explorer Deployment Playbook
+#
+# This playbook deploys:
+# 1. Full node (load-reth + ultramarine) for Blockscout indexing
+# 2. Blockscout explorer stack (backend, frontend, stats, visualizer)
+# 3. Nginx reverse proxy with Let's Encrypt SSL
+#
+# Usage: make net-blockscout NET=<net>
+#
+# Prerequisites:
+# - DNS A-records configured for domains (explorer, stats, rpc)
+# - Manifest includes blockscout configuration
+# - net-gen has been run to generate lockfile and inventory
+#
+- name: Deploy Blockscout explorer with full node
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    loadnet_root: /opt/loadnet
+    loadnet_current: "{{ loadnet_root }}/current"
+    loadnet_networks: "{{ loadnet_root }}/networks"
+    loadnet_net: "{{ net }}"
+    loadnet_net_dir: "{{ loadnet_networks }}/{{ loadnet_net }}"
+    # Disable monitoring for blockscout host (no Prometheus/Grafana)
+    loadnet_monitoring_enabled: false
+    blockscout_manage_service: false
+  pre_tasks:
+    - name: Assert required vars
+      ansible.builtin.assert:
+        that:
+          - net is defined
+          - net_dir is defined
+        fail_msg: "net and net_dir must be defined"
+
+    - name: Load lockfile
+      ansible.builtin.set_fact:
+        loadnet_lock: "{{ lookup('file', net_dir + '/network.lock.json') | from_json }}"
+
+  roles:
+    # Phase 1: Base system setup
+    - blockscout_host
+    - firewall
+    - common
+
+    # Phase 2: Full node deployment
+    - load_reth
+    - ultramarine
+
+    # Phase 3: Blockscout explorer
+    - blockscout
+    - blockscout_nginx
+
+  post_tasks:
+    # --- Full Node Startup ---
+    - name: Check /opt/loadnet/current state
+      ansible.builtin.stat:
+        path: "{{ loadnet_current }}"
+        follow: false
+      register: loadnet_current_stat
+
+    - name: Backup existing /opt/loadnet/current directory (non-symlink)
+      ansible.builtin.command:
+        cmd: "mv {{ loadnet_current }} {{ loadnet_current }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
+      when:
+        - loadnet_current_stat.stat.exists
+        - loadnet_current_stat.stat.isdir
+        - not loadnet_current_stat.stat.islnk
+
+    - name: Point /opt/loadnet/current to selected network
+      ansible.builtin.file:
+        src: "{{ loadnet_net_dir }}"
+        dest: "{{ loadnet_current }}"
+        state: link
+        force: true
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start load-reth instance
+      ansible.builtin.systemd:
+        name: "load-reth@{{ item }}.service"
+        enabled: true
+        state: started
+      loop: "{{ loadnet_nodes }}"
+
+    - name: Check for stale load-reth containers
+      ansible.builtin.command:
+        cmd: "docker inspect -f '{{ \"{{\" }}.State.Status{{ \"}}\" }}' load-reth-{{ item }}"
+      register: load_reth_container_status
+      loop: "{{ loadnet_nodes }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale load-reth containers
+      ansible.builtin.command:
+        cmd: "docker rm -f load-reth-{{ item.item }}"
+      loop: "{{ load_reth_container_status.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.rc == 0
+        - item.stdout in ['exited', 'dead', 'created']
+      changed_when: true
+
+    - name: Wait for load-reth engine IPC sockets
+      ansible.builtin.wait_for:
+        path: "/run/load-reth/{{ item }}/engine.ipc"
+        state: present
+        timeout: 120
+      loop: "{{ loadnet_nodes }}"
+
+    - name: Start ultramarine instance
+      ansible.builtin.systemd:
+        name: "ultramarine@{{ item }}.service"
+        enabled: true
+        state: started
+      loop: "{{ loadnet_nodes }}"
+
+    # --- Blockscout Startup ---
+    - name: Start blockscout service
+      ansible.builtin.systemd:
+        name: blockscout.service
+        enabled: true
+        state: started
+
+    - name: Wait for backend health
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:4000/api/v2/stats"
+        method: GET
+        return_content: true
+        timeout: 10
+      register: blockscout_health
+      retries: 30
+      delay: 10
+      until: blockscout_health.status == 200
+      changed_when: false
+
+    # --- Nginx Startup ---
+    - name: Start nginx-blockscout service
+      ansible.builtin.systemd:
+        name: nginx-blockscout.service
+        enabled: true
+        state: started

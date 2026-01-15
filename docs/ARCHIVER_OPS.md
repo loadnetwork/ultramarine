@@ -4,14 +4,26 @@ This document covers the operational aspects of Ultramarine's blob archiver, whi
 
 For the full Phase 6 design and its code-audited status, see `docs/PHASE6_ARCHIVE_PRUNE_FINAL.md`.
 
+## Archive-Based Pruning Policy
+
+**IMPORTANT**: Load Network uses the **archive event as the boundary for blob pruning**, NOT the Ethereum DA window.
+
+| What Gets Pruned | What Gets Retained Forever |
+|------------------|---------------------------|
+| Blob bytes (after archive + finality) | Decided values, certificates, block data |
+| | BlobMetadata, archive records/locators |
+
+**Key invariant**: `history_min_height == 0` for all validators, enabling fullnode sync from genesis.
+
 ## Overview
 
 The archiver is part of Phase 6 (Archive/Prune) and provides:
 
 - **Blob archival**: Upload decided blobs to external storage providers
 - **Archive notices**: Cryptographically signed receipts that prove archival
-- **Finality-gated pruning**: Remove local blobs only after archival + finality
+- **Archive-gated pruning**: Remove local blob bytes only after archival + finality (NOT time-based DA window)
 - **Serving contract**: Return archive locators when blobs are pruned
+- **MetadataOnly sync**: Peers receive execution payload + archive notices for pruned heights
 
 ## Configuration
 

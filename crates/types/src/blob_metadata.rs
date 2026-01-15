@@ -299,6 +299,17 @@ impl BlobMetadata {
         &self.blob_keccak_hashes
     }
 
+    /// Update keccak hash at the given index.
+    /// Used when syncing from pruned peers where we learn the hash from archive notices.
+    /// Returns true if the hash was updated, false if it was already set to a non-zero value.
+    pub fn update_keccak_hash(&mut self, index: usize, hash: B256) -> bool {
+        if index < self.blob_keccak_hashes.len() && self.blob_keccak_hashes[index] == B256::ZERO {
+            self.blob_keccak_hashes[index] = hash;
+            return true;
+        }
+        false
+    }
+
     pub fn archival_status(&self, index: usize) -> BlobArchivalStatus {
         self.archival_records
             .get(index)

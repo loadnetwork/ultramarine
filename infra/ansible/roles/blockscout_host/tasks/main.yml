@@ -1,0 +1,67 @@
+---
+- name: Assert Blockscout is enabled in lockfile
+  ansible.builtin.assert:
+    that:
+      - loadnet_lock.blockscout is defined
+      - loadnet_lock.blockscout.enabled | default(false)
+    fail_msg: "Blockscout is not enabled in the manifest (blockscout.enabled must be true)"
+
+- name: Resolve Blockscout host
+  ansible.builtin.set_fact:
+    blockscout_host: "{{ loadnet_lock.blockscout.host }}"
+
+- name: Skip non-Blockscout hosts
+  ansible.builtin.meta: end_host
+  when: inventory_hostname != blockscout_host
+
+- name: Resolve Blockscout domains
+  ansible.builtin.set_fact:
+    blockscout_domains: "{{ loadnet_lock.blockscout.domains }}"
+
+- name: Resolve Blockscout RPC node
+  ansible.builtin.set_fact:
+    blockscout_rpc_node: "{{ loadnet_lock.blockscout.rpc_node }}"
+
+- name: Resolve Blockscout RPC node info
+  ansible.builtin.set_fact:
+    blockscout_rpc_node_info: >-
+      {{ loadnet_lock.nodes | selectattr('id', 'equalto', blockscout_rpc_node) | list }}
+
+- name: Assert Blockscout RPC node exists in lockfile
+  ansible.builtin.assert:
+    that:
+      - blockscout_rpc_node_info | length == 1
+    fail_msg: "blockscout.rpc_node {{ blockscout_rpc_node }} not found in lockfile nodes"
+
+- name: Resolve Blockscout RPC port
+  ansible.builtin.set_fact:
+    blockscout_rpc_port: "{{ blockscout_rpc_node_info[0].ports.el_http }}"
+
+- name: Set Blockscout RPC URLs (Docker host gateway)
+  ansible.builtin.set_fact:
+    blockscout_rpc_url: "http://host.docker.internal:{{ blockscout_rpc_port }}"
+    blockscout_rpc_trace_url: "http://host.docker.internal:{{ blockscout_rpc_port }}"
+
+- name: Map Blockscout variables for roles
+  ansible.builtin.set_fact:
+    # Enable roles
+    blockscout_enabled: true
+    blockscout_nginx_enabled: true
+    # Blockscout role variables
+    blockscout_domain: "{{ blockscout_domains.explorer }}"
+    blockscout_stats_domain: "{{ blockscout_domains.stats }}"
+    blockscout_rpc_domain: "{{ blockscout_domains.rpc }}"
+    blockscout_chain_id: "{{ loadnet_lock.network.chain_id }}"
+    blockscout_chain_name: "{{ loadnet_lock.network.name | title }} Testnet"
+    # Nginx role variables
+    blockscout_nginx_explorer_domain: "{{ blockscout_domains.explorer }}"
+    blockscout_nginx_stats_domain: "{{ blockscout_domains.stats }}"
+    blockscout_nginx_rpc_domain: "{{ blockscout_domains.rpc }}"
+    blockscout_nginx_rpc_backend: "127.0.0.1:{{ blockscout_rpc_port }}"
+    # SSL configuration from lockfile
+    blockscout_nginx_ssl_enabled: "{{ loadnet_lock.blockscout.ssl.enabled | default(true) }}"
+    blockscout_nginx_certbot_email: "{{ loadnet_lock.blockscout.ssl.email | default('admin@load.network') }}"
+
+- name: Restrict EL HTTP to Docker bridge by default on Blockscout host
+  ansible.builtin.set_fact:
+    loadnet_el_http_allow_cidrs: "{{ loadnet_el_http_allow_cidrs | default(['172.17.0.0/16']) }}"

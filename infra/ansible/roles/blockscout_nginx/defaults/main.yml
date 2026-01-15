@@ -1,0 +1,31 @@
+---
+# Enable/disable nginx role for this host
+blockscout_nginx_enabled: false
+
+# SSL configuration
+blockscout_nginx_ssl_enabled: true
+blockscout_nginx_certbot_email: "admin@load.network"
+
+# Domain names
+blockscout_nginx_explorer_domain: "fibernet.load.network"
+blockscout_nginx_stats_domain: "stats.fibernet.load.network"
+blockscout_nginx_rpc_domain: "rpc.fibernet.load.network"
+
+# SSL certificate paths (Let's Encrypt)
+blockscout_nginx_ssl_cert: "/etc/letsencrypt/live/{{ blockscout_nginx_explorer_domain }}/fullchain.pem"
+blockscout_nginx_ssl_key: "/etc/letsencrypt/live/{{ blockscout_nginx_explorer_domain }}/privkey.pem"
+
+# Nginx directories
+blockscout_nginx_config_dir: "/opt/loadnet/current/nginx"
+blockscout_nginx_webroot: "/var/www/html"
+
+# Backend services (upstream addresses)
+blockscout_nginx_backend: "127.0.0.1:4000"
+blockscout_nginx_frontend: "127.0.0.1:3001"
+blockscout_nginx_visualizer: "127.0.0.1:8051"
+blockscout_nginx_stats_backend: "127.0.0.1:8050"
+blockscout_nginx_rpc_backend: "127.0.0.1:8545"
+
+# Rate limiting for RPC
+blockscout_nginx_rpc_rate_limit: "100r/s"
+blockscout_nginx_rpc_burst: 200

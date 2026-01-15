@@ -120,18 +120,24 @@ where
     last_blob_sidecar_root: B256,
     last_blob_sidecar_height: Height,
 
-    /// Retention window (in heights) for decided blobs.
+    /// Retention window (in heights) for undecided data cleanup.
+    ///
+    /// NOTE: This does NOT control blob byte pruning. Load Network uses archive events
+    /// as the boundary for blob pruning (NOT Ethereum's time-based DA window).
+    /// Blob bytes are only pruned after verified archival + finality.
+    /// Decided values, certificates, and block data are retained forever.
     blob_retention_window: u64,
 
     /// Heights with blobs that are still awaiting archive notices.
     pending_archive_heights: BTreeSet<Height>,
     /// Heights that have fully archived blobs but are waiting for finalization before pruning.
+    /// Only blob bytes are pruned; consensus data (decided values, certs) is retained forever.
     pending_prune_heights: BTreeSet<Height>,
     /// Highest height finalized/committed locally.
     ///
     /// NOTE: In V0, "finalized" equals "decided" - there is no additional finality delay.
-    /// This means pruning happens immediately after a height is decided AND all blobs
-    /// at that height have verified archive notices. Future versions may add a finality
+    /// This means blob byte pruning happens immediately after a height is decided AND all
+    /// blobs at that height have verified archive notices. Future versions may add a finality
     /// lag (e.g., 2/3 acks, on-chain anchoring) before allowing prune.
     latest_finalized_height: Height,
     /// Whether the archiver worker is enabled.
@@ -170,7 +176,10 @@ pub struct DecidedOutcome {
 
 #[derive(Debug, Clone)]
 pub struct ExecutionRetryConfig {
+    /// Timeout for newPayload during normal consensus (block production)
     pub new_payload_timeout: Duration,
+    /// Timeout for newPayload during sync mode (shorter, EL knows target via FCU)
+    pub new_payload_sync_timeout: Duration,
     pub forkchoice_timeout: Duration,
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
@@ -180,6 +189,8 @@ impl Default for ExecutionRetryConfig {
     fn default() -> Self {
         Self {
             new_payload_timeout: Duration::from_secs(30),
+            // Shorter timeout during sync: EL already knows target from FCU
+            new_payload_sync_timeout: Duration::from_secs(2),
             forkchoice_timeout: Duration::from_secs(30),
             initial_backoff: Duration::from_millis(250),
             max_backoff: Duration::from_secs(2),
@@ -299,9 +310,23 @@ where
         self.el_last_error = None;
     }
 
-    /// Returns the earliest height available in the state.
-    /// If no values have been decided yet (empty store), returns the current height.
+    /// Returns the earliest height available in the state for sync purposes.
+    ///
+    /// Load Network context: Returns genesis height (0) if genesis metadata exists,
+    /// since validators must be able to serve historical data for fullnode sync.
+    /// This is required because we no longer prune decided values, certificates,
+    /// or block data - only blob bytes are pruned after archival.
+    ///
+    /// Following the Lighthouse pattern where beacon blocks are kept forever,
+    /// we return Height(0) when genesis metadata is seeded, allowing peers
+    /// to sync the complete chain history.
     pub async fn get_earliest_height(&self) -> Height {
+        // Check if genesis metadata exists (seeded at bootstrap)
+        // If present, we can serve historical data from height 0
+        if self.store.get_blob_metadata(Height::new(0)).await.ok().flatten().is_some() {
+            return Height::new(0);
+        }
+        // Fallback to min decided value height (for nodes without genesis metadata)
         self.store.min_decided_value_height().await.unwrap_or(self.current_height)
     }
 
@@ -674,11 +699,7 @@ where
         };
 
         // Find rounds that are stale (below cutoff)
-        let stale_rounds: Vec<i64> = rounds
-            .iter()
-            .copied()
-            .filter(|&r| r < cutoff_round)
-            .collect();
+        let stale_rounds: Vec<i64> = rounds.iter().copied().filter(|&r| r < cutoff_round).collect();
 
         if stale_rounds.is_empty() {
             return Ok(0);
@@ -1291,11 +1312,26 @@ where
             ));
         }
 
-        if metadata.blob_keccak_hashes()[blob_index] != notice.body.blob_keccak {
+        // Validate or learn keccak hash from notice
+        // B256::ZERO means we don't have the hash yet (synced from pruned peer)
+        let stored_hash = metadata.blob_keccak_hashes()[blob_index];
+        if stored_hash == B256::ZERO {
+            // Learn the keccak hash from this notice (synced from pruned peer)
+            if metadata.update_keccak_hash(blob_index, notice.body.blob_keccak) {
+                debug!(
+                    height = %height,
+                    index = %blob_index,
+                    hash = ?notice.body.blob_keccak,
+                    "Learned keccak hash from archive notice (was placeholder)"
+                );
+            }
+        } else if stored_hash != notice.body.blob_keccak {
             return Err(eyre::eyre!(
-                "ArchiveNotice blob hash mismatch at height {} index {}",
+                "ArchiveNotice blob hash mismatch at height {} index {}: stored={:?} notice={:?}",
                 height,
-                blob_index
+                blob_index,
+                stored_hash,
+                notice.body.blob_keccak
             ));
         }
 
@@ -1534,7 +1570,15 @@ where
                             sidecar_count = blob_sidecars.len(),
                             "Commitment count mismatch between metadata and sidecars"
                         );
-                        self.blob_engine.drop_round(height, round_i64).await.ok();
+                        // FIX-004: Log cleanup errors instead of silently ignoring with .ok()
+                        if let Err(cleanup_err) = self.blob_engine.drop_round(height, round_i64).await {
+                            warn!(
+                                height = %height,
+                                round = %round,
+                                error = %cleanup_err,
+                                "Failed to cleanup blobs after commitment mismatch"
+                            );
+                        }
                         self.record_sync_failure();
                         return Ok(None);
                     }
@@ -1610,18 +1654,16 @@ where
                     }
                 };
 
-                // Hardening: Assert that validated signed header's parent_root matches store-derived root.
-                // This invariant must always hold: the proposer's parent_root (from blob sidecars)
-                // should equal what we derive from our decided store.
+                // Hardening: Assert that validated signed header's parent_root matches
+                // store-derived root. This invariant must always hold: the
+                // proposer's parent_root (from blob sidecars) should equal what we
+                // derive from our decided store.
                 if let Some(ref signed_header) = validated_signed_header {
                     debug_assert_eq!(
-                        signed_header.message.parent_root,
-                        parent_blob_root,
+                        signed_header.message.parent_root, parent_blob_root,
                         "INVARIANT VIOLATION: Validated blob sidecar parent_root {:?} does not match \
                          store-derived parent_root {:?} at height {}",
-                        signed_header.message.parent_root,
-                        parent_blob_root,
-                        height
+                        signed_header.message.parent_root, parent_blob_root, height
                     );
                 }
 
@@ -1678,32 +1720,175 @@ where
 
                 self.store_synced_proposal(proposed_value.clone()).await?;
 
+                // Process archive notices - continue even if some fail (BUG-006 fix)
+                // Load Network context: Individual archive notice failures should not
+                // block sync. The notices are informational for keccak hash learning.
                 for notice in archive_notices {
-                    self.handle_archive_notice(notice).await?;
+                    if let Err(e) = self.handle_archive_notice(notice).await {
+                        warn!(
+                            height = %height,
+                            round = %round,
+                            error = %e,
+                            "Archive notice processing failed, continuing sync"
+                        );
+                    }
                 }
 
                 Ok(Some(proposed_value))
             }
-            SyncedValuePackage::MetadataOnly { value: _, archive_notices } => {
+            SyncedValuePackage::MetadataOnly {
+                value,
+                archive_notices,
+                execution_payload_ssz,
+                execution_requests,
+            } => {
                 // MetadataOnly is received when blobs have been pruned on the sending peer.
-                // We process archive notices so we know where to fetch blobs from external
-                // archives, but we cannot complete the sync from this peer alone.
-                warn!(
-                    height = %height,
-                    round = %round,
-                    notice_count = archive_notices.len(),
-                    "Received MetadataOnly sync package (blobs pruned on peer), processing archive notices"
-                );
+                // Following the Lighthouse pattern: if execution_payload_ssz is available,
+                // we can import the block WITHOUT blob sidecars.
+                //
+                // This is the key fix for syncing when all validators have pruned blobs.
 
-                // Process archive notices so we have the locators stored
-                for notice in archive_notices {
-                    self.handle_archive_notice(notice).await?;
+                if let Some(payload) = execution_payload_ssz {
+                    // We have payload - can import block without blobs!
+                    info!(
+                        height = %height,
+                        round = %round,
+                        payload_size = payload.len(),
+                        notice_count = archive_notices.len(),
+                        "🔵 SYNC: Processing MetadataOnly WITH payload (blobs pruned, importing without sidecars)"
+                    );
+
+                    let value_metadata = value.metadata.clone();
+
+                    // Store the execution payload (same as Full path)
+                    self.store_synced_block_data(
+                        height,
+                        round,
+                        payload.clone(),
+                        execution_requests.clone(),
+                    )
+                    .await?;
+
+                    // Resolve parent root for blob metadata
+                    let parent_blob_root = match self.resolve_parent_root_for_height(height).await {
+                        Ok(root) => root,
+                        Err(e) => {
+                            error!(
+                                height = %height,
+                                round = %round,
+                                error = %e,
+                                "Failed to resolve parent root for synced MetadataOnly value"
+                            );
+                            self.record_sync_failure();
+                            return Ok(None);
+                        }
+                    };
+
+                    let proposer_index = self
+                        .get_validator_set()
+                        .validators
+                        .iter()
+                        .position(|v| v.address == proposer)
+                        .map(|idx| idx as u64);
+
+                    // Create BlobMetadata without actual blob data (pruned)
+                    // For pruned heights, extract keccak hashes from archive notices if available
+                    let blob_metadata = if value_metadata.blob_kzg_commitments.is_empty() {
+                        BlobMetadata::blobless(
+                            height,
+                            parent_blob_root,
+                            &value_metadata.execution_payload_header,
+                            proposer_index,
+                        )
+                    } else {
+                        // We have commitments but no actual blobs - extract keccak hashes
+                        // from archive notices. Use B256::ZERO for any missing indices.
+                        let blob_count = value_metadata.blob_kzg_commitments.len();
+                        let mut blob_keccak_hashes = vec![B256::ZERO; blob_count];
+
+                        // Populate keccak hashes from archive notices
+                        for notice in &archive_notices {
+                            let idx = usize::from(notice.body.blob_index);
+                            if idx < blob_count {
+                                blob_keccak_hashes[idx] = notice.body.blob_keccak;
+                            }
+                        }
+
+                        BlobMetadata::new(
+                            height,
+                            parent_blob_root,
+                            value_metadata.blob_kzg_commitments.clone(),
+                            blob_keccak_hashes,
+                            value_metadata.execution_payload_header.clone(),
+                            proposer_index,
+                        )
+                    };
+
+                    // Store metadata and mark as decided
+                    self.put_blob_metadata_undecided(height, round, &blob_metadata).await?;
+                    self.store.mark_blob_metadata_decided(height, round).await?;
+
+                    // Update parent root cache
+                    let header = blob_metadata.to_beacon_header();
+                    let new_root = header.hash_tree_root();
+                    info!(
+                        height = %height,
+                        old_cache_height = %self.last_blob_sidecar_height,
+                        old_cache_root = ?self.last_blob_sidecar_root,
+                        new_cache_root = ?new_root,
+                        "✅ VALUESYNC: Updated blob parent root cache from MetadataOnly (pruned blobs)"
+                    );
+                    self.last_blob_sidecar_root = new_root;
+                    self.last_blob_sidecar_height = height;
+
+                    // Process archive notices - continue even if some fail (BUG-006 fix)
+                    for notice in archive_notices {
+                        if let Err(e) = self.handle_archive_notice(notice).await {
+                            warn!(
+                                height = %height,
+                                round = %round,
+                                error = %e,
+                                "Archive notice processing failed in MetadataOnly, continuing sync"
+                            );
+                        }
+                    }
+
+                    // Build and store proposed value
+                    let proposed_value = ProposedValue {
+                        height,
+                        round,
+                        valid_round: Round::Nil,
+                        proposer,
+                        value,
+                        validity: Validity::Valid,
+                    };
+                    self.store_synced_proposal(proposed_value.clone()).await?;
+
+                    Ok(Some(proposed_value))
+                } else {
+                    // No payload - cannot import, just process archive notices
+                    warn!(
+                        height = %height,
+                        round = %round,
+                        notice_count = archive_notices.len(),
+                        "Received MetadataOnly WITHOUT payload (cannot import), processing archive notices"
+                    );
+
+                    // Process archive notices - continue even if some fail (BUG-006 fix)
+                    for notice in archive_notices {
+                        if let Err(e) = self.handle_archive_notice(notice).await {
+                            warn!(
+                                height = %height,
+                                round = %round,
+                                error = %e,
+                                "Archive notice processing failed (no payload), continuing"
+                            );
+                        }
+                    }
+
+                    // Return None - Malachite will try another peer
+                    Ok(None)
                 }
-
-                // Return None - the syncing peer cannot import this height from us,
-                // but they now have archive locators to fetch blobs externally.
-                // Malachite will try another peer or the EL will sync independently.
-                Ok(None)
             }
         }
     }
@@ -1838,6 +2023,35 @@ where
             );
         }
 
+        // FIX: Send FCU BEFORE newPayload during sync to give EL sync target.
+        // Without this, EL returns SYNCING indefinitely because it doesn't know where to sync.
+        // Industry standard (Lighthouse, Prysm, Teku): FCU first, then newPayload.
+        // Only do this in sync mode (blobs_already_decided) to avoid extra latency in normal consensus.
+        let block_hash = execution_payload.payload_inner.payload_inner.block_hash;
+        if blobs_already_decided {
+            if let Err(e) = notifier.set_latest_forkchoice_state(block_hash).await {
+                // Only ignore SyncingForkchoice errors - EL may not have parent yet during sync.
+                // Other errors (INVALID, transport) should be logged as warnings.
+                if e.downcast_ref::<ultramarine_execution::ExecutionError>()
+                    .map(|ee| matches!(ee, ultramarine_execution::ExecutionError::SyncingForkchoice { .. }))
+                    .unwrap_or(false)
+                {
+                    debug!(
+                        height = %height,
+                        block_hash = ?block_hash,
+                        "FCU before newPayload returned SYNCING (expected during sync)"
+                    );
+                } else {
+                    warn!(
+                        height = %height,
+                        block_hash = ?block_hash,
+                        error = %e,
+                        "FCU before newPayload failed with unexpected error"
+                    );
+                }
+            }
+        }
+
         let payload_status = notifier
             .notify_new_block(
                 execution_payload.clone(),
@@ -1850,6 +2064,12 @@ where
         // After EL restarts (or heavy load), Engine API can return SYNCING while it catches up on
         // internal validation. Treat SYNCING as transient and retry instead of forcing a full
         // consensus restart loop.
+        // Use shorter timeout during sync mode (blobs_already_decided) since FCU already gave EL the target.
+        let sync_timeout = if blobs_already_decided {
+            self.execution_retry.new_payload_sync_timeout
+        } else {
+            self.execution_retry.new_payload_timeout
+        };
         let payload_status = if matches!(payload_status.status, PayloadStatusEnum::Syncing) {
             let start = Instant::now();
             let mut last = payload_status;
@@ -1858,12 +2078,13 @@ where
                 if !matches!(last.status, PayloadStatusEnum::Syncing) {
                     break last;
                 }
-                if start.elapsed() > self.execution_retry.new_payload_timeout {
+                if start.elapsed() > sync_timeout {
                     self.mark_el_degraded(format!(
-                        "new_payload SYNCING for {:?} at height {} (block_hash={:?})",
-                        self.execution_retry.new_payload_timeout,
+                        "new_payload SYNCING for {:?} at height {} (block_hash={:?}, sync_mode={})",
+                        sync_timeout,
                         height,
-                        execution_payload.payload_inner.payload_inner.block_hash
+                        execution_payload.payload_inner.payload_inner.block_hash,
+                        blobs_already_decided
                     ));
                     execution_pending = true;
                     break PayloadStatus::from_status(PayloadStatusEnum::Syncing);

@@ -66,6 +66,7 @@ struct Manifest {
     sync: Sync,
     archiver: Archiver,
     exposure: Exposure,
+    blockscout: Option<Blockscout>,
     #[serde(default)]
     validation: Validation,
 }
@@ -154,6 +155,28 @@ struct Exposure {
     metrics_bind: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct Blockscout {
+    enabled: bool,
+    host: String,
+    rpc_node: String,
+    domains: BlockscoutDomains,
+    ssl: Option<BlockscoutSsl>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BlockscoutDomains {
+    explorer: String,
+    stats: String,
+    rpc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BlockscoutSsl {
+    enabled: bool,
+    email: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 struct Validation {
     allow_unsafe_failure_domains: bool,
@@ -180,6 +203,7 @@ struct Lockfile {
     policy: Policy,
     hosts: Vec<LockHost>,
     nodes: Vec<LockNode>,
+    blockscout: Option<BlockscoutOut>,
     artifacts: Artifacts,
 }
 
@@ -269,6 +293,15 @@ struct ArchiverOut {
 #[derive(Clone, Debug, Serialize)]
 struct Artifacts {
     public: PublicArtifacts,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct BlockscoutOut {
+    enabled: bool,
+    host: String,
+    rpc_node: String,
+    domains: BlockscoutDomains,
+    ssl: Option<BlockscoutSsl>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -440,6 +473,28 @@ fn validate_manifest(m: &Manifest, allow_unsafe_failure_domains: bool) -> Result
     }
     if m.nodes.is_empty() {
         bail!("nodes must be non-empty");
+    }
+
+    if let Some(blockscout) = &m.blockscout {
+        if blockscout.enabled {
+            if !host_ids.contains(&blockscout.host) {
+                bail!("blockscout.host {} not found in hosts", blockscout.host);
+            }
+            if !m.nodes.iter().any(|n| n.id == blockscout.rpc_node) {
+                bail!("blockscout.rpc_node {} not found in nodes", blockscout.rpc_node);
+            }
+            if blockscout.domains.explorer.trim().is_empty() ||
+                blockscout.domains.stats.trim().is_empty() ||
+                blockscout.domains.rpc.trim().is_empty()
+            {
+                bail!("blockscout.domains must include explorer/stats/rpc");
+            }
+            if let Some(ssl) = &blockscout.ssl {
+                if ssl.enabled && ssl.email.trim().is_empty() {
+                    bail!("blockscout.ssl.email must be set when ssl.enabled=true");
+                }
+            }
+        }
     }
 
     // Failure-domain liveness math: strict >2/3 (Tendermint/Malachite).
@@ -684,8 +739,7 @@ fn generate(
     allow_unsafe: bool,
 ) -> Result<()> {
     let manifest: Manifest = read_yaml(manifest_path)?;
-    let allow_unsafe_effective =
-        allow_unsafe || manifest.validation.allow_unsafe_failure_domains;
+    let allow_unsafe_effective = allow_unsafe || manifest.validation.allow_unsafe_failure_domains;
     validate_manifest(&manifest, allow_unsafe_effective)?;
 
     let secrets = if let Some(p) = secrets_path {
@@ -908,6 +962,13 @@ fn generate(
         },
         hosts,
         nodes: lock_nodes,
+        blockscout: manifest.blockscout.as_ref().map(|b| BlockscoutOut {
+            enabled: b.enabled,
+            host: b.host.clone(),
+            rpc_node: b.rpc_node.clone(),
+            domains: b.domains.clone(),
+            ssl: b.ssl.clone(),
+        }),
         artifacts: Artifacts {
             public: PublicArtifacts {
                 genesis_json: ArtifactRef {

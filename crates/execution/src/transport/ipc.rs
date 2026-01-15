@@ -92,11 +92,7 @@ impl Transport for IpcTransport {
         let mut resp_bytes = Vec::new();
         tokio::time::timeout(REQUEST_TIMEOUT, reader.read_until(b'\n', &mut resp_bytes)).await??;
         let response_len = resp_bytes.len();
-        debug!(
-            response_len,
-            elapsed_ms = start.elapsed().as_millis(),
-            "IPC response received"
-        );
+        debug!(response_len, elapsed_ms = start.elapsed().as_millis(), "IPC response received");
 
         serde_json::from_slice(&resp_bytes).map_err(|e| e.into())
     }

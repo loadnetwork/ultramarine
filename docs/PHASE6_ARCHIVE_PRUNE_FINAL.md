@@ -6,6 +6,31 @@ This document reflects the current implementation and links each feature to the 
 
 **Implementation status legend**: ✅ implemented, 🟡 partial, ⚠️ mismatch / foot-gun, ⏳ not implemented.
 
+## Archive-Based Pruning Policy (Load Network vs Ethereum)
+
+**CRITICAL**: Load Network uses the **archive event as the boundary for blob pruning**, NOT the Ethereum DA window.
+
+| Aspect | Ethereum (EIP-4844) | Load Network |
+|--------|---------------------|--------------|
+| Pruning trigger | Time-based DA window (~18 days / 4096 epochs) | Archive event + finality |
+| Blob bytes | Pruned after DA window | Pruned after verified archival |
+| Beacon blocks | Retained forever | Retained forever (decided values, certs, block data) |
+| history_min_height | Varies with pruning | **Always 0** (invariant) |
+
+### Key Invariants
+
+1. **history_min_height == 0**: All validators return `Height(0)` from `get_earliest_height()` when genesis metadata exists. This ensures fullnodes can sync from genesis.
+
+2. **Consensus data retained forever**: Decided values, certificates, and execution payloads are NEVER pruned. Only blob bytes are pruned after archive verification.
+
+3. **MetadataOnly sync for archived blobs**: When blobs are pruned, `SyncedValuePackage::MetadataOnly` is used with:
+   - Execution payload (for block import)
+   - Archive notices (with locators for external blob retrieval)
+
+### Reference: Lighthouse Pattern
+
+This design follows Lighthouse's pattern where beacon blocks are kept forever while blob sidecars are pruned. Load Network applies the same principle with archive-gated pruning instead of time-based pruning.
+
 ## Summary (what the system does)
 
 - Blobs are verified and stored locally (RocksDB) during proposal/sync.

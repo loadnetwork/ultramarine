@@ -1,0 +1,83 @@
+---
+- name: Check if SSL certificate already exists
+  ansible.builtin.stat:
+    path: "{{ blockscout_nginx_ssl_cert }}"
+  register: blockscout_nginx_cert_stat
+
+- name: Ensure webroot directory exists
+  ansible.builtin.file:
+    path: "{{ blockscout_nginx_webroot }}/.well-known/acme-challenge"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Obtain SSL certificate with certbot (webroot mode)
+  when: not blockscout_nginx_cert_stat.stat.exists
+  block:
+    - name: Stop nginx-blockscout for initial cert issuance (standalone fallback)
+      ansible.builtin.systemd:
+        name: nginx-blockscout
+        state: stopped
+      register: blockscout_nginx_stop_result
+      failed_when:
+        - blockscout_nginx_stop_result.failed
+        - "'could not find' not in (blockscout_nginx_stop_result.msg | default(''))"
+        - "'not loaded' not in (blockscout_nginx_stop_result.msg | default(''))"
+
+    - name: Obtain certificate using certbot standalone (initial)
+      ansible.builtin.command: >
+        certbot certonly
+        --standalone
+        --non-interactive
+        --agree-tos
+        --email {{ blockscout_nginx_certbot_email }}
+        -d {{ blockscout_nginx_explorer_domain }}
+        -d {{ blockscout_nginx_stats_domain }}
+        -d {{ blockscout_nginx_rpc_domain }}
+      register: blockscout_nginx_certbot_result
+      changed_when: >-
+        'Successfully received certificate' in blockscout_nginx_certbot_result.stdout or
+        'Congratulations' in blockscout_nginx_certbot_result.stdout
+
+    - name: Display certbot output
+      ansible.builtin.debug:
+        var: blockscout_nginx_certbot_result.stdout_lines
+      when: blockscout_nginx_certbot_result.stdout_lines is defined
+
+- name: Configure certbot for webroot renewal
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/bash
+      # Reload nginx after certificate renewal
+      docker exec nginx-blockscout nginx -s reload 2>/dev/null || true
+
+- name: Update certbot renewal config for webroot
+  ansible.builtin.lineinfile:
+    path: "/etc/letsencrypt/renewal/{{ blockscout_nginx_explorer_domain }}.conf"
+    regexp: "^authenticator\\s*="
+    line: "authenticator = webroot"
+  when: blockscout_nginx_cert_stat.stat.exists or blockscout_nginx_certbot_result is defined
+
+- name: Set webroot path in renewal config
+  ansible.builtin.lineinfile:
+    path: "/etc/letsencrypt/renewal/{{ blockscout_nginx_explorer_domain }}.conf"
+    regexp: "^webroot_path\\s*="
+    line: "webroot_path = {{ blockscout_nginx_webroot }}"
+    insertafter: "^authenticator"
+  when: blockscout_nginx_cert_stat.stat.exists or blockscout_nginx_certbot_result is defined
+
+- name: Ensure certbot renewal timer is enabled (systemd only - no cron duplication)
+  ansible.builtin.systemd:
+    name: certbot.timer
+    enabled: true
+    state: started
+  register: blockscout_nginx_certbot_timer_result
+  failed_when:
+    - blockscout_nginx_certbot_timer_result.failed
+    - "'could not find' not in (blockscout_nginx_certbot_timer_result.msg | default(''))"
+    - "'not found' not in (blockscout_nginx_certbot_timer_result.msg | default(''))"

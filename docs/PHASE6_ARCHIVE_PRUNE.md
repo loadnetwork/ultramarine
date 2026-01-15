@@ -7,6 +7,34 @@ For the code-audited, source-linked specification of what is implemented today, 
 - `docs/PHASE6_ARCHIVE_PRUNE_FINAL.md`
 - `docs/ARCHIVER_OPS.md` (operator runbook)
 
+## Archive-Based Pruning Policy
+
+**IMPORTANT**: Load Network uses the **archive event as the pruning boundary**, NOT the Ethereum DA window.
+
+| Ethereum Approach | Load Network Approach |
+|-------------------|----------------------|
+| Time-based DA window (~18 days) | Archive event + finality |
+| Prune after epochs elapse | Prune after verified archival |
+
+### What Gets Retained Forever
+
+- **Decided values** - consensus decisions
+- **Certificates** - validator attestations
+- **Block data** - execution payloads
+- **BlobMetadata** - commitment info, keccak hashes
+- **Archive records** - locators to external storage
+
+### What Gets Pruned
+
+- **Blob bytes only** - after archive verification + finality
+
+### history_min_height Invariant
+
+`get_earliest_height()` returns `Height(0)` when genesis metadata exists:
+- Validators MUST serve complete chain history
+- `history_min_height == 0` for all validators
+- Enables fullnode sync from genesis
+
 ## What Phase 6 does (current behavior)
 
 - Blobs are verified and stored locally while they are needed for proposal/sync.
