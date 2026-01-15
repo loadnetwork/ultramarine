@@ -1,0 +1,125 @@
+---
+# Enable/disable blockscout deployment
+blockscout_enabled: false
+
+# Domain configuration
+blockscout_domain: "explorer.example.com"
+blockscout_stats_domain: "stats.example.com"
+blockscout_rpc_domain: "rpc.example.com"
+
+# Chain configuration
+blockscout_chain_id: 1984
+blockscout_chain_name: "Fibernet Testnet"
+blockscout_chain_symbol: "tLOAD"
+blockscout_chain_decimals: 18
+blockscout_is_testnet: true
+
+# WVM Blockscout local source paths (relative to loadnetwork_consensus/)
+# These are used for local builds on the controller machine
+blockscout_consensus_root: "{{ playbook_dir }}/../../../.."
+blockscout_backend_src_dir: "{{ blockscout_consensus_root }}/wvm-blockscout"
+blockscout_frontend_src_dir: "{{ blockscout_consensus_root }}/wvm-blockscout-frontend"
+
+# Backend build args (from wvm-blockscout prod)
+blockscout_release_version: "6.6.0"
+
+# Docker image names (built locally, later can switch to loadnetwork/ Docker Hub)
+blockscout_backend_image: "blockscout-backend:local"
+blockscout_frontend_image: "blockscout-frontend:local"
+
+# Docker images (microservices use upstream)
+blockscout_stats_image: "ghcr.io/blockscout/stats:latest"
+blockscout_visualizer_image: "ghcr.io/blockscout/visualizer:latest"
+blockscout_sig_provider_image: "ghcr.io/blockscout/sig-provider:latest"
+blockscout_postgres_image: "postgres:15"
+blockscout_redis_image: "redis:alpine"
+
+# Ports
+blockscout_backend_port: 4000
+blockscout_frontend_port: 3001
+blockscout_stats_port: 8050
+blockscout_visualizer_port: 8051
+blockscout_sig_provider_port: 8052
+
+# RPC configuration (connects to local load-reth via Docker bridge gateway)
+# Note: host.docker.internal doesn't work reliably on Linux, use 172.17.0.1 instead
+blockscout_rpc_url: "http://172.17.0.1:8545"
+blockscout_rpc_trace_url: "http://172.17.0.1:8545"
+blockscout_rpc_variant: "erigon"
+
+# Paths
+blockscout_base_dir: "/opt/loadnet/current/blockscout"
+blockscout_data_dir: "/var/lib/blockscout"
+blockscout_postgres_data_dir: "{{ blockscout_data_dir }}/postgres"
+blockscout_stats_postgres_data_dir: "{{ blockscout_data_dir }}/stats-postgres"
+blockscout_redis_data_dir: "{{ blockscout_data_dir }}/redis"
+blockscout_logs_dir: "{{ blockscout_data_dir }}/logs"
+
+# Database configuration - optimized for 32GB RAM
+blockscout_db_name: "blockscout"
+blockscout_db_user: "blockscout"
+# blockscout_db_password: auto-generated if not set
+
+blockscout_stats_db_name: "stats"
+blockscout_stats_db_user: "stats"
+# blockscout_stats_db_password: auto-generated if not set
+
+# PostgreSQL tuning for 32GB RAM
+blockscout_postgres_max_connections: 100
+blockscout_postgres_shm_size: "256m"
+
+# Application pool sizes - optimized for 32GB RAM
+blockscout_pool_size: 40
+blockscout_pool_size_api: 5
+
+# Docker memory limits for 32GB RAM systems
+blockscout_backend_memory_limit: "8g"
+blockscout_frontend_memory_limit: "2g"
+blockscout_stats_memory_limit: "2g"
+blockscout_visualizer_memory_limit: "1g"
+blockscout_sig_provider_memory_limit: "512m"
+blockscout_postgres_memory_limit: "4g"
+blockscout_stats_postgres_memory_limit: "2g"
+blockscout_redis_memory_limit: "1g"
+
+# Secret key base for backend (auto-generated if not set)
+# blockscout_secret_key_base:
+
+# API configuration
+blockscout_api_v2_enabled: true
+blockscout_api_rate_limit: 50
+blockscout_api_rate_limit_by_ip: 3000
+
+# Indexer configuration
+blockscout_disable_indexer: false
+blockscout_disable_realtime_indexer: false
+blockscout_catchup_blocks_batch_size: 100
+
+# Microservices configuration
+blockscout_visualizer_enabled: true
+blockscout_sig_provider_enabled: true
+blockscout_stats_enabled: true
+
+# Frontend branding - Load Network
+blockscout_network_logo: "https://raw.githubusercontent.com/weaveVM/wvm-media-kit/refs/heads/main/Load%20Network/SVG/wordmark-bright-black.svg"
+blockscout_network_logo_dark: "https://raw.githubusercontent.com/weaveVM/wvm-media-kit/refs/heads/main/Load%20Network/SVG/wordmark-bright-white.svg"
+blockscout_network_icon: "https://raw.githubusercontent.com/weaveVM/wvm-media-kit/refs/heads/main/Load%20Network/SVG/logo-bright.svg"
+blockscout_network_icon_dark: "https://raw.githubusercontent.com/weaveVM/wvm-media-kit/refs/heads/main/Load%20Network/SVG/logo-mono.svg"
+blockscout_homepage_plate_background: >-
+  radial-gradient(103.03% 103.03% at 0% 0%, rgba(0, 110, 255, 0.8) 0%,
+  rgba(0, 88, 204, 0.8) 100%), var(--chakra-colors-blue-700)
+blockscout_color_theme_default: "light"
+
+# Cache settings
+blockscout_cache_block_count_period: 60
+blockscout_cache_txs_count_period: 60
+blockscout_cache_address_sum_period: 60
+
+# Log rotation settings
+# Application logs (mounted volume)
+blockscout_log_max_size: "100M"
+blockscout_log_max_files: 5
+
+# Docker container logs (json-file driver)
+blockscout_docker_log_max_size: "50m"
+blockscout_docker_log_max_files: "3"

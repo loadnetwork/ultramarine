@@ -29,8 +29,7 @@ async fn blob_sync_uses_store_parent_root_over_cache() -> color_eyre::Result<()>
             propose_with_optional_blobs(&mut node.state, height_1, round, &payload_h1, None)
                 .await?;
 
-        node
-            .state
+        node.state
             .store_undecided_block_data(height_1, round, payload_bytes_h1.clone(), Vec::new())
             .await?;
 
@@ -45,20 +44,22 @@ async fn blob_sync_uses_store_parent_root_over_cache() -> color_eyre::Result<()>
             .process_decided_certificate(&certificate_h1, payload_bytes_h1, &mut notifier)
             .await?;
 
-        let parent_metadata = node
-            .state
-            .get_blob_metadata(height_1)
-            .await?
-            .expect("parent metadata");
+        let parent_metadata =
+            node.state.get_blob_metadata(height_1).await?.expect("parent metadata");
         let expected_parent_root = parent_metadata.to_beacon_header().hash_tree_root();
 
         // Build a blobbed sync package for height 2.
         let height_2 = Height::new(2);
         let bundle = sample_blob_bundle(1);
         let payload_h2 = sample_execution_payload_v3_for_height(height_2, Some(&bundle));
-        let (proposed_h2, payload_bytes_h2, maybe_sidecars_h2) =
-            propose_with_optional_blobs(&mut node.state, height_2, round, &payload_h2, Some(&bundle))
-                .await?;
+        let (proposed_h2, payload_bytes_h2, maybe_sidecars_h2) = propose_with_optional_blobs(
+            &mut node.state,
+            height_2,
+            round,
+            &payload_h2,
+            Some(&bundle),
+        )
+        .await?;
         let sidecars = maybe_sidecars_h2.expect("sidecars expected");
 
         let package = SyncedValuePackage::Full {
@@ -76,25 +77,17 @@ async fn blob_sync_uses_store_parent_root_over_cache() -> color_eyre::Result<()>
     let mut harness = build_state(&dirs, &genesis, validator, Height::new(0))?;
     let state = &mut harness.state;
 
-    assert_ne!(
-        state.blob_parent_root(),
-        expected_parent_root,
-        "cache should be stale before sync"
-    );
+    assert_ne!(state.blob_parent_root(), expected_parent_root, "cache should be stale before sync");
 
     let encoded = package.encode().map_err(|e| color_eyre::eyre::eyre!(e))?;
     let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| color_eyre::eyre::eyre!(e))?;
 
     let height_2 = Height::new(2);
-    let result = state
-        .process_synced_package(height_2, round, validator.address(), decoded)
-        .await?;
+    let result =
+        state.process_synced_package(height_2, round, validator.address(), decoded).await?;
     assert!(result.is_some(), "sync should succeed");
 
-    let synced_metadata = state
-        .get_blob_metadata(height_2)
-        .await?
-        .expect("synced metadata");
+    let synced_metadata = state.get_blob_metadata(height_2).await?.expect("synced metadata");
     assert_eq!(
         synced_metadata.parent_blob_root(),
         expected_parent_root,

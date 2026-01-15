@@ -80,3 +80,27 @@
         enabled: true
       loop: "{{ loadnet_nodes | default([]) }}"
       failed_when: false
+
+    - name: Check if blockscout logrotate config exists
+      ansible.builtin.stat:
+        path: /etc/logrotate.d/blockscout
+      register: blockscout_logrotate_stat
+
+    - name: Force logrotate for blockscout
+      ansible.builtin.command: logrotate -f /etc/logrotate.d/blockscout
+      changed_when: true
+      failed_when: false
+      when: blockscout_logrotate_stat.stat.exists
+
+    - name: Check if blockscout service exists
+      ansible.builtin.command: systemctl status blockscout
+      changed_when: false
+      failed_when: false
+      register: blockscout_service_status
+
+    - name: Restart blockscout service
+      ansible.builtin.systemd:
+        name: blockscout
+        state: restarted
+      when: blockscout_service_status.rc == 0
+      failed_when: false

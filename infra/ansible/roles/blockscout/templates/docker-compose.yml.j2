@@ -1,0 +1,206 @@
+version: '3.9'
+
+services:
+  redis:
+    image: {{ blockscout_redis_image }}
+    container_name: blockscout-redis
+    restart: always
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - {{ blockscout_redis_data_dir }}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: {{ blockscout_redis_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+
+  db:
+    image: {{ blockscout_postgres_image }}
+    container_name: blockscout-db
+    shm_size: {{ blockscout_postgres_shm_size }}
+    restart: always
+    command: postgres -c 'max_connections={{ blockscout_postgres_max_connections }}' -c 'client_connection_check_interval=60000'
+    environment:
+      POSTGRES_DB: {{ blockscout_db_name }}
+      POSTGRES_USER: {{ blockscout_db_user }}
+      POSTGRES_PASSWORD: {{ blockscout_db_password }}
+    volumes:
+      - {{ blockscout_postgres_data_dir }}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ blockscout_db_user }} -d {{ blockscout_db_name }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: {{ blockscout_postgres_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+
+  stats-db:
+    image: {{ blockscout_postgres_image }}
+    container_name: blockscout-stats-db
+    shm_size: {{ blockscout_postgres_shm_size }}
+    restart: always
+    command: postgres -c 'max_connections={{ blockscout_postgres_max_connections }}'
+    environment:
+      POSTGRES_DB: {{ blockscout_stats_db_name }}
+      POSTGRES_USER: {{ blockscout_stats_db_user }}
+      POSTGRES_PASSWORD: {{ blockscout_stats_db_password }}
+    volumes:
+      - {{ blockscout_stats_postgres_data_dir }}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ blockscout_stats_db_user }} -d {{ blockscout_stats_db_name }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: {{ blockscout_stats_postgres_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+
+  backend:
+    image: {{ blockscout_backend_image }}
+    container_name: blockscout-backend
+    restart: always
+    stop_grace_period: 5m
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    command: sh -c "bin/blockscout eval \"Elixir.Explorer.ReleaseTasks.create_and_migrate()\" && bin/blockscout start"
+    env_file:
+      - ./envs/common-blockscout.env
+    environment:
+      ETHEREUM_JSONRPC_HTTP_URL: {{ blockscout_rpc_url }}
+      ETHEREUM_JSONRPC_TRACE_URL: {{ blockscout_rpc_trace_url }}
+      CHAIN_ID: '{{ blockscout_chain_id }}'
+    volumes:
+      - {{ blockscout_logs_dir }}:/app/logs/
+    ports:
+      - "127.0.0.1:{{ blockscout_backend_port }}:4000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/api/v2/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    mem_limit: {{ blockscout_backend_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+
+  frontend:
+    image: {{ blockscout_frontend_image }}
+    container_name: blockscout-frontend
+    platform: linux/amd64
+    restart: always
+    depends_on:
+      backend:
+        condition: service_healthy
+    env_file:
+      - ./envs/common-frontend.env
+    ports:
+      - "127.0.0.1:{{ blockscout_frontend_port }}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    mem_limit: {{ blockscout_frontend_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+
+{% if blockscout_stats_enabled | default(true) %}
+  stats:
+    image: {{ blockscout_stats_image }}
+    container_name: blockscout-stats
+{% if blockscout_stats_platform | default('linux/amd64') != 'native' %}
+    platform: {{ blockscout_stats_platform | default('linux/amd64') }}
+{% endif %}
+    restart: always
+    depends_on:
+      stats-db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    env_file:
+      - ./envs/common-stats.env
+    environment:
+      STATS__DB_URL: postgres://{{ blockscout_stats_db_user }}:{{ blockscout_stats_db_password }}@stats-db:5432/{{ blockscout_stats_db_name }}
+      STATS__BLOCKSCOUT_DB_URL: postgresql://{{ blockscout_db_user }}:{{ blockscout_db_password }}@db:5432/{{ blockscout_db_name }}
+      STATS__CREATE_DATABASE: 'true'
+      STATS__RUN_MIGRATIONS: 'true'
+    ports:
+      - "127.0.0.1:{{ blockscout_stats_port }}:8050"
+    mem_limit: {{ blockscout_stats_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+{% endif %}
+
+{% if blockscout_visualizer_enabled | default(true) %}
+  visualizer:
+    image: {{ blockscout_visualizer_image }}
+    container_name: blockscout-visualizer
+{% if blockscout_visualizer_platform | default('linux/amd64') != 'native' %}
+    platform: {{ blockscout_visualizer_platform | default('linux/amd64') }}
+{% endif %}
+    restart: always
+    env_file:
+      - ./envs/common-visualizer.env
+    ports:
+      - "127.0.0.1:{{ blockscout_visualizer_port }}:8050"
+    mem_limit: {{ blockscout_visualizer_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+{% endif %}
+
+{% if blockscout_sig_provider_enabled | default(true) %}
+  sig-provider:
+    image: {{ blockscout_sig_provider_image }}
+    container_name: blockscout-sig-provider
+{% if blockscout_sig_provider_platform | default('linux/amd64') != 'native' %}
+    platform: {{ blockscout_sig_provider_platform | default('linux/amd64') }}
+{% endif %}
+    restart: always
+    ports:
+      - "127.0.0.1:{{ blockscout_sig_provider_port }}:8050"
+    mem_limit: {{ blockscout_sig_provider_memory_limit }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ blockscout_docker_log_max_size | default('50m') }}"
+        max-file: "{{ blockscout_docker_log_max_files | default('3') }}"
+{% endif %}
+
+networks:
+  default:
+    name: blockscout-network

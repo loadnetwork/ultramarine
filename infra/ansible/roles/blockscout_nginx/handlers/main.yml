@@ -1,0 +1,16 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart nginx
+  ansible.builtin.systemd:
+    name: nginx-blockscout
+    state: restarted
+    daemon_reload: true
+
+- name: Restart nginx-blockscout
+  ansible.builtin.systemd:
+    name: nginx-blockscout
+    state: restarted
+    daemon_reload: true

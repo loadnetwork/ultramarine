@@ -6,19 +6,24 @@
   vars:
     lines: 200
   tasks:
-    - name: ultramarine logs
+    - name: Fetch Ultramarine logs
       ansible.builtin.command: "journalctl --no-pager -n {{ lines }} -u ultramarine@{{ item }}.service"
       loop: "{{ loadnet_nodes }}"
       register: ultra_logs
       changed_when: false
       failed_when: false
-    - ansible.builtin.debug:
+
+    - name: Display Ultramarine logs
+      ansible.builtin.debug:
         var: ultra_logs.results
-    - name: load-reth logs
+
+    - name: Fetch Load-reth logs
       ansible.builtin.command: "journalctl --no-pager -n {{ lines }} -u load-reth@{{ item }}.service"
       loop: "{{ loadnet_nodes }}"
       register: reth_logs
       changed_when: false
       failed_when: false
-    - ansible.builtin.debug:
+
+    - name: Display Load-reth logs
+      ansible.builtin.debug:
         var: reth_logs.results

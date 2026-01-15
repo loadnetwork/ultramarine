@@ -1,0 +1,358 @@
+---
+- name: Check if blockscout is enabled for this host
+  ansible.builtin.debug:
+    msg: "Blockscout deployment is disabled for this host"
+  when: not (blockscout_enabled | default(false) | bool)
+
+- name: End play if blockscout is not enabled
+  ansible.builtin.meta: end_host
+  when: not (blockscout_enabled | default(false) | bool)
+
+- name: Ensure Docker Compose is available
+  block:
+    - name: Install docker-compose-plugin (preferred)
+      ansible.builtin.apt:
+        name: docker-compose-plugin
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ loadnet_apt_cache_valid_time | default(3600) }}"
+  rescue:
+    - name: Install docker-compose (legacy fallback)
+      ansible.builtin.apt:
+        name: docker-compose
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ loadnet_apt_cache_valid_time | default(3600) }}"
+
+- name: Detect docker binary
+  ansible.builtin.command: which docker
+  register: blockscout_docker_path
+  changed_when: false
+  failed_when: false
+
+- name: Detect docker compose v2
+  ansible.builtin.command: "{{ blockscout_docker_path.stdout }} compose version"
+  register: blockscout_compose_v2_check
+  changed_when: false
+  failed_when: false
+  when: blockscout_docker_path.rc == 0
+
+- name: Detect docker-compose v1
+  ansible.builtin.command: which docker-compose
+  register: blockscout_compose_v1_path
+  changed_when: false
+  failed_when: false
+
+- name: Set blockscout compose command
+  ansible.builtin.set_fact:
+    blockscout_compose_cmd: >-
+      {{
+        (blockscout_docker_path.rc | default(1) == 0 and blockscout_compose_v2_check.rc | default(1) == 0)
+          | ternary(blockscout_docker_path.stdout + ' compose', blockscout_compose_v1_path.stdout | default(''))
+      }}
+
+- name: Assert docker compose is available
+  ansible.builtin.assert:
+    that:
+      - blockscout_compose_cmd | length > 0
+    fail_msg: "docker compose not found; install docker-compose-plugin or docker-compose"
+
+- name: Ensure blockscout secrets dir exists (controller-side)
+  ansible.builtin.file:
+    path: "{{ net_dir }}/bundle/private/blockscout"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Check for blockscout DB password (controller-side)
+  ansible.builtin.stat:
+    path: "{{ net_dir }}/bundle/private/blockscout/db_password"
+  register: blockscout_db_password_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Generate blockscout DB password (controller-side)
+  ansible.builtin.copy:
+    dest: "{{ net_dir }}/bundle/private/blockscout/db_password"
+    mode: "0600"
+    content: "{{ lookup('ansible.builtin.password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: not blockscout_db_password_stat.stat.exists
+
+- name: Read blockscout DB password (controller-side)
+  ansible.builtin.set_fact:
+    blockscout_db_password: "{{ lookup('ansible.builtin.file', net_dir + '/bundle/private/blockscout/db_password') }}"
+  no_log: true
+
+- name: Check for stats DB password (controller-side)
+  ansible.builtin.stat:
+    path: "{{ net_dir }}/bundle/private/blockscout/stats_db_password"
+  register: blockscout_stats_db_password_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Generate stats DB password (controller-side)
+  ansible.builtin.copy:
+    dest: "{{ net_dir }}/bundle/private/blockscout/stats_db_password"
+    mode: "0600"
+    content: "{{ lookup('ansible.builtin.password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: not blockscout_stats_db_password_stat.stat.exists
+
+- name: Read stats DB password (controller-side)
+  ansible.builtin.set_fact:
+    blockscout_stats_db_password: "{{ lookup('ansible.builtin.file', net_dir + '/bundle/private/blockscout/stats_db_password') }}"
+  no_log: true
+
+- name: Check for secret key base (controller-side)
+  ansible.builtin.stat:
+    path: "{{ net_dir }}/bundle/private/blockscout/secret_key_base"
+  register: blockscout_secret_key_base_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Generate secret key base (controller-side)
+  ansible.builtin.copy:
+    dest: "{{ net_dir }}/bundle/private/blockscout/secret_key_base"
+    mode: "0600"
+    content: "{{ lookup('ansible.builtin.password', '/dev/null length=64 chars=ascii_letters,digits') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: not blockscout_secret_key_base_stat.stat.exists
+
+- name: Read secret key base (controller-side)
+  ansible.builtin.set_fact:
+    blockscout_secret_key_base: "{{ lookup('ansible.builtin.file', net_dir + '/bundle/private/blockscout/secret_key_base') }}"
+  no_log: true
+
+- name: Ensure blockscout base directory exists
+  ansible.builtin.file:
+    path: "{{ blockscout_base_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure blockscout envs directory exists
+  ansible.builtin.file:
+    path: "{{ blockscout_base_dir }}/envs"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure blockscout data directory exists
+  ansible.builtin.file:
+    path: "{{ blockscout_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure blockscout sensitive data directories exist (restricted)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ blockscout_postgres_data_dir }}"
+    - "{{ blockscout_stats_postgres_data_dir }}"
+    - "{{ blockscout_redis_data_dir }}"
+
+- name: Ensure blockscout logs directory exists
+  ansible.builtin.file:
+    path: "{{ blockscout_logs_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- Local image build on controller ---
+- name: Check if backend image exists locally (controller)
+  ansible.builtin.command:
+    cmd: docker image inspect {{ blockscout_backend_image }}
+  delegate_to: localhost
+  become: false
+  register: blockscout_backend_image_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Check if frontend image exists locally (controller)
+  ansible.builtin.command:
+    cmd: docker image inspect {{ blockscout_frontend_image }}
+  delegate_to: localhost
+  become: false
+  register: blockscout_frontend_image_check
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Verify wvm-blockscout source exists (controller)
+  ansible.builtin.stat:
+    path: "{{ blockscout_backend_src_dir }}/docker/Dockerfile"
+  delegate_to: localhost
+  become: false
+  register: blockscout_backend_src_stat
+  run_once: true
+
+- name: Verify wvm-blockscout-frontend source exists (controller)
+  ansible.builtin.stat:
+    path: "{{ blockscout_frontend_src_dir }}/Dockerfile"
+  delegate_to: localhost
+  become: false
+  register: blockscout_frontend_src_stat
+  run_once: true
+
+- name: Build backend image locally (controller)
+  ansible.builtin.command:
+    cmd: >
+      docker build
+      --platform linux/amd64
+      --build-arg CACHE_EXCHANGE_RATES_PERIOD=""
+      --build-arg API_V1_READ_METHODS_DISABLED=false
+      --build-arg DISABLE_WEBAPP=false
+      --build-arg API_V1_WRITE_METHODS_DISABLED=false
+      --build-arg CACHE_TOTAL_GAS_USAGE_COUNTER_ENABLED=""
+      --build-arg CACHE_ADDRESS_WITH_BALANCES_UPDATE_INTERVAL=""
+      --build-arg ADMIN_PANEL_ENABLED=""
+      --build-arg RELEASE_VERSION={{ blockscout_release_version }}
+      -t {{ blockscout_backend_image }}
+      -f docker/Dockerfile
+      .
+    chdir: "{{ blockscout_backend_src_dir }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when:
+    - blockscout_backend_image_check.rc != 0
+    - blockscout_backend_src_stat.stat.exists
+  changed_when: true
+
+- name: Build frontend image locally (controller)
+  ansible.builtin.command:
+    cmd: docker build --platform linux/amd64 -t {{ blockscout_frontend_image }} .
+    chdir: "{{ blockscout_frontend_src_dir }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when:
+    - blockscout_frontend_image_check.rc != 0
+    - blockscout_frontend_src_stat.stat.exists
+  changed_when: true
+
+# --- Transfer images to server ---
+- name: Ensure images cache dir exists (controller)
+  ansible.builtin.file:
+    path: "{{ net_dir }}/bundle/private/blockscout/images"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Save images to tarball (controller)
+  ansible.builtin.command:
+    cmd: docker save {{ blockscout_backend_image }} {{ blockscout_frontend_image }} -o {{ net_dir }}/bundle/private/blockscout/images/blockscout-images.tar
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: true
+
+- name: Copy images tarball to server
+  ansible.builtin.copy:
+    src: "{{ net_dir }}/bundle/private/blockscout/images/blockscout-images.tar"
+    dest: "/tmp/blockscout-images.tar"
+    mode: "0644"
+
+- name: Load images on server
+  ansible.builtin.command:
+    cmd: docker load -i /tmp/blockscout-images.tar
+  register: blockscout_load_result
+  changed_when: "'Loaded image' in blockscout_load_result.stdout"
+
+- name: Cleanup images tarball on server
+  ansible.builtin.file:
+    path: /tmp/blockscout-images.tar
+    state: absent
+
+- name: Template common-blockscout.env
+  ansible.builtin.template:
+    src: "envs/common-blockscout.env.j2"
+    dest: "{{ blockscout_base_dir }}/envs/common-blockscout.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart blockscout
+
+- name: Template common-frontend.env
+  ansible.builtin.template:
+    src: "envs/common-frontend.env.j2"
+    dest: "{{ blockscout_base_dir }}/envs/common-frontend.env"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart blockscout
+
+- name: Template common-stats.env
+  ansible.builtin.template:
+    src: "envs/common-stats.env.j2"
+    dest: "{{ blockscout_base_dir }}/envs/common-stats.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart blockscout
+
+- name: Template common-visualizer.env
+  ansible.builtin.template:
+    src: "envs/common-visualizer.env.j2"
+    dest: "{{ blockscout_base_dir }}/envs/common-visualizer.env"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart blockscout
+
+- name: Template docker-compose.yml (restricted - contains secrets)
+  ansible.builtin.template:
+    src: "docker-compose.yml.j2"
+    dest: "{{ blockscout_base_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart blockscout
+
+- name: Template blockscout systemd unit
+  ansible.builtin.template:
+    src: "blockscout.service.j2"
+    dest: "/etc/systemd/system/blockscout.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install logrotate configuration for blockscout logs
+  ansible.builtin.template:
+    src: "blockscout-logrotate.j2"
+    dest: "/etc/logrotate.d/blockscout"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable and start blockscout service
+  ansible.builtin.systemd:
+    name: blockscout
+    enabled: true
+    daemon_reload: true
+    state: stopped

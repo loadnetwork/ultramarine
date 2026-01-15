@@ -2,7 +2,7 @@ schema_version: 1
 
 network:
   name: fibernet
-  chain_id: 16384
+  chain_id: 1984
 
 # Execution genesis (alloc) for fibernet.
 execution:
@@ -30,6 +30,10 @@ hosts:
   - id: f4-metal-medium-fra2-fibernet-2
     public_ip: "67.213.121.57"
     ssh_user: ubuntu
+  # Dedicated host for Blockscout explorer + full node (Xeon E-2286G, 32GB RAM, 1TB SSD)
+  - id: blockscout-fibernet
+    public_ip: "72.46.84.15"
+    ssh_user: ubuntu
 
 # 6 validators: 2 per host (3x2 topology)
 nodes:
@@ -51,6 +55,10 @@ nodes:
   - id: node-5
     host: f4-metal-medium-fra2-fibernet-2
     role: validator
+  # Full node for Blockscout indexing and public RPC (non-validator)
+  - id: node-rpc
+    host: blockscout-fibernet
+    role: fullnode
 
 # Engine API policy for deploys: IPC-only.
 engine:
@@ -88,3 +96,16 @@ exposure:
 # Testnet override: allow >1 validator per host (unsafe for single-host failure tolerance).
 validation:
   allow_unsafe_failure_domains: true
+
+# Blockscout explorer configuration
+blockscout:
+  enabled: true
+  host: blockscout-fibernet
+  rpc_node: node-rpc
+  domains:
+    explorer: fibernet.load.network
+    stats: stats.fibernet.load.network
+    rpc: rpc.fibernet.load.network
+  ssl:
+    enabled: true
+    email: admin@load.network

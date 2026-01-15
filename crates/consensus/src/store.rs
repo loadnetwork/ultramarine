@@ -284,11 +284,7 @@ impl Db {
         Ok(())
     }
 
-    fn delete_undecided_proposal(
-        &self,
-        height: Height,
-        round: Round,
-    ) -> Result<(), StoreError> {
+    fn delete_undecided_proposal(&self, height: Height, round: Round) -> Result<(), StoreError> {
         let start = Instant::now();
 
         let key = (height, round);
@@ -304,16 +300,9 @@ impl Db {
         Ok(())
     }
 
-    fn height_range<Table>(
-        &self,
-        table: &Table,
-        range: impl RangeBounds<Height>,
-    ) -> Result<Vec<Height>, StoreError>
-    where
-        Table: redb::ReadableTable<HeightKey, Vec<u8>>,
-    {
-        Ok(table.range(range)?.flatten().map(|(key, _)| key.value()).collect::<Vec<_>>())
-    }
+    // NOTE: height_range() was removed as part of FIX-001.
+    // It was only used for pruning decided data, which we no longer do.
+    // See store.prune() documentation for details.
 
     fn undecided_proposals_range<Table>(
         &self,
@@ -337,18 +326,30 @@ impl Db {
         Ok(table.range(range)?.flatten().map(|(key, _)| key.value()).collect::<Vec<_>>())
     }
 
+    /// Prune undecided data (temporary proposals from failed rounds).
+    ///
+    /// NOTE: This function intentionally does NOT delete decided data
+    /// (DECIDED_VALUES_TABLE, CERTIFICATES_TABLE, DECIDED_BLOCK_DATA_TABLE).
+    /// Following the Lighthouse pattern, only blob bytes are pruned after archival.
+    /// Decided values, certificates, and block data must be retained forever
+    /// to allow fullnodes to sync the complete chain history.
+    ///
+    /// Load Network context: Validators prune blob bytes via blob_engine after
+    /// archival to S3, but must serve historical block data for ValueSync.
     fn prune(&self, retain_height: Height) -> Result<Vec<Height>, StoreError> {
         let start = Instant::now();
 
         let tx = self.db.begin_write()?;
 
-        let pruned = {
+        {
+            // Only prune undecided proposals (temp data from failed consensus rounds)
             let mut undecided = tx.open_table(UNDECIDED_PROPOSALS_TABLE)?;
             let keys = self.undecided_proposals_range(&undecided, ..(retain_height, Round::Nil))?;
             for key in keys {
                 undecided.remove(key)?;
             }
 
+            // Only prune undecided block data (temp data from failed consensus rounds)
             let mut undecided_block_data = tx.open_table(UNDECIDED_BLOCK_DATA_TABLE)?;
             let keys =
                 self.block_data_range(&undecided_block_data, ..(retain_height, Round::Nil))?;
@@ -356,25 +357,17 @@ impl Db {
                 undecided_block_data.remove(key)?;
             }
 
-            let mut decided = tx.open_table(DECIDED_VALUES_TABLE)?;
-            let mut certificates = tx.open_table(CERTIFICATES_TABLE)?;
-            let mut decided_block_data = tx.open_table(DECIDED_BLOCK_DATA_TABLE)?;
-
-            let keys = self.height_range(&decided, ..retain_height)?;
-            for key in &keys {
-                decided.remove(key)?;
-                certificates.remove(key)?;
-                decided_block_data.remove(key)?;
-            }
-
-            keys
-        };
+            // DO NOT touch: DECIDED_VALUES_TABLE, CERTIFICATES_TABLE, DECIDED_BLOCK_DATA_TABLE
+            // These are historical records required for fullnode sync and must be retained forever.
+            // Blob bytes are pruned separately via blob_engine.mark_archived() after S3 archival.
+        }
 
         tx.commit()?;
 
         self.metrics.observe_delete_time(start.elapsed());
 
-        Ok(pruned)
+        // Return empty vec - we no longer prune decided heights
+        Ok(vec![])
     }
 
     fn min_decided_value_height(&self) -> Option<Height> {
@@ -497,11 +490,7 @@ impl Db {
         Ok(())
     }
 
-    fn delete_undecided_block_data(
-        &self,
-        height: Height,
-        round: Round,
-    ) -> Result<(), StoreError> {
+    fn delete_undecided_block_data(&self, height: Height, round: Round) -> Result<(), StoreError> {
         let start = Instant::now();
 
         let key = (height, round);

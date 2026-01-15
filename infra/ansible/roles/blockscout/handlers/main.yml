@@ -1,0 +1,11 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart blockscout
+  ansible.builtin.systemd:
+    name: blockscout
+    state: restarted
+    daemon_reload: true
+  when: blockscout_manage_service | default(true) | bool

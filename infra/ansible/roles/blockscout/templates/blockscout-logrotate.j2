@@ -1,0 +1,15 @@
+# Logrotate configuration for Blockscout application logs
+# Deployed by: roles/blockscout
+
+{{ blockscout_logs_dir }}/*.log
+{{ blockscout_logs_dir }}/**/*.log
+{
+    size {{ blockscout_log_max_size | default('100M') }}
+    rotate {{ blockscout_log_max_files | default(5) }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    sharedscripts
+}

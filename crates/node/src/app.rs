@@ -182,17 +182,18 @@ pub async fn run(
 
                 // Cleanup stale round blobs to prevent memory/storage leak when consensus is stuck.
                 // This handles the case where rounds keep timing out but no commit happens.
-                // Only cleanup after round 0 (we need at least one previous round to have stale data).
-                if round.as_u32().map_or(false, |r| r > 0) {
-                    if let Err(e) = state.cleanup_stale_round_blobs(height, round).await {
-                        warn!(
-                            %height,
-                            %round,
-                            error = %e,
-                            "Failed to cleanup stale round blobs"
-                        );
-                        // Don't fail the round start - this is best-effort cleanup
-                    }
+                // Only cleanup after round 0 (we need at least one previous round to have stale
+                // data).
+                if round.as_u32().is_some_and(|r| r > 0)
+                    && let Err(e) = state.cleanup_stale_round_blobs(height, round).await
+                {
+                    warn!(
+                        %height,
+                        %round,
+                        error = %e,
+                        "Failed to cleanup stale round blobs"
+                    );
+                    // Don't fail the round start - this is best-effort cleanup
                 }
 
                 // We can use that opportunity to update our internal state
@@ -919,24 +920,33 @@ pub async fn run(
                                 }
                             }
                             (
-                                Some(_payload),
+                                Some(payload),
                                 Err(ultramarine_blob_engine::BlobEngineError::BlobsPruned {
                                     locators,
                                     ..
                                 }),
                             ) => {
-                                // Blobs have been pruned - send MetadataOnly with archive notices
-                                // The receiving peer can use the locators to fetch from external
-                                // archive NOTE: We do NOT send Full
-                                // with empty sidecars as that causes
-                                // process_synced_package to panic (empty hashes vs non-empty
-                                // commitments)
-                                warn!(
+                                // Blobs have been pruned but payload is available - send
+                                // MetadataOnly WITH the payload so
+                                // the receiving peer can import the block without
+                                // blob sidecars.
+                                //
+                                // Load Network pruning policy: Archive event is the boundary
+                                // for blob pruning (NOT Ethereum's time-based DA window).
+                                // This follows the Lighthouse pattern where blocks can be
+                                // imported without blob sidecars once archived.
+                                //
+                                // The receiving peer will:
+                                // 1. Import the execution payload to EL
+                                // 2. Store consensus metadata (commitments from Value)
+                                // 3. Mark blobs as pruned using archive notices
+                                info!(
                                     %height,
                                     %round,
+                                    payload_size = payload.len(),
                                     locator_count = locators.len(),
                                     notice_count = archive_notices.len(),
-                                    "Blobs pruned, sending MetadataOnly with archive notices"
+                                    "Blobs pruned, sending MetadataOnly WITH payload for import"
                                 );
                                 if !locators.is_empty() {
                                     debug!(
@@ -949,18 +959,24 @@ pub async fn run(
                                 SyncedValuePackage::MetadataOnly {
                                     value: decided_value.value.clone(),
                                     archive_notices: archive_notices.clone(),
+                                    execution_payload_ssz: Some(payload),
+                                    execution_requests: execution_requests.clone(),
                                 }
                             }
                             _ => {
-                                // Payload missing or other error
+                                // Payload missing or other error - send MetadataOnly without
+                                // payload The receiving peer cannot
+                                // import this block, will try another peer
                                 error!(
                                     %height,
                                     %round,
-                                    "Payload or blobs missing/error, sending MetadataOnly"
+                                    "Payload or blobs missing/error, sending MetadataOnly without payload"
                                 );
                                 SyncedValuePackage::MetadataOnly {
                                     value: decided_value.value.clone(),
                                     archive_notices: archive_notices.clone(),
+                                    execution_payload_ssz: None,
+                                    execution_requests: vec![],
                                 }
                             }
                         };

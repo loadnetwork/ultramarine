@@ -1,5 +1,10 @@
 all:
   hosts:
+    blockscout-fibernet:
+      ansible_host: 72.46.84.15
+      ansible_user: ubuntu
+      loadnet_nodes:
+      - node-rpc
     f4-metal-medium-ams-fibernet-2:
       ansible_host: 64.34.87.1
       ansible_user: ubuntu

@@ -1,6 +1,17 @@
-# Phase 6 Review + “Beyond 4844/PeerDAS” DA Options (Load / Ultramarine)
+# Phase 6 Review + "Beyond 4844/PeerDAS" DA Options (Load / Ultramarine)
 
-**Scope**: Review Phase 6 completeness + assess foundations, then propose concrete ways Load can push DA capacity far beyond Ethereum’s EIP-4844 + PeerDAS constraints, leveraging Tendermint-style BFT (Malachite) and the existing “consensus-on-metadata, data-on-side-channel” design.
+**Scope**: Review Phase 6 completeness + assess foundations, then propose concrete ways Load can push DA capacity far beyond Ethereum's EIP-4844 + PeerDAS constraints, leveraging Tendermint-style BFT (Malachite) and the existing "consensus-on-metadata, data-on-side-channel" design.
+
+## Archive-Based Pruning Policy
+
+**IMPORTANT**: Load Network uses the **archive event as the boundary for blob pruning**, NOT the Ethereum DA window.
+
+| Aspect | Ethereum | Load Network |
+|--------|----------|--------------|
+| Pruning trigger | Time-based DA window (~18 days) | Archive event + finality |
+| Consensus data | Retained forever | Retained forever |
+| Blob bytes | Pruned after DA window | Pruned after verified archival |
+| history_min_height | Varies with pruning | Always 0 (invariant) |
 
 Primary references:
 

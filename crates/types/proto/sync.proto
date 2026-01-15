@@ -85,7 +85,13 @@ message FullPackage {
 }
 
 // Metadata-only fallback (for pruned data)
+// When blobs have been pruned but execution payload is still available,
+// we include the payload so the receiving peer can import the block.
+// This follows the Lighthouse pattern: blocks outside the DA window
+// can be imported without blob sidecars.
 message MetadataOnlyPackage {
   Value value = 1;  // Just the Value metadata
   repeated ArchiveNotice archive_notices = 2; // Archive notices with locators for pruned blobs
+  bytes execution_payload_ssz = 3;            // Execution payload (optional, for import without blobs)
+  repeated bytes execution_requests = 4;      // Execution requests (EIP-7685, optional)
 }

@@ -104,6 +104,7 @@
   ansible.builtin.lineinfile:
     path: /etc/fstab
     create: true
+    mode: "0644"
     line: "UUID={{ loadnet_fs_uuid.stdout }} {{ loadnet_data_mountpoint }} {{ loadnet_fs_type }} defaults,noatime 0 2"
     regexp: "^UUID={{ loadnet_fs_uuid.stdout | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+"
   when: loadnet_storage_wipe | bool
@@ -269,6 +270,7 @@
   ansible.builtin.lineinfile:
     path: /etc/fstab
     create: true
+    mode: "0644"
     line: "{{ loadnet_effective_source_dir }} {{ loadnet_data_mountpoint }} none bind,x-systemd.requires-mounts-for={{ loadnet_effective_source_mountpoint }} 0 0"
     regexp: "^{{ loadnet_effective_source_dir | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+none\\s+"
   when:
@@ -330,6 +332,7 @@
       ansible.builtin.lineinfile:
         path: /etc/fstab
         create: true
+        mode: "0644"
         line: "{{ loadnet_log_dir }} /var/log none bind,x-systemd.requires-mounts-for={{ loadnet_data_mountpoint }} 0 0"
         regexp: "^{{ loadnet_log_dir | regex_escape() }}\\s+/var/log\\s+none\\s+"
 

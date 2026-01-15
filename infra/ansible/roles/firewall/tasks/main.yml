@@ -34,55 +34,152 @@
         lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
 
 - name: Ensure SSH stays allowed (never lock out the operator)
-  ansible.builtin.command: "ufw allow {{ ansible_port | default(22) }}/tcp"
-  changed_when: false
+  community.general.ufw:
+    rule: allow
+    port: "{{ ansible_port | default(22) }}"
+    proto: tcp
+    comment: SSH access
 
-- name: Set UFW default policies (safe baseline)
-  ansible.builtin.command: "ufw default {{ item }}"
-  loop:
-    - deny incoming
-    - allow outgoing
-  changed_when: false
+- name: Set UFW default incoming policy to deny
+  community.general.ufw:
+    default: deny
+    direction: incoming
+
+- name: Set UFW default outgoing policy to allow
+  community.general.ufw:
+    default: allow
+    direction: outgoing
 
 - name: Build node->ports map (from lockfile)
   ansible.builtin.set_fact:
-    loadnet_ports_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='ports'))) }}"
+    loadnet_ports_by_node: >-
+      {{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='ports'))) }}
 
-- name: Open required P2P ports for nodes on this host
-  ansible.builtin.shell: |
-    set -euo pipefail
-    ufw allow "{{ loadnet_ports_by_node[node_id].el_p2p }}/tcp"
-    ufw allow "{{ loadnet_ports_by_node[node_id].el_p2p }}/udp"
-    ufw allow "{{ loadnet_ports_by_node[node_id].cl_p2p }}/tcp"
-    ufw allow "{{ loadnet_ports_by_node[node_id].cl_mempool }}/tcp"
-  args:
-    executable: /bin/bash
+- name: Open EL P2P TCP port for nodes on this host
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[node_id].el_p2p }}"
+    proto: tcp
+    comment: "EL P2P TCP {{ node_id }}"
   loop: "{{ loadnet_nodes }}"
   loop_control:
     loop_var: node_id
-  changed_when: false
+
+- name: Open EL P2P UDP port for nodes on this host
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[node_id].el_p2p }}"
+    proto: udp
+    comment: "EL P2P UDP {{ node_id }}"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+
+- name: Open CL P2P port for nodes on this host
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[node_id].cl_p2p }}"
+    proto: tcp
+    comment: "CL P2P {{ node_id }}"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+
+- name: Open CL mempool port for nodes on this host
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[node_id].cl_mempool }}"
+    proto: tcp
+    comment: "CL mempool {{ node_id }}"
+  loop: "{{ loadnet_nodes }}"
+  loop_control:
+    loop_var: node_id
+
+- name: Open EL HTTP ports for allowed CIDRs
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[node_id].el_http }}"
+    proto: tcp
+    from_ip: "{{ cidr }}"
+    comment: "EL HTTP {{ node_id }} (restricted)"
+  loop: "{{ loadnet_nodes | product(loadnet_el_http_allow_cidrs) | list }}"
+  loop_control:
+    loop_var: pair
+  vars:
+    node_id: "{{ pair.0 }}"
+    cidr: "{{ pair.1 }}"
+  when:
+    - loadnet_el_http_allow_cidrs is defined
+    - loadnet_el_http_allow_cidrs | length > 0
+    - (loadnet_el_http_bind | default('0.0.0.0')) not in ['127.0.0.1', '::1']
 
 - name: Open EL HTTP ports for nodes on this host
-  ansible.builtin.command: "ufw allow {{ loadnet_ports_by_node[node_id].el_http }}/tcp"
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[node_id].el_http }}"
+    proto: tcp
+    comment: "EL HTTP {{ node_id }}"
   loop: "{{ loadnet_nodes }}"
   loop_control:
     loop_var: node_id
-  changed_when: false
-  when: (loadnet_el_http_bind | default('0.0.0.0')) not in ['127.0.0.1', '::1']
+  when:
+    - (loadnet_el_http_bind | default('0.0.0.0')) not in ['127.0.0.1', '::1']
+    - loadnet_el_http_allow_cidrs is not defined or (loadnet_el_http_allow_cidrs | length == 0)
 
 - name: Open Grafana port (monitoring)
-  ansible.builtin.command: "ufw allow {{ loadnet_grafana_port | default(3000) }}/tcp"
-  changed_when: false
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_grafana_port | default(3000) }}"
+    proto: tcp
+    comment: Grafana dashboard
   when: (loadnet_grafana_bind | default('0.0.0.0')) not in ['127.0.0.1', '::1']
 
 - name: Open Prometheus port (monitoring)
-  ansible.builtin.command: "ufw allow {{ loadnet_prometheus_port | default(9090) }}/tcp"
-  changed_when: false
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_prometheus_port | default(9090) }}"
+    proto: tcp
+    comment: Prometheus metrics
   when: (loadnet_prometheus_bind | default('127.0.0.1')) not in ['127.0.0.1', '::1']
 
-- name: Enable ufw (idempotent)
-  ansible.builtin.command: "ufw --force enable"
-  changed_when: false
+- name: Open HTTP port for Blockscout/nginx
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+    comment: Blockscout HTTP
+  when:
+    - loadnet_lock.blockscout is defined
+    - loadnet_lock.blockscout.enabled | default(false)
+    - inventory_hostname == loadnet_lock.blockscout.host
+
+- name: Open HTTPS port for Blockscout/nginx
+  community.general.ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+    comment: Blockscout HTTPS
+  when:
+    - loadnet_lock.blockscout is defined
+    - loadnet_lock.blockscout.enabled | default(false)
+    - inventory_hostname == loadnet_lock.blockscout.host
+
+- name: Allow Docker subnet to access EL RPC port (Blockscout indexing)
+  community.general.ufw:
+    rule: allow
+    port: "{{ loadnet_ports_by_node[loadnet_lock.blockscout.rpc_node].el_http }}"
+    proto: tcp
+    from_ip: "172.16.0.0/12"
+    comment: Docker subnet access to RPC for Blockscout
+  when:
+    - loadnet_lock.blockscout is defined
+    - loadnet_lock.blockscout.enabled | default(false)
+    - inventory_hostname == loadnet_lock.blockscout.host
+    - loadnet_lock.blockscout.rpc_node is defined
+
+- name: Enable ufw
+  community.general.ufw:
+    state: enabled
 
 - name: Show ufw status
   ansible.builtin.command: "ufw status verbose"

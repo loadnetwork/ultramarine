@@ -967,6 +967,28 @@ net-wipe: require-net ## Destroy+clean hosts (destructive): WIPE_CONFIRM=YES (WI
 		-e "net=$(NET) net_dir=$(NET_DIR) wipe_confirm=$(WIPE_CONFIRM) wipe_state=$(WIPE_STATE) wipe_monitoring=$(WIPE_MONITORING) wipe_containers=$(WIPE_CONTAINERS) wipe_firewall=$(WIPE_FIREWALL) wipe_nodes=$(WIPE_NODES)" \
 		$(if $(EXTRA_VARS),-e "$(EXTRA_VARS)",)
 
+# -----------------------------------------------------------------------------
+# Blockscout
+
+MANIFEST_DIR ?= infra/manifests
+
+.PHONY: net-blockscout
+net-blockscout: require-net ## Deploy Blockscout explorer (NET=<net>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible-playbook $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) -i $(ANSIBLE_INVENTORY) $(ANSIBLE_PLAYBOOKS)/blockscout.yml \
+		-e "net=$(NET) net_dir=$(NET_DIR)"
+
+.PHONY: net-blockscout-status
+net-blockscout-status: require-net ## Check Blockscout status (NET=<net>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) -i $(ANSIBLE_INVENTORY) all -m shell \
+		-a "systemctl status blockscout nginx-blockscout --no-pager" \
+		--limit $$(yq -r '.blockscout.host' $(MANIFEST_DIR)/$(NET).yaml)
+
+.PHONY: net-blockscout-logs
+net-blockscout-logs: require-net ## View Blockscout logs (NET=<net>, LINES=<n>).
+	ANSIBLE_CONFIG=$(ANSIBLE_CONFIG_PATH) ansible $(if $(SSH_KEY),--private-key "$(SSH_KEY)",) -i $(ANSIBLE_INVENTORY) all -m shell \
+		-a "journalctl -u blockscout -n $(LINES) --no-pager" \
+		--limit $$(yq -r '.blockscout.host' $(MANIFEST_DIR)/$(NET).yaml)
+
 .PHONY: infra-checks
 infra-checks: ## Run infra checks (netgen build + ansible syntax-checks if available).
 	cargo fmt --all

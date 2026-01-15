@@ -1,0 +1,25 @@
+[Unit]
+Description=Blockscout Explorer
+Documentation=https://docs.blockscout.com/
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory={{ blockscout_base_dir }}
+# Note: Backend and frontend images are built on controller and transferred
+# Images: {{ blockscout_backend_image }}, {{ blockscout_frontend_image }}
+ExecStart={{ blockscout_compose_cmd | default('/usr/bin/docker compose') }} up -d --remove-orphans
+ExecStop={{ blockscout_compose_cmd | default('/usr/bin/docker compose') }} down
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=300
+TimeoutStopSec=300
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blockscout
+
+[Install]
+WantedBy=multi-user.target

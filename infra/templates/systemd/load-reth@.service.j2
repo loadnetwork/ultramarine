@@ -42,6 +42,9 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i --network 
     --nat=extip:$LOAD_RETH_PUBLIC_IP \
     --p2p-secret-key=/run/load-reth/%i/p2p.key \
     --bootnodes=$LOAD_RETH_BOOTNODES \
+{% if loadnet_el_debug_tip is defined and loadnet_el_debug_tip %}
+    --debug.tip={{ loadnet_el_debug_tip }} \
+{% endif %}
     --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH'
 
 ExecStop=/usr/bin/docker stop -t 10 load-reth-%i
