@@ -6,7 +6,7 @@
   },
   "network": {
     "name": "fibernet",
-    "chain_id": 16384
+    "chain_id": 1984
   },
   "nodes": [
     {
@@ -227,7 +227,7 @@
     "public": {
       "genesis_json": {
         "path": "bundle/public/genesis.json",
-        "sha256": "561eeedd42623090d34ff0e9c45b1177772e2468011440103d8323456fd1c120"
+        "sha256": "2c1c4b35e2829d583b94ef8bd34e85675638307a86c6cf829f44ff74be72f6bc"
       }
     }
   }

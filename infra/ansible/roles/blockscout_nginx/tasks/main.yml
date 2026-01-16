@@ -41,6 +41,17 @@
     - "{{ blockscout_nginx_webroot }}/.well-known"
     - "{{ blockscout_nginx_webroot }}/.well-known/acme-challenge"
 
+- name: Check if nginx.conf is a directory
+  ansible.builtin.stat:
+    path: "{{ blockscout_nginx_config_dir }}/nginx.conf"
+  register: nginx_conf_stat
+
+- name: Remove nginx.conf if it's a directory (prevents mount failure)
+  ansible.builtin.file:
+    path: "{{ blockscout_nginx_config_dir }}/nginx.conf"
+    state: absent
+  when: nginx_conf_stat.stat.exists and nginx_conf_stat.stat.isdir
+
 - name: Render main nginx configuration
   ansible.builtin.template:
     src: "nginx.conf.j2"

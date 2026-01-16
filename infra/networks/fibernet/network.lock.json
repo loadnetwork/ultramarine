@@ -6,11 +6,11 @@
   },
   "network": {
     "name": "fibernet",
-    "chain_id": 16384
+    "chain_id": 1984
   },
   "inputs": {
     "manifest_path": "infra/manifests/fibernet.yaml",
-    "manifest_sha256": "d168cbc213a65a42b15c15abdf0ac2d0118c78ab24785ea48f753d707a2dc42d"
+    "manifest_sha256": "4cb04e63ea600ef7bcd878a9dc2b81e5b0e553283469f4575bf94dca8630274f"
   },
   "policy": {
     "engine": "ipc-only",
@@ -335,7 +335,7 @@
     "public": {
       "genesis_json": {
         "path": "bundle/public/genesis.json",
-        "sha256": "561eeedd42623090d34ff0e9c45b1177772e2468011440103d8323456fd1c120"
+        "sha256": "02266bdff4e860826d9cbb6b682fc61aab7fd895d9f2aa25b7cd586599e20166"
       }
     }
   }

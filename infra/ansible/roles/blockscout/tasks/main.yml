@@ -179,26 +179,20 @@
     group: root
     mode: "0755"
 
-# --- Local image build on controller ---
-- name: Check if backend image exists locally (controller)
+# --- Server-side image build (avoids QEMU emulation issues on macOS) ---
+- name: Check if backend image exists on server
   ansible.builtin.command:
     cmd: docker image inspect {{ blockscout_backend_image }}
-  delegate_to: localhost
-  become: false
   register: blockscout_backend_image_check
   failed_when: false
   changed_when: false
-  run_once: true
 
-- name: Check if frontend image exists locally (controller)
+- name: Check if frontend image exists on server
   ansible.builtin.command:
     cmd: docker image inspect {{ blockscout_frontend_image }}
-  delegate_to: localhost
-  become: false
   register: blockscout_frontend_image_check
   failed_when: false
   changed_when: false
-  run_once: true
 
 - name: Verify wvm-blockscout source exists (controller)
   ansible.builtin.stat:
@@ -216,11 +210,32 @@
   register: blockscout_frontend_src_stat
   run_once: true
 
-- name: Build backend image locally (controller)
+- name: Ensure build directory exists on server
+  ansible.builtin.file:
+    path: /opt/blockscout-build
+    state: directory
+    mode: "0755"
+  when: blockscout_backend_image_check.rc != 0 or blockscout_frontend_image_check.rc != 0
+
+# --- Backend build ---
+- name: Transfer wvm-blockscout source to server
+  ansible.posix.synchronize:
+    src: "{{ blockscout_backend_src_dir }}/"
+    dest: /opt/blockscout-build/backend/
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=_build"
+      - "--exclude=deps"
+      - "--exclude=node_modules"
+    delete: true
+  when:
+    - blockscout_backend_image_check.rc != 0
+    - blockscout_backend_src_stat.stat.exists
+
+- name: Build backend image on server
   ansible.builtin.command:
     cmd: >
       docker build
-      --platform linux/amd64
       --build-arg CACHE_EXCHANGE_RATES_PERIOD=""
       --build-arg API_V1_READ_METHODS_DISABLED=false
       --build-arg DISABLE_WEBAPP=false
@@ -232,61 +247,44 @@
       -t {{ blockscout_backend_image }}
       -f docker/Dockerfile
       .
-    chdir: "{{ blockscout_backend_src_dir }}"
-  delegate_to: localhost
-  become: false
-  run_once: true
+    chdir: /opt/blockscout-build/backend
   when:
     - blockscout_backend_image_check.rc != 0
     - blockscout_backend_src_stat.stat.exists
   changed_when: true
+  async: 1800
+  poll: 30
 
-- name: Build frontend image locally (controller)
+# --- Frontend build ---
+- name: Transfer wvm-blockscout-frontend source to server
+  ansible.posix.synchronize:
+    src: "{{ blockscout_frontend_src_dir }}/"
+    dest: /opt/blockscout-build/frontend/
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=node_modules"
+      - "--exclude=.next"
+    delete: true
+  when:
+    - blockscout_frontend_image_check.rc != 0
+    - blockscout_frontend_src_stat.stat.exists
+
+- name: Build frontend image on server
   ansible.builtin.command:
-    cmd: docker build --platform linux/amd64 -t {{ blockscout_frontend_image }} .
-    chdir: "{{ blockscout_frontend_src_dir }}"
-  delegate_to: localhost
-  become: false
-  run_once: true
+    cmd: docker build -t {{ blockscout_frontend_image }} .
+    chdir: /opt/blockscout-build/frontend
   when:
     - blockscout_frontend_image_check.rc != 0
     - blockscout_frontend_src_stat.stat.exists
   changed_when: true
+  async: 1800
+  poll: 30
 
-# --- Transfer images to server ---
-- name: Ensure images cache dir exists (controller)
+- name: Cleanup build directory on server
   ansible.builtin.file:
-    path: "{{ net_dir }}/bundle/private/blockscout/images"
-    state: directory
-    mode: "0755"
-  delegate_to: localhost
-  become: false
-  run_once: true
-
-- name: Save images to tarball (controller)
-  ansible.builtin.command:
-    cmd: docker save {{ blockscout_backend_image }} {{ blockscout_frontend_image }} -o {{ net_dir }}/bundle/private/blockscout/images/blockscout-images.tar
-  delegate_to: localhost
-  become: false
-  run_once: true
-  changed_when: true
-
-- name: Copy images tarball to server
-  ansible.builtin.copy:
-    src: "{{ net_dir }}/bundle/private/blockscout/images/blockscout-images.tar"
-    dest: "/tmp/blockscout-images.tar"
-    mode: "0644"
-
-- name: Load images on server
-  ansible.builtin.command:
-    cmd: docker load -i /tmp/blockscout-images.tar
-  register: blockscout_load_result
-  changed_when: "'Loaded image' in blockscout_load_result.stdout"
-
-- name: Cleanup images tarball on server
-  ansible.builtin.file:
-    path: /tmp/blockscout-images.tar
+    path: /opt/blockscout-build
     state: absent
+  when: blockscout_backend_image_check.rc != 0 or blockscout_frontend_image_check.rc != 0
 
 - name: Template common-blockscout.env
   ansible.builtin.template:

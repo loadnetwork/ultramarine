@@ -5,14 +5,13 @@ After=docker.service
 Requires=docker.service
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory={{ blockscout_base_dir }}
-# Note: Backend and frontend images are built on controller and transferred
+# Note: Backend and frontend images are built on server (avoids QEMU emulation on macOS)
 # Images: {{ blockscout_backend_image }}, {{ blockscout_frontend_image }}
 ExecStart={{ blockscout_compose_cmd | default('/usr/bin/docker compose') }} up -d --remove-orphans
 ExecStop={{ blockscout_compose_cmd | default('/usr/bin/docker compose') }} down
-Restart=on-failure
-RestartSec=30
 TimeoutStartSec=300
 TimeoutStopSec=300
 
