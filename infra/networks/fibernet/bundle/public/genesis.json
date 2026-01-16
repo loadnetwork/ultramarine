@@ -13,7 +13,7 @@
     "berlinBlock": 0,
     "byzantiumBlock": 0,
     "cancunTime": 0,
-    "chainId": 16384,
+    "chainId": 1984,
     "constantinopleBlock": 0,
     "eip150Block": 0,
     "eip155Block": 0,
@@ -36,5 +36,5 @@
   "nonce": "0x0",
   "number": "0x0",
   "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "timestamp": "0x0"
+  "timestamp": "0x69696397"
 }

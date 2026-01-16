@@ -1,6 +1,82 @@
 # Fibernet Testnet Deployment Progress
 
-## 🎉 DEPLOYMENT SUCCESS (2026-01-15 13:55 UTC)
+## 🎉 DEPLOYMENT SUCCESS (2026-01-16 00:00 UTC)
+
+**Network Status: FULLY OPERATIONAL**
+
+- **Validators**: 6 nodes producing blocks (height ~42k+)
+- **Fullnode**: Synced and operational
+- **Blockscout**: Indexing blocks with correct timestamps
+- **Chain ID**: 1984
+- **Docker Image**: `loadnetwork/ultramarine:fibernet` (SHA: `b1ee66f1534f2c4cd54f18b84f68396ff2db1d8b5bdb37e6d5f51e69148ea412`)
+
+### Session 4: Blockscout Fixes & Ansible Role Improvements (2026-01-15 ~23:30 UTC)
+
+**Problems Found**:
+1. Blockscout had stale data with 1970 timestamps from previous deployment
+2. Blockscout Ansible role tried to build images locally on macOS → QEMU crash (exit 139)
+3. `blockscout.service` used `Type=simple` with `docker compose up -d` → service exited immediately
+4. Docker network `blockscout-network` had stale labels preventing recreation
+
+**Fixes Implemented**:
+
+1. **Blockscout wipe playbook tasks** (`infra/ansible/playbooks/wipe.yml`):
+   - Added `loadnet_wipe_blockscout` variable (default true)
+   - Stop blockscout service
+   - Run `docker compose down -v --remove-orphans`
+   - Wipe `/var/lib/blockscout` directory (postgres, stats-postgres, redis, logs)
+   - Remove `blockscout-network` docker network
+
+2. **Server-side image builds** (`infra/ansible/roles/blockscout/tasks/main.yml`):
+   - Removed local (controller) image builds that crashed on macOS
+   - Transfer source via `ansible.posix.synchronize` (rsync)
+   - Build images on server (no QEMU emulation needed)
+   - Use `async: 1800` for long builds
+
+3. **Fixed systemd service type** (`infra/ansible/roles/blockscout/templates/blockscout.service.j2`):
+   - Changed from `Type=simple` to `Type=oneshot RemainAfterExit=yes`
+   - `docker compose up -d` runs detached, so main process exits immediately
+   - With `Type=oneshot`, service stays "active (exited)" after ExecStart completes
+
+4. **systemd override cleanup during wipe** (`infra/ansible/playbooks/wipe.yml`):
+   - Remove `/etc/systemd/system/load-reth@*.service.d/` override directories
+   - Remove `/etc/systemd/system/ultramarine@*.service.d/` override directories
+   - Run `daemon-reload` after removing overrides
+   - Prevents stale `--debug.tip` or other overrides from breaking fresh deployments
+
+**Verification**:
+- Blockscout API: `curl http://127.0.0.1:4000/api/v2/stats` → `total_blocks: 33` (and counting)
+- Block timestamps: `2026-01-16T09:49:56.000000Z` (correct, not 1970!)
+- All containers healthy: redis, db, stats-db, backend, frontend, stats, visualizer, sig-provider
+
+---
+
+### Session 3: Full Network Wipe & Redeploy (2026-01-15 ~22:00 UTC)
+
+**Problem**: Network needed clean restart to apply all fixes from Sessions 1-2.
+
+**Actions**:
+1. Codex CLI review (gpt-5.2-codex) - passed
+2. cargo test - 44/44 passed
+3. cargo clippy - fixed `collapsible_if` warning in state.rs
+4. Docker build via `docker buildx` - image pushed
+5. Network wipe (`make net-wipe`) - wiped all 4 hosts
+6. Network deploy (`make net-deploy` + `make net-up`)
+7. Health check passed all hosts
+
+**Issue Found**: Fullnode (blockscout) had stale systemd override files:
+- `/etc/systemd/system/load-reth@node-rpc.service.d/debug-tip.conf`
+- `/etc/systemd/system/load-reth@node-rpc.service.d/override.conf`
+
+These contained hardcoded `--debug.tip` with OLD genesis hash, preventing sync.
+
+**Fix**: Removed override files, restarted service. Fullnode now syncing from genesis.
+
+**Note**: Ansible wipe should also clean systemd service.d overrides to prevent this issue.
+
+---
+
+## Previous: DEPLOYMENT SUCCESS (2026-01-15 13:55 UTC)
 
 **Network Status: FULLY OPERATIONAL**
 

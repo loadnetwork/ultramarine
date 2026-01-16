@@ -13,7 +13,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, Once},
+    sync::{
+        Arc, Mutex, Once,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -123,6 +126,9 @@ use ultramarine_execution::EngineApi;
 
 type NodeConfigHook = Arc<dyn Fn(usize, &mut Config) + Send + Sync>;
 type PayloadPlan = Arc<dyn Fn(Height) -> usize + Send + Sync>;
+type SyncPlan = Arc<dyn Fn(Height) -> bool + Send + Sync>;
+type ParentOverridePlan = Arc<dyn Fn(Height) -> Option<B256> + Send + Sync>;
+type StubStateHook = Arc<dyn Fn(usize, &mut StubState) + Send + Sync>;
 
 #[derive(Clone)]
 struct HarnessConfig {
@@ -130,12 +136,19 @@ struct HarnessConfig {
     start_height: Option<Height>,
     node_config_hook: Option<NodeConfigHook>,
     payload_plan: Option<PayloadPlan>,
+    stub_state_hook: Option<StubStateHook>,
 }
 
 impl HarnessConfig {
     fn apply_node_config(&self, index: usize, config: &mut Config) {
         if let Some(hook) = &self.node_config_hook {
             (hook)(index, config);
+        }
+    }
+
+    fn apply_stub_state(&self, index: usize, state: &mut StubState) {
+        if let Some(hook) = &self.stub_state_hook {
+            (hook)(index, state);
         }
     }
 
@@ -151,11 +164,18 @@ struct FullNodeTestBuilder {
     start_height: Option<Height>,
     node_config_hook: Option<NodeConfigHook>,
     payload_plan: Option<PayloadPlan>,
+    stub_state_hook: Option<StubStateHook>,
 }
 
 impl Default for FullNodeTestBuilder {
     fn default() -> Self {
-        Self { node_count: 3, start_height: None, node_config_hook: None, payload_plan: None }
+        Self {
+            node_count: 3,
+            start_height: None,
+            node_config_hook: None,
+            payload_plan: None,
+            stub_state_hook: None,
+        }
     }
 }
 
@@ -188,6 +208,48 @@ impl FullNodeTestBuilder {
             None => hook,
         });
         self
+    }
+
+    #[allow(dead_code)]
+    fn with_stub_state_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(usize, &mut StubState) + Send + Sync + 'static,
+    {
+        let hook: StubStateHook = Arc::new(hook);
+        self.stub_state_hook = Some(match self.stub_state_hook.take() {
+            Some(previous) => Arc::new(move |index, state| {
+                (previous)(index, state);
+                (hook)(index, state);
+            }),
+            None => hook,
+        });
+        self
+    }
+
+    #[allow(dead_code)]
+    fn with_el_sync_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> bool + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: SyncPlan = Arc::new(move |height| plan(index, height));
+            state.set_sync_plan(per_node);
+        })
+    }
+
+    #[allow(dead_code)]
+    fn with_el_parent_override_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> Option<B256> + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: ParentOverridePlan = Arc::new(move |height| plan(index, height));
+            state.set_parent_override_plan(per_node);
+        })
     }
 
     /// Enable the archiver worker and configure provider + auth for the test harness.
@@ -238,6 +300,7 @@ impl FullNodeTestBuilder {
             start_height: self.start_height,
             node_config_hook: self.node_config_hook.clone(),
             payload_plan: self.payload_plan.clone(),
+            stub_state_hook: self.stub_state_hook.clone(),
         };
 
         let mut network = NetworkHarness::start(&config).await?;
@@ -1740,7 +1803,7 @@ async fn full_node_execution_requests_signature_protection() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
-async fn full_node_store_pruning_retains_recent_heights() -> Result<()> {
+async fn full_node_store_pruning_preserves_decided_history() -> Result<()> {
     init_test_logging();
     const TOTAL_HEIGHTS: usize = 8;
     const RETENTION: u64 = 5;
@@ -1786,8 +1849,6 @@ async fn full_node_store_pruning_retains_recent_heights() -> Result<()> {
                 }
 
                 let metrics_snapshot = metrics.snapshot();
-                let retention_window = RETENTION as usize;
-                let expected_pruned = TOTAL_HEIGHTS.saturating_sub(retention_window);
                 assert_eq!(metrics_snapshot.lifecycle_promoted, TOTAL_HEIGHTS as u64);
                 assert_eq!(
                     metrics_snapshot.lifecycle_pruned, 0,
@@ -1798,18 +1859,21 @@ async fn full_node_store_pruning_retains_recent_heights() -> Result<()> {
                     (TOTAL_HEIGHTS * BYTES_PER_BLOB) as i64
                 );
 
-                // The retention window applies to the consensus store (`Store::prune()`), not blob
-                // bytes. Old decided values should be removed from the store...
-                for height in 0..expected_pruned {
+                // The retention window must NOT prune decided history. All decided values,
+                // certificates, and block data are retained for genesis sync.
+                for height in 0..TOTAL_HEIGHTS {
                     let height = Height::new(height as u64);
-                    let decided = state.get_decided_value(height).await?;
-                    assert!(decided.is_none(), "decided value at height {height} should be pruned");
-                }
-                // ...while the most recent decided values are retained.
-                for height in expected_pruned..TOTAL_HEIGHTS {
-                    let height = Height::new(height as u64);
-                    let decided = state.get_decided_value(height).await?;
-                    assert!(decided.is_some(), "expected decided value at height {height}");
+                    let decided = state
+                        .get_decided_value(height)
+                        .await?
+                        .expect("decided value should be retained");
+                    let round = decided.certificate.round;
+                    let block_data = state.get_block_data(height, round).await?;
+                    assert!(
+                        block_data.is_some(),
+                        "block data at height {} should be retained",
+                        height
+                    );
                 }
                 // Blob bytes themselves remain available locally unless an archive notice triggers
                 // pruning.
@@ -1853,7 +1917,7 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
 
                 let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
                 let (_signed_header, sidecars) =
-                    state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))?;
+                    state.prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle)).await?;
 
                 let package = SyncedValuePackage::Full {
                     value: value.clone(),
@@ -1895,6 +1959,86 @@ async fn full_node_sync_package_roundtrip() -> Result<()> {
                 assert_eq!(metrics_snapshot.verifications_success, 1);
                 assert_eq!(metrics_snapshot.lifecycle_promoted, 1);
                 drop(state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_syncing_degrades_node() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(4)
+        .with_el_sync_plan(|index, height| index == 0 && height.as_u64() >= 2)
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_for_nodes_at(&[1, 2, 3], Height::new(3)).await?;
+
+                let guard = network.nodes[0].stub_state.lock().await;
+                eyre::ensure!(
+                    guard.latest_block.block_number == 1,
+                    "expected node 0 EL stub to remain at height 1 while syncing, got {}",
+                    guard.latest_block.block_number
+                );
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_transient_syncing_recovers() -> Result<()> {
+    init_test_logging();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .with_el_sync_plan({
+            let attempts = Arc::clone(&attempts);
+            move |index, height| {
+                if index != 0 || height.as_u64() < 2 {
+                    return false;
+                }
+                attempts.fetch_add(1, Ordering::SeqCst) < 5
+            }
+        })
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_for_nodes_at(&[0, 1], Height::new(3)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_transient_bad_payload_parent_recovers() -> Result<()> {
+    init_test_logging();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .with_el_parent_override_plan({
+            let attempts = Arc::clone(&attempts);
+            move |index, height| {
+                if index != 0 || height.as_u64() != 2 {
+                    return None;
+                }
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Return a parent that is guaranteed to not equal the requested head.
+                    return Some(B256::from([0xAAu8; 32]));
+                }
+                None
+            }
+        })
+        .run(|network| {
+            Box::pin(async move {
+                network.wait_for_nodes_at(&[0, 1], Height::new(3)).await?;
                 Ok(())
             })
         })
@@ -2146,7 +2290,9 @@ impl NetworkHarness {
 
             for index in 0..config.node_count {
                 let payload_plan = config.payload_plan();
-                let stub_state = Arc::new(TokioMutex::new(StubState::new(payload_plan.clone())));
+                let mut local_stub = StubState::new(payload_plan.clone());
+                config.apply_stub_state(index, &mut local_stub);
+                let stub_state = Arc::new(TokioMutex::new(local_stub));
                 let engine_stub = match EngineRpcStub::start(stub_state.clone()).await {
                     Ok(stub) => stub,
                     Err(e) => {
@@ -3321,6 +3467,9 @@ struct StubState {
     next_payload_id: u64,
     pending: HashMap<[u8; 8], (ExecutionPayloadV3, Option<BlobsBundle>, Vec<AlloyBytes>)>,
     payload_plan: Option<PayloadPlan>,
+    sync_plan: Option<SyncPlan>,
+    parent_override_plan: Option<ParentOverridePlan>,
+    new_payload_requests: Vec<(u64, Vec<String>)>,
 }
 
 impl StubState {
@@ -3330,11 +3479,30 @@ impl StubState {
             next_payload_id: 0,
             pending: HashMap::new(),
             payload_plan,
+            sync_plan: None,
+            parent_override_plan: None,
+            new_payload_requests: Vec::new(),
         }
     }
 
     fn blob_count_for_height(&self, height: Height) -> usize {
         self.payload_plan.as_ref().map(|plan| plan(height)).unwrap_or(1)
+    }
+
+    fn set_sync_plan(&mut self, plan: SyncPlan) {
+        self.sync_plan = Some(plan);
+    }
+
+    fn is_syncing_for(&self, height: Height) -> bool {
+        self.sync_plan.as_ref().map(|plan| plan(height)).unwrap_or(false)
+    }
+
+    fn set_parent_override_plan(&mut self, plan: ParentOverridePlan) {
+        self.parent_override_plan = Some(plan);
+    }
+
+    fn parent_override_for(&self, height: Height) -> Option<B256> {
+        self.parent_override_plan.as_ref().and_then(|plan| plan(height))
     }
 }
 
@@ -3470,30 +3638,55 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
 
     let mut guard = state.lock().await;
 
-    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) &&
-        head_height > guard.latest_block.block_number
-    {
-        let parent_hash =
-            if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
-        guard.latest_block.block_number = head_height;
-        guard.latest_block.block_hash = forkchoice.head_block_hash;
-        guard.latest_block.parent_hash = parent_hash;
-        guard.latest_block.timestamp = timestamp_for_height(head_height);
-        debug_log!(
-            "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
-            head_height
-        );
+    if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) {
+        let head = Height::new(head_height);
+        if guard.is_syncing_for(head) {
+            return Ok(json!({
+                "payloadStatus": {
+                    "status": "SYNCING",
+                    "latestValidHash": Value::Null,
+                    "validationError": Value::Null
+                },
+                "payloadId": Value::Null
+            }));
+        }
+        if head_height > guard.latest_block.block_number {
+            let parent_hash =
+                if head_height == 0 { B256::ZERO } else { block_hash_for_height(head_height - 1) };
+            guard.latest_block.block_number = head_height;
+            guard.latest_block.block_hash = forkchoice.head_block_hash;
+            guard.latest_block.parent_hash = parent_hash;
+            guard.latest_block.timestamp = timestamp_for_height(head_height);
+            debug_log!(
+                "engine_forkchoiceUpdatedV3: updated latest block to height {} from forkchoice head",
+                head_height
+            );
+        }
     }
 
     if let Some(_attrs) = payload_attrs {
         // Generate payload for next height (latest + 1)
         let next_height = Height::new(guard.latest_block.block_number + 1);
 
+        if guard.is_syncing_for(next_height) {
+            return Ok(json!({
+                "payloadStatus": {
+                    "status": "SYNCING",
+                    "latestValidHash": Value::Null,
+                    "validationError": Value::Null
+                },
+                "payloadId": Value::Null
+            }));
+        }
+
         debug_log!("engine_forkchoiceUpdatedV3: generating payload for height {}", next_height);
 
         let blob_count = guard.blob_count_for_height(next_height);
         let bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
-        let payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
+        let mut payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
+        if let Some(parent_override) = guard.parent_override_for(next_height) {
+            payload.payload_inner.payload_inner.parent_hash = parent_override;
+        }
         let execution_requests = sample_execution_requests_for_height(next_height);
         let payload_id = guard.next_payload_id;
         guard.next_payload_id += 1;
@@ -3567,6 +3760,20 @@ async fn handle_new_payload(
     }
 
     let mut guard = state.lock().await;
+    let height = Height::new(payload.block_number);
+    if guard.is_syncing_for(height) {
+        return Ok(json!({
+            "status": "SYNCING",
+            "latestValidHash": Value::Null,
+            "validationError": Value::Null
+        }));
+    }
+    if is_v4 {
+        let requests: Vec<String> =
+            serde_json::from_value(params[3].clone()).wrap_err("decode execution requests")?;
+        guard.new_payload_requests.push((payload.block_number, requests));
+    }
+
     guard.latest_block = ExecutionBlock {
         block_hash: payload.block_hash,
         block_number: payload.block_number,
@@ -3639,6 +3846,13 @@ fn format_hex_u64(value: u64) -> String {
 
 fn format_zero_bytes(bytes: usize) -> String {
     format!("0x{}", "00".repeat(bytes))
+}
+
+fn format_execution_requests(requests: &[AlloyBytes]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|request| format!("0x{}", hex::encode(request.as_ref())))
+        .collect()
 }
 
 fn zero_address() -> String {
@@ -3818,6 +4032,38 @@ fn build_error(id: &Value, code: i64, message: String) -> Value {
     })
 }
 
+async fn open_store_read_only_retry(path: &Path, deadline: Duration) -> Result<Store> {
+    timeout(deadline, async {
+        loop {
+            match Store::open_read_only(path, DbMetrics::new()) {
+                Ok(store) => return Ok::<Store, eyre::Report>(store),
+                Err(_) => sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .wrap_err("timed out opening store")?
+}
+
+async fn wait_for_pruned_metadata(
+    store: &Store,
+    height: Height,
+    deadline: Duration,
+) -> Result<()> {
+    timeout(deadline, async {
+        loop {
+            if let Some(metadata) = store.get_blob_metadata(height).await? &&
+                metadata.is_pruned()
+            {
+                return Ok::<(), eyre::Report>(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .wrap_err("timed out waiting for archived height to be pruned")?
+}
+
 // ============================================================================
 // Sync Fix Integration Tests (FIX-001, FIX-002, FIX-003)
 // ============================================================================
@@ -3877,12 +4123,16 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
                 let uploads = provider.wait_for_uploads(1, Duration::from_secs(30)).await?;
                 assert!(!uploads.is_empty(), "expected at least one archived upload");
 
-                // Step 3: Wait for pruning to occur on at least one validator
-                // Check that the archived height has been marked as pruned
-                sleep(Duration::from_secs(2)).await;
-
-                // Verify at least one validator has pruned the archived height
+                // Step 3: Wait for pruning to occur on all validators for the archived height
                 let archived_height = Height::new(uploads[0].height);
+                for idx in 0..3 {
+                    let node = network.node_ref(idx)?;
+                    let store_path = node.home.path().join("store.db");
+                    let store =
+                        open_store_read_only_retry(&store_path, Duration::from_secs(5)).await?;
+                    wait_for_pruned_metadata(&store, archived_height, Duration::from_secs(30))
+                        .await?;
+                }
 
                 // Stop node 0 to safely inspect its state
                 network.stop_node(0).await?;
@@ -3919,7 +4169,30 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
                 // This validates that sync works despite archived blobs
                 network.wait_for_height(3, target_height).await?;
 
-                // Step 6: Verify node 3 has the correct blob metadata for all heights
+                // Step 6: Verify node 3 executed archived heights via newPayloadV4
+                let expected_requests =
+                    format_execution_requests(&sample_execution_requests_for_height(archived_height));
+                let stub_guard = network.nodes[3].stub_state.lock().await;
+                let archived_call = stub_guard
+                    .new_payload_requests
+                    .iter()
+                    .find(|(height, _)| *height == archived_height.as_u64())
+                    .cloned();
+                assert!(
+                    archived_call.is_some(),
+                    "expected engine newPayloadV4 for archived height {}",
+                    archived_height
+                );
+                let archived_call = archived_call.expect("archived call present");
+                assert_eq!(
+                    archived_call.1,
+                    expected_requests,
+                    "execution requests mismatch for archived height {}",
+                    archived_height
+                );
+                drop(stub_guard);
+
+                // Step 7: Verify node 3 has the correct blob metadata for all heights
                 // It should have metadata even for archived heights
                 network.stop_node(3).await?;
                 let synced_node = network.node_ref(3)?;
@@ -3935,6 +4208,34 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
                         height
                     );
                 }
+                let decided = synced_store
+                    .get_decided_value(archived_height)
+                    .await?
+                    .expect("synced node missing decided value for archived height");
+                let block_data =
+                    synced_store.get_block_data(archived_height, decided.certificate.round).await?;
+                assert!(
+                    block_data.is_some(),
+                    "synced node missing block data for archived height {}",
+                    archived_height
+                );
+                let execution_requests = synced_store
+                    .get_execution_requests(archived_height, decided.certificate.round)
+                    .await?;
+                assert!(
+                    execution_requests.is_some(),
+                    "synced node missing execution requests for archived height {}",
+                    archived_height
+                );
+                let metadata = synced_store
+                    .get_blob_metadata(archived_height)
+                    .await?
+                    .expect("synced node missing BlobMetadata for archived height");
+                assert!(
+                    metadata.is_pruned(),
+                    "synced node should mark archived height {} as pruned",
+                    archived_height
+                );
 
                 Ok(())
             })
@@ -3953,9 +4254,10 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
 ///
 /// ## Background (MetadataOnly sync)
 ///
-/// Following the Lighthouse pattern, blocks outside the Data Availability window can be
-/// imported without blob sidecars. The key requirement is that the execution payload
-/// must still be available.
+    /// Following the Lighthouse pattern, blocks outside the blob-retention boundary can be
+    /// imported without blob sidecars. In Load Network, that boundary is defined by
+    /// successful archive notices rather than a fixed DA window. The key requirement is
+    /// that the execution payload must still be available.
 ///
 /// ## What this test validates
 ///
@@ -4027,6 +4329,15 @@ async fn full_node_metadataonly_sync_returns_payload() -> Result<()> {
                 assert!(
                     !payload_bytes.is_empty(),
                     "execution payload bytes should not be empty"
+                );
+                let execution_requests = state
+                    .get_execution_requests(archived_height, round)
+                    .await?
+                    .unwrap_or_default();
+                assert!(
+                    !execution_requests.is_empty(),
+                    "execution requests should be retained for archived height {}",
+                    archived_height
                 );
 
                 // Step 4: Verify archive notices exist

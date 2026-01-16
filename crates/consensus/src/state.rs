@@ -2028,6 +2028,7 @@ where
         // Industry standard (Lighthouse, Prysm, Teku): FCU first, then newPayload.
         // Only do this in sync mode (blobs_already_decided) to avoid extra latency in normal consensus.
         let block_hash = execution_payload.payload_inner.payload_inner.block_hash;
+        #[allow(clippy::collapsible_if)] // Nested if is more readable here
         if blobs_already_decided {
             if let Err(e) = notifier.set_latest_forkchoice_state(block_hash).await {
                 // Only ignore SyncingForkchoice errors - EL may not have parent yet during sync.

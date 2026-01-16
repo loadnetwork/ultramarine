@@ -291,7 +291,7 @@ The suite currently contains:
 - `full_node_restream_multi_validator` – end-to-end restream between two real validators to ensure sidecar transmission, metrics, and commit bookkeeping match the state-level harness
 - `full_node_value_sync_inclusion_proof_failure` – corrupt a blob inclusion proof inside a ValueSync package and verify the full-node state rejects it, records the sync failure, and leaves no blobs behind
 - `full_node_blob_blobless_sequence_behaves` – commit a blobbed → blobless → blobbed sequence in the real state and assert metrics/blobs match expectations
-- `full_node_store_pruning_retains_recent_heights` – override the decided-history retention window (`Store::prune()`), commit eight blobbed heights, and ensure decided values are pruned while blob bytes remain (no blob-byte retention window)
+- `full_node_store_pruning_preserves_decided_history` – override the retention window (`Store::prune()`), commit eight blobbed heights, and ensure decided values + block data are retained while blob bytes remain (archive notices drive pruning)
 - `full_node_sync_package_roundtrip` – ingest a synthetic `SyncedValuePackage::Full` and confirm the node promotes blobs/metadata immediately before commit
 - `full_node_value_sync_proof_failure` – tamper with blob proofs (not commitments/inclusion proofs) to cover the remaining sync failure path
 
