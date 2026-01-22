@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     convert::TryFrom,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_rpc_types_engine::{ExecutionPayloadV3, PayloadStatus, PayloadStatusEnum};
@@ -42,6 +42,7 @@ use ultramarine_types::{
     blob_metadata::BlobMetadata,
     codec::proto::ProtobufCodec,
     consensus_block_metadata::ConsensusBlockMetadata,
+    constants::{LOAD_MAX_FUTURE_DRIFT_SECS, LOAD_MIN_BLOCK_TIME_SECS},
     context::LoadContext,
     engine_api::{ExecutionBlock, ExecutionPayloadHeader, load_prev_randao},
     ethereum_compat::{
@@ -1196,23 +1197,21 @@ where
         }
 
         // Re-assemble the proposal from its parts with KZG verification and storage
-        let (value, data, execution_requests, has_blobs) = match self
-            .assemble_and_store_blobs(parts.clone())
-            .await
-        {
-            Ok((value, data, execution_requests, has_blobs)) => {
-                (value, data, execution_requests, has_blobs)
-            }
-            Err(e) => {
-                error!(
-                    height = %self.current_height,
-                    round = %self.current_round,
-                    error = %e,
-                    "Received proposal with invalid blob KZG proofs or storage failure, rejecting"
-                );
-                return Ok(None);
-            }
-        };
+        let (value, data, execution_requests, has_blobs) =
+            match self.assemble_and_store_blobs(parts.clone()).await {
+                Ok((value, data, execution_requests, has_blobs)) => {
+                    (value, data, execution_requests, has_blobs)
+                }
+                Err(e) => {
+                    error!(
+                        height = %self.current_height,
+                        round = %self.current_round,
+                        error = %e,
+                        "Received proposal rejected during assembly"
+                    );
+                    return Ok(None);
+                }
+            };
 
         // Track blob rounds for cleanup
         if has_blobs {
@@ -1571,16 +1570,48 @@ where
                             "Commitment count mismatch between metadata and sidecars"
                         );
                         // FIX-004: Log cleanup errors instead of silently ignoring with .ok()
-                        if let Err(cleanup_err) = self.blob_engine.drop_round(height, round_i64).await {
+                        if let Err(cleanup_err) =
+                            self.blob_engine.drop_round(height, round_i64).await
+                        {
                             warn!(
                                 height = %height,
                                 round = %round,
                                 error = %cleanup_err,
-                                "Failed to cleanup blobs after commitment mismatch"
+                                "Failed to cleanup blobs after commitment count mismatch"
                             );
+                            self.blob_metrics.record_cleanup_failure();
                         }
                         self.record_sync_failure();
+                        self.blob_metrics.record_sync_package_rejected();
                         return Ok(None);
+                    }
+
+                    // FIX-003: Check for duplicate blob indices - malicious peers could send
+                    // sidecars with the same index to bypass commitment count checks.
+                    let mut seen_indices = HashSet::new();
+                    for sidecar in &blob_sidecars {
+                        if !seen_indices.insert(sidecar.index) {
+                            error!(
+                                height = %height,
+                                round = %round,
+                                blob_index = %sidecar.index,
+                                "Duplicate blob index detected in sidecars"
+                            );
+                            if let Err(cleanup_err) =
+                                self.blob_engine.drop_round(height, round_i64).await
+                            {
+                                warn!(
+                                    height = %height,
+                                    round = %round,
+                                    error = %cleanup_err,
+                                    "Failed to cleanup blobs after duplicate index detection"
+                                );
+                                self.blob_metrics.record_cleanup_failure();
+                            }
+                            self.record_sync_failure();
+                            self.blob_metrics.record_sync_package_rejected();
+                            return Ok(None);
+                        }
                     }
 
                     let mut mismatch = false;
@@ -1601,9 +1632,31 @@ where
                     }
 
                     if mismatch {
-                        self.blob_engine.drop_round(height, round_i64).await.ok();
-                        self.store.delete_blob_metadata_undecided(height, round).await.ok();
+                        // FIX-002: Log cleanup errors instead of silently ignoring with .ok()
+                        if let Err(cleanup_err) =
+                            self.blob_engine.drop_round(height, round_i64).await
+                        {
+                            warn!(
+                                height = %height,
+                                round = %round,
+                                error = %cleanup_err,
+                                "Failed to cleanup blobs after commitment content mismatch"
+                            );
+                            self.blob_metrics.record_cleanup_failure();
+                        }
+                        if let Err(cleanup_err) =
+                            self.store.delete_blob_metadata_undecided(height, round).await
+                        {
+                            warn!(
+                                height = %height,
+                                round = %round,
+                                error = %cleanup_err,
+                                "Failed to delete blob metadata after commitment content mismatch"
+                            );
+                            self.blob_metrics.record_cleanup_failure();
+                        }
                         self.record_sync_failure();
+                        self.blob_metrics.record_sync_package_rejected();
                         return Ok(None);
                     }
 
@@ -1619,8 +1672,20 @@ where
                                 error = %e,
                                 "Blob sidecar verification failed during sync"
                             );
-                            self.blob_engine.drop_round(height, round_i64).await.ok();
+                            // FIX-002: Log cleanup errors instead of silently ignoring with .ok()
+                            if let Err(cleanup_err) =
+                                self.blob_engine.drop_round(height, round_i64).await
+                            {
+                                warn!(
+                                    height = %height,
+                                    round = %round,
+                                    error = %cleanup_err,
+                                    "Failed to cleanup blobs after verification failure"
+                                );
+                                self.blob_metrics.record_cleanup_failure();
+                            }
                             self.record_sync_failure();
+                            self.blob_metrics.record_sync_package_rejected();
                             return Ok(None);
                         }
                     };
@@ -1654,17 +1719,49 @@ where
                     }
                 };
 
-                // Hardening: Assert that validated signed header's parent_root matches
+                // Hardening: Verify that validated signed header's parent_root matches
                 // store-derived root. This invariant must always hold: the
                 // proposer's parent_root (from blob sidecars) should equal what we
                 // derive from our decided store.
-                if let Some(ref signed_header) = validated_signed_header {
-                    debug_assert_eq!(
-                        signed_header.message.parent_root, parent_blob_root,
-                        "INVARIANT VIOLATION: Validated blob sidecar parent_root {:?} does not match \
-                         store-derived parent_root {:?} at height {}",
-                        signed_header.message.parent_root, parent_blob_root, height
+                // FIX-001: Use hard check instead of debug_assert (doesn't run in release builds).
+                if let Some(ref signed_header) = validated_signed_header &&
+                    signed_header.message.parent_root != parent_blob_root
+                {
+                    error!(
+                        height = %height,
+                        round = %round,
+                        sidecar_parent_root = ?signed_header.message.parent_root,
+                        store_parent_root = ?parent_blob_root,
+                        "INVARIANT VIOLATION: Validated blob sidecar parent_root does not match \
+                         store-derived parent_root"
                     );
+                    // FIX-001: Cleanup blobs that were already marked decided before rejecting.
+                    // mark_decided was called earlier, so we must drop them now.
+                    if let Err(cleanup_err) =
+                        self.blob_engine.drop_round(height, round.as_i64()).await
+                    {
+                        warn!(
+                            height = %height,
+                            round = %round,
+                            error = %cleanup_err,
+                            "Failed to cleanup blobs after parent_root mismatch"
+                        );
+                        self.blob_metrics.record_cleanup_failure();
+                    }
+                    if let Err(cleanup_err) =
+                        self.store.delete_blob_metadata_undecided(height, round).await
+                    {
+                        warn!(
+                            height = %height,
+                            round = %round,
+                            error = %cleanup_err,
+                            "Failed to cleanup blob metadata after parent_root mismatch"
+                        );
+                        self.blob_metrics.record_cleanup_failure();
+                    }
+                    self.record_sync_failure();
+                    self.blob_metrics.record_sync_package_rejected();
+                    return Ok(None);
                 }
 
                 let proposer_index = self
@@ -2026,29 +2123,68 @@ where
         // FIX: Send FCU BEFORE newPayload during sync to give EL sync target.
         // Without this, EL returns SYNCING indefinitely because it doesn't know where to sync.
         // Industry standard (Lighthouse, Prysm, Teku): FCU first, then newPayload.
-        // Only do this in sync mode (blobs_already_decided) to avoid extra latency in normal consensus.
+        // Only do this in sync mode (blobs_already_decided) to avoid extra latency in normal
+        // consensus. FIX-005: Add retry logic for FCU during sync - EL may need time to
+        // process parent blocks.
         let block_hash = execution_payload.payload_inner.payload_inner.block_hash;
         #[allow(clippy::collapsible_if)] // Nested if is more readable here
-        if blobs_already_decided {
-            if let Err(e) = notifier.set_latest_forkchoice_state(block_hash).await {
-                // Only ignore SyncingForkchoice errors - EL may not have parent yet during sync.
-                // Other errors (INVALID, transport) should be logged as warnings.
-                if e.downcast_ref::<ultramarine_execution::ExecutionError>()
-                    .map(|ee| matches!(ee, ultramarine_execution::ExecutionError::SyncingForkchoice { .. }))
-                    .unwrap_or(false)
-                {
-                    debug!(
-                        height = %height,
-                        block_hash = ?block_hash,
-                        "FCU before newPayload returned SYNCING (expected during sync)"
-                    );
-                } else {
-                    warn!(
-                        height = %height,
-                        block_hash = ?block_hash,
-                        error = %e,
-                        "FCU before newPayload failed with unexpected error"
-                    );
+        if blobs_already_decided || self.el_degraded {
+            let fcu_start = Instant::now();
+            let mut fcu_backoff = self.execution_retry.initial_backoff;
+            let fcu_timeout = self.execution_retry.new_payload_sync_timeout; // Use sync timeout for FCU too
+
+            loop {
+                match notifier.set_latest_forkchoice_state(block_hash).await {
+                    Ok(_) => {
+                        debug!(
+                            height = %height,
+                            block_hash = ?block_hash,
+                            "FCU before newPayload succeeded"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        // Check if it's a SYNCING error - may need retry as EL catches up
+                        let is_syncing = e
+                            .downcast_ref::<ultramarine_execution::ExecutionError>()
+                            .map(|ee| {
+                                matches!(
+                                    ee,
+                                    ultramarine_execution::ExecutionError::SyncingForkchoice { .. }
+                                )
+                            })
+                            .unwrap_or(false);
+
+                        if is_syncing && fcu_start.elapsed() < fcu_timeout {
+                            debug!(
+                                height = %height,
+                                block_hash = ?block_hash,
+                                elapsed = ?fcu_start.elapsed(),
+                                "FCU before newPayload returned SYNCING, retrying..."
+                            );
+                            sleep(fcu_backoff).await;
+                            fcu_backoff = (fcu_backoff * 2).min(self.execution_retry.max_backoff);
+                            continue;
+                        }
+
+                        // Log appropriately based on error type
+                        if is_syncing {
+                            debug!(
+                                height = %height,
+                                block_hash = ?block_hash,
+                                elapsed = ?fcu_start.elapsed(),
+                                "FCU before newPayload timed out with SYNCING, proceeding to newPayload"
+                            );
+                        } else {
+                            warn!(
+                                height = %height,
+                                block_hash = ?block_hash,
+                                error = %e,
+                                "FCU before newPayload failed with unexpected error"
+                            );
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -2065,7 +2201,8 @@ where
         // After EL restarts (or heavy load), Engine API can return SYNCING while it catches up on
         // internal validation. Treat SYNCING as transient and retry instead of forcing a full
         // consensus restart loop.
-        // Use shorter timeout during sync mode (blobs_already_decided) since FCU already gave EL the target.
+        // Use shorter timeout during sync mode (blobs_already_decided) since FCU already gave EL
+        // the target.
         let sync_timeout = if blobs_already_decided {
             self.execution_retry.new_payload_sync_timeout
         } else {
@@ -2229,8 +2366,10 @@ where
             timestamp: execution_payload.timestamp(),
             prev_randao: expected_prev_randao,
         };
+        // Always advance consensus-visible head so validators can validate parent links
+        // even when the execution layer is lagging.
+        self.latest_block = Some(execution_block);
         if forkchoice_applied {
-            self.latest_block = Some(execution_block);
             self.executed_height = height;
             self.clear_el_degraded();
         }
@@ -2590,6 +2729,26 @@ where
                             continue;
                         };
 
+                        // FIX-007: Get blob count from metadata BEFORE deleting so we can
+                        // record the correct orphaned blob count (not just 1 per round).
+                        let blob_count = match self
+                            .store
+                            .get_blob_metadata_undecided(certificate.height, Round::new(round_u32))
+                            .await
+                        {
+                            Ok(Some(metadata)) => usize::from(metadata.blob_count()),
+                            Ok(None) => 0,
+                            Err(e) => {
+                                warn!(
+                                    height = %certificate.height,
+                                    round = round,
+                                    error = %e,
+                                    "Failed to get blob metadata for orphaned round"
+                                );
+                                0
+                            }
+                        };
+
                         if let Err(e) = self
                             .store
                             .delete_blob_metadata_undecided(
@@ -2614,13 +2773,16 @@ where
                                 error = %e,
                                 "Failed to drop orphaned blobs for failed round"
                             );
+                            self.blob_metrics.record_cleanup_failure();
                             // Don't fail commit - this is cleanup
-                        } else {
+                        } else if blob_count > 0 {
                             debug!(
                                 height = %certificate.height,
                                 round = round,
+                                blob_count = blob_count,
                                 "Dropped orphaned blobs for failed round"
                             );
+                            self.blob_metrics.record_orphaned_blobs_dropped(blob_count);
                         }
                     }
                 }
@@ -3117,6 +3279,18 @@ where
             Value::from_bytes(data.clone())
         };
 
+        if let Some(metadata) = metadata_opt.as_ref() {
+            // Validator-side protocol rules for proposal timestamps.
+            self.validate_proposed_timestamp(
+                metadata.execution_payload_header.timestamp,
+                metadata.execution_payload_header.parent_hash,
+                parts.height,
+                parts.round,
+            )?;
+        } else {
+            return Err("Missing execution payload metadata for timestamp validation".into());
+        }
+
         if has_blobs {
             let metadata = metadata_opt
                 .as_ref()
@@ -3220,6 +3394,54 @@ where
             validity: Validity::Valid,
         };
         Ok((proposed_value, data, execution_requests, has_blobs))
+    }
+
+    fn validate_proposed_timestamp(
+        &self,
+        proposed_ts: u64,
+        proposed_parent_hash: BlockHash,
+        height: Height,
+        round: Round,
+    ) -> Result<(), String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| format!("System time unavailable at height {} round {}", height, round))?
+            .as_secs();
+
+        if proposed_ts > now + LOAD_MAX_FUTURE_DRIFT_SECS {
+            return Err(format!(
+                "Timestamp too far in future at height {} round {}: proposed_ts={} now={} max_drift={}",
+                height, round, proposed_ts, now, LOAD_MAX_FUTURE_DRIFT_SECS
+            ));
+        }
+
+        let latest_block = self
+            .latest_block
+            .as_ref()
+            .ok_or_else(|| "latest_block is None after initialization".to_string())?;
+        if proposed_parent_hash != latest_block.block_hash {
+            return Err(format!(
+                "Parent hash mismatch at height {} round {}: proposed_parent={} latest_parent={}",
+                height, round, proposed_parent_hash, latest_block.block_hash
+            ));
+        }
+        let parent_ts = latest_block.timestamp;
+
+        if proposed_ts <= parent_ts {
+            return Err(format!(
+                "Timestamp not > parent at height {} round {}: proposed_ts={} parent_ts={}",
+                height, round, proposed_ts, parent_ts
+            ));
+        }
+
+        if proposed_ts < parent_ts + LOAD_MIN_BLOCK_TIME_SECS {
+            return Err(format!(
+                "Timestamp violates min block time at height {} round {}: proposed_ts={} parent_ts={} min={}",
+                height, round, proposed_ts, parent_ts, LOAD_MIN_BLOCK_TIME_SECS
+            ));
+        }
+
+        Ok(())
     }
 
     async fn verify_blob_sidecars(

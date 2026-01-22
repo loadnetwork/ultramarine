@@ -69,7 +69,7 @@
     - name: Assert root filesystem usage below threshold
       ansible.builtin.assert:
         that:
-          - loadnet_root_pct < (loadnet_root_fs_max_pct_value | int)
+          - (loadnet_root_pct | int) < (loadnet_root_fs_max_pct_value | int)
         fail_msg: "root filesystem usage {{ loadnet_root_pct }}% exceeds limit {{ loadnet_root_fs_max_pct_value }}%"
 
     - name: Check /var/log size
@@ -86,7 +86,7 @@
     - name: Assert /var/log size below threshold
       ansible.builtin.assert:
         that:
-          - loadnet_log_dir_mb < (loadnet_log_dir_max_mb_value | int)
+          - (loadnet_log_dir_mb | int) < (loadnet_log_dir_max_mb_value | int)
         fail_msg: "/var/log size {{ loadnet_log_dir_mb }}MB exceeds limit {{ loadnet_log_dir_max_mb_value }}MB"
 
     - name: Check data mount exists (/var/lib/loadnet)

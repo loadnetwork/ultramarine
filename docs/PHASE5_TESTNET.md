@@ -30,8 +30,8 @@ Phases 1-4 delivered a complete blob sidecar implementation with 23/23 passing u
 - ✅ Spam tool with `--blobs` flag generates valid blob transactions with real KZG proofs
 - ✅ **12 blob-specific metrics** (verification time, storage size, lifecycle transitions)
 - ✅ **9 blob dashboard panels** added to Grafana for blob observability
-- ✅ **Integration harness delivered by Team Beta** (Tier 0: 3 fast consensus smokes; Tier 1: 14 full-node scenarios with real KZG blobs)
-- ✅ **Integration results**: Tier 0 3/3 (default in `make test`); Tier 1 14/14 via `make itest-node` and CI’s `itest-tier1`
+- ✅ **Integration harness delivered by Team Beta** (Tier 0: 3 fast consensus smokes; Tier 1: 17 full-node scenarios with real KZG blobs)
+- ✅ **Integration results**: Tier 0 3/3 (default in `make test`); Tier 1 17/17 via `make itest-node` and CI’s `itest-tier1`
 
 ### Goals
 
@@ -211,7 +211,7 @@ spammer()
 - Provide helper functions (`wait_for_height`, `restart_node`, `scrape_metrics`).
 - Cover two tiers:
   - **Tier 0 (component)**: 3 fast consensus tests in `crates/consensus/tests` (`blob_roundtrip`, `blob_sync_commitment_mismatch`, `blob_pruning`) with real RocksDB + KZG; run in `make test` and CI by default.
-  - **Tier 1 (full node)**: 14 ignored tests in `crates/test/tests/full_node` spanning quorum blob roundtrip, restream (multi-validator/multi-round), multi-height restarts, ValueSync ingestion/failure, blobless sequences, pruning, sync package roundtrip, and EL rejection; run via `make itest-node` and CI job `itest-tier1` (RUST_TEST_THREADS=1, artifacts on failure).
+  - **Tier 1 (full node)**: 17 ignored tests in `crates/test/tests/full_node` spanning quorum blob roundtrip, restream (multi-validator/multi-round), multi-height restarts, ValueSync ingestion/failure, blobless sequences, pruning, sync package roundtrip, EL rejection, and invalid/missing EL payload data; run via `make itest-node` and CI job `itest-tier1` (RUST_TEST_THREADS=1, artifacts on failure).
 - Clarify restart behavior: spawn multiple `App` instances within one Tokio runtime, reusing the same on-disk store to simulate restarts.
 - Shared helpers `State::process_synced_package` and `State::process_decided_certificate` keep integration tests aligned with production handlers.
 - Use `serial_test` or per-test temp dirs to keep runs deterministic (2–5 s each).
@@ -224,13 +224,13 @@ spammer()
 **Progress (2025-11-08)**
 
 - ✅ Refactored the Decided path into `State::process_decided_certificate` plus the `ExecutionNotifier` trait so the app handler and integration tests share identical logic.
-- ✅ Expanded full-node coverage (14 scenarios) with proposer/follower commit assertions and execution-layer rejection coverage via `MockExecutionNotifier`.
+- ✅ Expanded full-node coverage (17 scenarios) with proposer/follower commit assertions, execution-layer rejection coverage, and invalid/missing EL payload data checks.
 - ✅ Hardened sync coverage with commitment-mismatch and inclusion-proof regression tests.
 
 **Progress (2025-11-18)**
 
 - ✅ Tier 1 harness de-flaked: `full_node_restart_mid_height` now gates on `StartedHeight`; `wait_for_nodes_at` helper replaces ad-hoc joins/sleeps.
-- ✅ Full Tier 1 suite passes via `make itest-node` (14/14, event-driven).
+- ✅ Full Tier 1 suite passes via `make itest-node` (17/17, event-driven).
 
 - Wrap existing Docker workflow in an opt-in smoke target:
   - Boot stack (`make all` steps).
@@ -284,7 +284,7 @@ spammer()
 
 - `full_node_restart_mid_height` now waits on `Event::StartedHeight` before crashing a node, forcing a deterministic ValueSync replay (no sleeps/race).
 - Multi-node waits use a shared helper (`wait_for_nodes_at`) to avoid timing drifts; peer warm-up remains the only fixed delay.
-- Full Tier 1 suite passes via `cargo test -p ultramarine-test --test full_node -- --ignored --nocapture` (14/14 scenarios).
+- Full Tier 1 suite passes via `cargo test -p ultramarine-test --test full_node -- --ignored --nocapture` (17/17 scenarios).
 
 ---
 
@@ -598,5 +598,15 @@ Phase 5 Testnet is complete when:
 
 ---
 
-**Last Updated**: 2025-10-28
-**Next Review**: After Phase A completion (metrics instrumentation)
+**Last Updated**: 2026-01-16
+**Next Review**: Phase 7+ features
+
+---
+
+## Post-Phase 5: Sync Layer Security Review (2026-01-16)
+
+A comprehensive security review of `process_synced_package` and related sync/cleanup paths was completed. See [FINAL_PLAN.md - Sync Layer Security Review](./FINAL_PLAN.md#sync-layer-security-review--complete-2026-01-16) for:
+- 7 fixes implemented (FIX-001 through FIX-007)
+- New metrics: `sync_packages_rejected_total`, `cleanup_failures_total`
+- Fixed `orphaned_blobs_dropped` counting (now counts blobs, not rounds)
+- Outstanding issue: `test_sequential_multi_height_sync_chain_continuity` marked `#[ignore]`

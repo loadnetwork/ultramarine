@@ -14,7 +14,7 @@
     loadnet_wipe_monitoring: "{{ wipe_monitoring | default(true) }}"
     loadnet_wipe_containers: "{{ wipe_containers | default(true) }}"
     loadnet_wipe_blockscout: "{{ wipe_blockscout | default(true) }}"
-    loadnet_blockscout_base_dir: "/opt/loadnet/current/blockscout"
+    loadnet_blockscout_base_dir: "{{ loadnet_net_dir }}/blockscout"
     loadnet_blockscout_data_dir: "/var/lib/blockscout"
     loadnet_wipe_confirm: "{{ wipe_confirm | default('') }}"
   tasks:
@@ -183,12 +183,52 @@
       ignore_errors: true
       when: loadnet_wipe_blockscout | bool
 
+    - name: Stop nginx-blockscout service (best-effort)
+      ansible.builtin.systemd:
+        name: nginx-blockscout.service
+        state: stopped
+        enabled: false
+      ignore_errors: true
+      when: loadnet_wipe_blockscout | bool
+
+    - name: Detect docker binary (wipe)
+      ansible.builtin.command: which docker
+      register: blockscout_docker_path
+      changed_when: false
+      failed_when: false
+      when: loadnet_wipe_blockscout | bool
+
+    - name: Detect docker compose v2 (wipe)
+      ansible.builtin.command: "{{ blockscout_docker_path.stdout }} compose version"
+      register: blockscout_compose_v2_check
+      changed_when: false
+      failed_when: false
+      when:
+        - loadnet_wipe_blockscout | bool
+        - blockscout_docker_path.rc == 0
+
+    - name: Detect docker-compose v1 (wipe)
+      ansible.builtin.command: which docker-compose
+      register: blockscout_compose_v1_path
+      changed_when: false
+      failed_when: false
+      when: loadnet_wipe_blockscout | bool
+
+    - name: Set blockscout compose command (wipe)
+      ansible.builtin.set_fact:
+        blockscout_compose_cmd: >-
+          {{
+            (blockscout_docker_path.rc | default(1) == 0 and blockscout_compose_v2_check.rc | default(1) == 0)
+              | ternary(blockscout_docker_path.stdout + ' compose', blockscout_compose_v1_path.stdout | default(''))
+          }}
+      when: loadnet_wipe_blockscout | bool
+
     - name: Remove blockscout containers and volumes via docker compose
       ansible.builtin.shell: |
         set -euo pipefail
-        if [ -d "{{ loadnet_blockscout_base_dir }}" ] && [ -f "{{ loadnet_blockscout_base_dir }}/docker-compose.yml" ]; then
+        if [ -d "{{ loadnet_blockscout_base_dir }}" ] && [ -f "{{ loadnet_blockscout_base_dir }}/docker-compose.yml" ] && [ -n "{{ blockscout_compose_cmd | default('') }}" ]; then
           cd "{{ loadnet_blockscout_base_dir }}"
-          docker compose down -v --remove-orphans 2>/dev/null || true
+          {{ blockscout_compose_cmd }} down -v --remove-orphans 2>/dev/null || true
         fi
       args:
         executable: /bin/bash
@@ -197,6 +237,12 @@
     - name: Wipe blockscout data directory (postgres, redis, logs)
       ansible.builtin.file:
         path: "{{ loadnet_blockscout_data_dir }}"
+        state: absent
+      when: loadnet_wipe_blockscout | bool
+
+    - name: Wipe blockscout base directory (compose/envs)
+      ansible.builtin.file:
+        path: "{{ loadnet_blockscout_base_dir }}"
         state: absent
       when: loadnet_wipe_blockscout | bool
 

@@ -16,6 +16,7 @@ use ultramarine_types::{
     address::Address,
     aliases::{B256, BlockHash, Bytes},
     blob::BlobsBundle,
+    constants::LOAD_MIN_BLOCK_TIME_SECS,
     engine_api::load_prev_randao,
 };
 
@@ -26,6 +27,20 @@ use crate::{
     eth_rpc::{EthRpc, alloy_impl::AlloyEthRpc},
     transport::{http::HttpTransport, ipc::IpcTransport},
 };
+
+// Pluggable time source to keep tests deterministic without global state.
+trait TimeProvider: Send + Sync {
+    fn now_secs(&self) -> u64;
+}
+
+#[derive(Debug, Default)]
+struct SystemTimeProvider;
+
+impl TimeProvider for SystemTimeProvider {
+    fn now_secs(&self) -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    }
+}
 
 // TODO: USE GENERICS instead of dyn
 
@@ -40,6 +55,8 @@ pub struct ExecutionClient {
     pub engine: Arc<dyn EngineApi>,
     /// The standard Eth1 JSON-RPC client, used for things like fetching logs.
     pub eth: Arc<dyn EthRpc>,
+    /// Injected clock for deterministic testing and controlled timestamping.
+    time_provider: Arc<dyn TimeProvider>,
     forkchoice_with_attrs_max_attempts: usize,
     forkchoice_with_attrs_delay: Duration,
 }
@@ -93,6 +110,7 @@ impl ExecutionClient {
         Ok(Self {
             engine: engine_client,
             eth: eth_client,
+            time_provider: Arc::new(SystemTimeProvider),
             forkchoice_with_attrs_max_attempts,
             forkchoice_with_attrs_delay,
         })
@@ -104,6 +122,16 @@ impl ExecutionClient {
 
     pub fn eth(&self) -> &dyn EthRpc {
         self.eth.as_ref()
+    }
+
+    fn current_unix_time(&self) -> u64 {
+        self.time_provider.now_secs()
+    }
+
+    /// Compute next block timestamp. Must be called AFTER throttling ensures now >= parent +
+    /// min_block_time.
+    fn next_block_timestamp(&self, parent_timestamp: u64) -> u64 {
+        std::cmp::max(self.current_unix_time(), parent_timestamp + LOAD_MIN_BLOCK_TIME_SECS)
     }
 
     pub async fn check_capabilities(&self) -> eyre::Result<()> {
@@ -197,10 +225,14 @@ impl ExecutionClient {
     ) -> eyre::Result<ExecutionPayloadResult> {
         debug!("🟠 generate_block on top of {:?}", latest_block);
         let block_hash = latest_block.block_hash;
+
+        // Compute expected timestamp ONCE, use for request AND validation
+        let expected_timestamp = self.next_block_timestamp(latest_block.timestamp);
+
         let payload_attributes = PayloadAttributes {
             // Unix timestamp for when the payload is expected to be executed.
-            // It should be greater than that of forkchoiceState.headBlockHash.
-            timestamp: latest_block.timestamp + 1,
+            // Wall-clock aligned: max(now, parent + LOAD_MIN_BLOCK_TIME_SECS)
+            timestamp: expected_timestamp,
 
             // Load fixes PREVRANDAO to the canonical constant (Arbitrum-style) so no
             // application assumes entropy from it; the consensus doc captures this contract.
@@ -261,11 +293,11 @@ impl ExecutionClient {
                 // See how payload is constructed: https://github.com/ethereum/consensus-specs/blob/v1.1.5/specs/merge/validator.md#block-proposal
                 let payload_result = self.engine.get_payload(payload_id).await?;
                 let payload_inner = &payload_result.payload.payload_inner.payload_inner;
-                // Safety: ensure the payload we got is actually built on top of the requested head.
-                // This protects against EL quirks when returning ACCEPTED + payloadId.
+                // Safety: ensure the payload we got is actually built on top of the requested head
+                // with OUR expected timestamp. This protects against EL quirks.
                 if payload_inner.parent_hash != block_hash ||
                     payload_inner.block_number != latest_block.block_number + 1 ||
-                    payload_inner.timestamp != latest_block.timestamp + 1
+                    payload_inner.timestamp != expected_timestamp
                 {
                     return Err(eyre::Report::new(ExecutionError::BuiltPayloadMismatch {
                         head: block_hash,
@@ -383,10 +415,14 @@ impl ExecutionClient {
         debug!("🟠 generate_block_with_blobs on top of {:?}", latest_block);
 
         let block_hash = latest_block.block_hash;
+
+        // Compute expected timestamp ONCE, use for request AND validation
+        let expected_timestamp = self.next_block_timestamp(latest_block.timestamp);
+
         let payload_attributes = PayloadAttributes {
             // Unix timestamp for when the payload is expected to be executed.
-            // It should be greater than that of forkchoiceState.headBlockHash.
-            timestamp: latest_block.timestamp + 1,
+            // Wall-clock aligned: max(now, parent + LOAD_MIN_BLOCK_TIME_SECS)
+            timestamp: expected_timestamp,
 
             // Load fixes PREVRANDAO to the canonical constant (Arbitrum-style) so no
             // application assumes entropy from it; the consensus doc captures this contract.
@@ -458,10 +494,24 @@ impl ExecutionClient {
 
                 let blob_count = blob_bundle.as_ref().map(|b| b.len()).unwrap_or(0);
                 let payload_inner = &payload_result.payload.payload_inner.payload_inner;
-                // Safety: ensure the payload we got is actually built on top of the requested head.
+                let has_blob_gas = payload_result.payload.blob_gas_used > 0;
+                if has_blob_gas && blob_count == 0 {
+                    return Err(eyre::eyre!(
+                        "Engine API spec violation: payload has blob_gas_used={} but blobs bundle is empty",
+                        payload_result.payload.blob_gas_used
+                    ));
+                }
+                if !has_blob_gas && blob_count > 0 {
+                    return Err(eyre::eyre!(
+                        "Engine API spec violation: blobs bundle has {} blobs but payload blob_gas_used=0",
+                        blob_count
+                    ));
+                }
+                // Safety: ensure the payload we got is actually built on top of the requested head
+                // with OUR expected timestamp. This protects against EL quirks.
                 if payload_inner.parent_hash != block_hash ||
                     payload_inner.block_number != latest_block.block_number + 1 ||
-                    payload_inner.timestamp != latest_block.timestamp + 1
+                    payload_inner.timestamp != expected_timestamp
                 {
                     return Err(eyre::Report::new(ExecutionError::BuiltPayloadMismatch {
                         head: block_hash,
@@ -474,6 +524,7 @@ impl ExecutionClient {
                     block_hash = ?payload_inner.block_hash,
                     parent_hash = ?payload_inner.parent_hash,
                     block_number = payload_inner.block_number,
+                    timestamp = payload_inner.timestamp,
                     txs = payload_inner.transactions.len(),
                     blob_gas_used = payload_result.payload.blob_gas_used,
                     excess_blob_gas = payload_result.payload.excess_blob_gas,
@@ -676,14 +727,20 @@ impl<'a> crate::notifier::ExecutionNotifier for ExecutionClientNotifier<'a> {
 mod tests {
     use std::sync::Mutex;
 
+    use alloy_eips::eip7685::Requests;
     use alloy_primitives::{
         Address as AlloyAddress, B256 as AB256, Bloom, Bytes as AlloyBytes, FixedBytes, U256,
     };
     use alloy_rpc_types::{BlockNumberOrTag, Filter, Log, SyncStatus};
-    use alloy_rpc_types_engine::{ExecutionPayloadV1, ExecutionPayloadV2, PayloadId};
+    use alloy_rpc_types_engine::{
+        BlobsBundleV1, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4, ExecutionPayloadV1,
+        ExecutionPayloadV2, PayloadId,
+    };
     use alloy_rpc_types_txpool::{TxpoolInspect, TxpoolStatus};
+    use serde_json::json;
 
     use super::*;
+    use crate::transport::{JsonRpcRequest, JsonRpcResponse, Transport};
 
     struct NoopEthRpc;
 
@@ -710,6 +767,18 @@ mod tests {
         }
         async fn txpool_inspect(&self) -> eyre::Result<TxpoolInspect> {
             Err(eyre::eyre!("not implemented"))
+        }
+    }
+
+    const TEST_NOW: u64 = 1_700_000_001;
+
+    struct FixedTimeProvider {
+        time: u64,
+    }
+
+    impl TimeProvider for FixedTimeProvider {
+        fn now_secs(&self) -> u64 {
+            self.time
         }
     }
 
@@ -823,6 +892,23 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct StaticTransport {
+        result: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl Transport for StaticTransport {
+        async fn send(&self, req: &JsonRpcRequest) -> eyre::Result<JsonRpcResponse> {
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: Some(self.result.clone()),
+                error: None,
+                id: req.id,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn accepted_with_payload_id_proceeds_to_get_payload() {
         let head = AB256::from([9u8; 32]);
@@ -840,6 +926,7 @@ mod tests {
         let client = ExecutionClient {
             engine: Arc::new(engine),
             eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
         };
@@ -875,6 +962,7 @@ mod tests {
         let client = ExecutionClient {
             engine: Arc::new(engine),
             eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 10,
             forkchoice_with_attrs_delay: Duration::from_millis(1),
         };
@@ -882,6 +970,36 @@ mod tests {
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
         let res = client.generate_block(&latest_block).await.unwrap();
         assert_eq!(res.payload.payload_inner.payload_inner.parent_hash, head);
+    }
+
+    #[tokio::test]
+    async fn syncing_with_payload_id_is_error() {
+        let head = AB256::from([9u8; 32]);
+        let payload_id = PayloadId::from(FixedBytes::<8>::from([5u8; 8]));
+        let payload_result = sample_payload_result(AB256::from([7u8; 32]), head, 2);
+
+        let engine = ScriptedEngineApi::new(
+            vec![ForkchoiceUpdated {
+                payload_status: PayloadStatus::new(PayloadStatusEnum::Syncing, None),
+                payload_id: Some(payload_id),
+            }],
+            payload_result,
+        );
+
+        let client = ExecutionClient {
+            engine: Arc::new(engine),
+            eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
+            forkchoice_with_attrs_max_attempts: 1,
+            forkchoice_with_attrs_delay: Duration::from_millis(0),
+        };
+
+        let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
+        let err = client.generate_block(&latest_block).await.unwrap_err();
+        assert!(
+            err.to_string().contains("SYNCING with non-null payloadId"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -903,6 +1021,7 @@ mod tests {
         let client = ExecutionClient {
             engine: Arc::new(engine),
             eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
         };
@@ -937,6 +1056,7 @@ mod tests {
         let client = ExecutionClient {
             engine: Arc::new(engine),
             eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 5,
             forkchoice_with_attrs_delay: Duration::from_millis(1),
         };
@@ -966,6 +1086,7 @@ mod tests {
         let client = ExecutionClient {
             engine: Arc::new(engine),
             eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 2,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
         };
@@ -978,6 +1099,44 @@ mod tests {
                 Some(ExecutionError::NoPayloadIdForBuild { head: h }) if *h == head
             ),
             "expected NoPayloadIdForBuild, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_payload_accepts_extra_fields() {
+        let payload_result =
+            sample_payload_result(AB256::from([7u8; 32]), AB256::from([6u8; 32]), 2);
+
+        let envelope_v3 = ExecutionPayloadEnvelopeV3 {
+            execution_payload: payload_result.payload.clone(),
+            block_value: U256::ZERO,
+            blobs_bundle: BlobsBundleV1 { commitments: vec![], proofs: vec![], blobs: vec![] },
+            should_override_builder: false,
+        };
+
+        let envelope_v4 = ExecutionPayloadEnvelopeV4 {
+            envelope_inner: envelope_v3,
+            execution_requests: Requests::new(Vec::new()),
+        };
+
+        let mut value = serde_json::to_value(&envelope_v4).expect("serialize envelope");
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("extraField".to_string(), json!("0x01"));
+        }
+        if let Some(payload_obj) =
+            value.get_mut("executionPayload").and_then(|inner| inner.as_object_mut())
+        {
+            payload_obj.insert("extraPayloadField".to_string(), json!("0x02"));
+        }
+
+        let transport = StaticTransport { result: value };
+        let client = EngineApiClient::new(transport);
+        let payload_id = PayloadId::from(FixedBytes::<8>::from([9u8; 8]));
+        let result = client.get_payload(payload_id).await.expect("getPayload with extras");
+
+        assert_eq!(
+            result.payload.payload_inner.payload_inner.block_number,
+            payload_result.payload.payload_inner.payload_inner.block_number
         );
     }
 }

@@ -520,7 +520,7 @@ Peer scores: {}
 
 ---
 
-## FIX-001: store.prune() - НЕ удалять decided данные
+## FIX-001: store.prune() - do not delete decided data
 
 **Status:** ✅ COMPLETED
 **Started:** 2026-01-15
@@ -536,7 +536,7 @@ Peer scores: {}
 
 ---
 
-## FIX-002: get_earliest_height() - возвращать genesis
+## FIX-002: get_earliest_height() - return genesis
 
 **Status:** ✅ COMPLETED
 **File:** `crates/consensus/src/state.rs:302-320`

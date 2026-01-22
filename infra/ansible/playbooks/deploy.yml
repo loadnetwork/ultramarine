@@ -56,10 +56,26 @@
         fail_msg: "manifest changed since lockfile was generated; rerun netgen (make net-gen NET={{ net }})"
   roles:
     - common
+    - role: blockscout_host
+      when:
+        - loadnet_lock.blockscout is defined
+        - loadnet_lock.blockscout.enabled | default(false)
+      vars:
+        blockscout_host_strict: false
     - { role: firewall, when: apply_firewall | bool }
     - load_reth
     - ultramarine
     - monitoring
+    - role: blockscout
+      when:
+        - loadnet_lock.blockscout is defined
+        - loadnet_lock.blockscout.enabled | default(false)
+        - inventory_hostname == loadnet_lock.blockscout.host
+    - role: blockscout_nginx
+      when:
+        - loadnet_lock.blockscout is defined
+        - loadnet_lock.blockscout.enabled | default(false)
+        - inventory_hostname == loadnet_lock.blockscout.host
   post_tasks:
     - name: Point /opt/loadnet/current to selected network
       ansible.builtin.file:
@@ -141,6 +157,33 @@
       when:
         - loadnet_grafana_admin_password_value is defined
         - (loadnet_grafana_admin_password_value | length) > 0
+
+    - name: Start blockscout service (if enabled)
+      ansible.builtin.systemd:
+        name: blockscout.service
+        enabled: true
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
+      when: blockscout_enabled | default(false) | bool
+
+    - name: Wait for Blockscout backend health (if enabled)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ blockscout_backend_port | default(4000) }}/api/v2/stats"
+        method: GET
+        return_content: true
+        timeout: 10
+      register: blockscout_health
+      retries: 30
+      delay: 10
+      until: blockscout_health.status == 200
+      changed_when: false
+      when: blockscout_enabled | default(false) | bool
+
+    - name: Start nginx-blockscout service (if enabled)
+      ansible.builtin.systemd:
+        name: nginx-blockscout.service
+        enabled: true
+        state: "{{ (restart_on_deploy | bool) | ternary('restarted', 'started') }}"
+      when: blockscout_nginx_enabled | default(false) | bool
 
     - name: Enforce Grafana admin password from deploy bundle
       ansible.builtin.command:

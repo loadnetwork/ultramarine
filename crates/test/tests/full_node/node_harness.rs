@@ -129,6 +129,8 @@ type PayloadPlan = Arc<dyn Fn(Height) -> usize + Send + Sync>;
 type SyncPlan = Arc<dyn Fn(Height) -> bool + Send + Sync>;
 type ParentOverridePlan = Arc<dyn Fn(Height) -> Option<B256> + Send + Sync>;
 type StubStateHook = Arc<dyn Fn(usize, &mut StubState) + Send + Sync>;
+type ExecutionRequestsPlan = Arc<dyn Fn(Height) -> Vec<AlloyBytes> + Send + Sync>;
+type BundleOmitPlan = Arc<dyn Fn(Height) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 struct HarnessConfig {
@@ -249,6 +251,32 @@ impl FullNodeTestBuilder {
             let plan = Arc::clone(&plan);
             let per_node: ParentOverridePlan = Arc::new(move |height| plan(index, height));
             state.set_parent_override_plan(per_node);
+        })
+    }
+
+    #[allow(dead_code)]
+    fn with_el_execution_requests_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> Vec<AlloyBytes> + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: ExecutionRequestsPlan = Arc::new(move |height| plan(index, height));
+            state.set_execution_requests_plan(per_node);
+        })
+    }
+
+    #[allow(dead_code)]
+    fn with_el_omit_blobs_bundle_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> bool + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: BundleOmitPlan = Arc::new(move |height| plan(index, height));
+            state.set_omit_bundle_plan(per_node);
         })
     }
 
@@ -1992,6 +2020,39 @@ async fn full_node_el_syncing_degrades_node() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires full-node harness; run via make itest-node"]
 #[serial(full_node)]
+async fn full_node_el_syncing_still_sends_fcu() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(2)
+        .with_el_sync_plan(|index, height| index == 0 && height.as_u64() >= 2)
+        .run(|network| {
+            Box::pin(async move {
+                // Let the healthy node advance; node 0 should still attempt FCU while syncing.
+                network.wait_for_nodes_at(&[1], Height::new(3)).await?;
+                sleep(Duration::from_millis(200)).await;
+
+                let guard = network.nodes[0].stub_state.lock().await;
+                let syncing_heads: Vec<u64> = guard
+                    .forkchoice_heads
+                    .iter()
+                    .copied()
+                    .filter(|head| *head >= 2)
+                    .collect();
+
+                eyre::ensure!(
+                    !syncing_heads.is_empty(),
+                    "expected FCU calls while EL syncing; recorded heads={:?}",
+                    guard.forkchoice_heads
+                );
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
 async fn full_node_el_transient_syncing_recovers() -> Result<()> {
     init_test_logging();
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -2039,6 +2100,91 @@ async fn full_node_el_transient_bad_payload_parent_recovers() -> Result<()> {
         .run(|network| {
             Box::pin(async move {
                 network.wait_for_nodes_at(&[0, 1], Height::new(3)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_rejects_invalid_execution_requests_from_el() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .with_el_execution_requests_plan(|_, height| {
+            if height.as_u64() == 1 {
+                invalid_execution_requests_out_of_order()
+            } else {
+                sample_execution_requests_for_height(height)
+            }
+        })
+        .run(|network| {
+            Box::pin(async move {
+                sleep(Duration::from_secs(2)).await;
+
+                let guard = network.nodes[0].stub_state.lock().await;
+                eyre::ensure!(
+                    guard.new_payload_requests.is_empty(),
+                    "unexpected newPayload calls despite invalid execution requests"
+                );
+                eyre::ensure!(
+                    guard.latest_block.block_number == 0,
+                    "stub head advanced despite invalid execution requests"
+                );
+                drop(guard);
+
+                network.stop_node(0).await?;
+                let node = network.node_ref(0)?;
+                let store_path = node.home.path().join("store.db");
+                let store = open_store_read_only_retry(&store_path, Duration::from_secs(5)).await?;
+                let decided = store.get_decided_value(Height::new(1)).await?;
+                assert!(
+                    decided.is_none(),
+                    "height 1 should not be decided with invalid execution requests"
+                );
+
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_rejects_payload_without_blobs_bundle() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .with_payload_plan(|_| 1)
+        .with_el_omit_blobs_bundle_plan(|_, height| height.as_u64() == 1)
+        .run(|network| {
+            Box::pin(async move {
+                sleep(Duration::from_secs(2)).await;
+
+                let guard = network.nodes[0].stub_state.lock().await;
+                eyre::ensure!(
+                    guard.new_payload_requests.is_empty(),
+                    "unexpected newPayload calls despite missing blobs bundle"
+                );
+                eyre::ensure!(
+                    guard.latest_block.block_number == 0,
+                    "stub head advanced despite missing blobs bundle"
+                );
+                drop(guard);
+
+                network.stop_node(0).await?;
+                let node = network.node_ref(0)?;
+                let store_path = node.home.path().join("store.db");
+                let store = open_store_read_only_retry(&store_path, Duration::from_secs(5)).await?;
+                let decided = store.get_decided_value(Height::new(1)).await?;
+                assert!(
+                    decided.is_none(),
+                    "height 1 should not be decided with missing blobs bundle"
+                );
+
                 Ok(())
             })
         })
@@ -2893,6 +3039,14 @@ async fn open_state_ready(node: &NodeProcess) -> Result<State<BlobEngineImpl<Roc
     let (mut state, _) = open_state_and_metrics(node)?;
     state.seed_genesis_blob_metadata().await?;
     state.hydrate_blob_parent_root().await?;
+    // Initialize latest_block for timestamp validation (required after BUG-011 fix)
+    state.latest_block = Some(ExecutionBlock {
+        block_hash: B256::ZERO,
+        block_number: 0,
+        parent_hash: B256::ZERO,
+        timestamp: 0,
+        prev_randao: load_prev_randao(),
+    });
     Ok(state)
 }
 
@@ -2902,6 +3056,14 @@ async fn open_state_ready_with_metrics(
     let (mut state, metrics) = open_state_and_metrics(node)?;
     state.seed_genesis_blob_metadata().await?;
     state.hydrate_blob_parent_root().await?;
+    // Initialize latest_block for timestamp validation (required after BUG-011 fix)
+    state.latest_block = Some(ExecutionBlock {
+        block_hash: B256::ZERO,
+        block_number: 0,
+        parent_hash: B256::ZERO,
+        timestamp: 0,
+        prev_randao: load_prev_randao(),
+    });
     Ok((state, metrics))
 }
 
@@ -3469,7 +3631,10 @@ struct StubState {
     payload_plan: Option<PayloadPlan>,
     sync_plan: Option<SyncPlan>,
     parent_override_plan: Option<ParentOverridePlan>,
+    execution_requests_plan: Option<ExecutionRequestsPlan>,
+    omit_bundle_plan: Option<BundleOmitPlan>,
     new_payload_requests: Vec<(u64, Vec<String>)>,
+    forkchoice_heads: Vec<u64>,
 }
 
 impl StubState {
@@ -3481,7 +3646,10 @@ impl StubState {
             payload_plan,
             sync_plan: None,
             parent_override_plan: None,
+            execution_requests_plan: None,
+            omit_bundle_plan: None,
             new_payload_requests: Vec::new(),
+            forkchoice_heads: Vec::new(),
         }
     }
 
@@ -3503,6 +3671,25 @@ impl StubState {
 
     fn parent_override_for(&self, height: Height) -> Option<B256> {
         self.parent_override_plan.as_ref().and_then(|plan| plan(height))
+    }
+
+    fn set_execution_requests_plan(&mut self, plan: ExecutionRequestsPlan) {
+        self.execution_requests_plan = Some(plan);
+    }
+
+    fn execution_requests_for(&self, height: Height) -> Vec<AlloyBytes> {
+        self.execution_requests_plan
+            .as_ref()
+            .map(|plan| plan(height))
+            .unwrap_or_else(|| sample_execution_requests_for_height(height))
+    }
+
+    fn set_omit_bundle_plan(&mut self, plan: BundleOmitPlan) {
+        self.omit_bundle_plan = Some(plan);
+    }
+
+    fn omit_bundle_for(&self, height: Height) -> bool {
+        self.omit_bundle_plan.as_ref().map(|plan| plan(height)).unwrap_or(false)
     }
 }
 
@@ -3639,6 +3826,7 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
     let mut guard = state.lock().await;
 
     if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) {
+        guard.forkchoice_heads.push(head_height);
         let head = Height::new(head_height);
         if guard.is_syncing_for(head) {
             return Ok(json!({
@@ -3664,7 +3852,7 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
         }
     }
 
-    if let Some(_attrs) = payload_attrs {
+    if let Some(attrs) = payload_attrs {
         // Generate payload for next height (latest + 1)
         let next_height = Height::new(guard.latest_block.block_number + 1);
 
@@ -3684,15 +3872,21 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
         let blob_count = guard.blob_count_for_height(next_height);
         let bundle = if blob_count == 0 { None } else { Some(sample_blob_bundle(blob_count)) };
         let mut payload = sample_execution_payload_v3_for_height(next_height, bundle.as_ref());
-        if let Some(parent_override) = guard.parent_override_for(next_height) {
-            payload.payload_inner.payload_inner.parent_hash = parent_override;
-        }
-        let execution_requests = sample_execution_requests_for_height(next_height);
+        let parent_hash =
+            guard.parent_override_for(next_height).unwrap_or(forkchoice.head_block_hash);
+        payload.payload_inner.payload_inner.parent_hash = parent_hash;
+        payload.payload_inner.payload_inner.timestamp = attrs.timestamp;
+        payload.payload_inner.payload_inner.prev_randao = attrs.prev_randao;
+        payload.payload_inner.payload_inner.fee_recipient = attrs.suggested_fee_recipient;
+        payload.payload_inner.withdrawals = attrs.withdrawals.unwrap_or_default();
+        let response_bundle =
+            if guard.omit_bundle_for(next_height) { None } else { bundle.clone() };
+        let execution_requests = guard.execution_requests_for(next_height);
         let payload_id = guard.next_payload_id;
         guard.next_payload_id += 1;
         guard.pending.insert(
             payload_id.to_be_bytes(),
-            (payload.clone(), bundle.clone(), execution_requests),
+            (payload.clone(), response_bundle, execution_requests),
         );
 
         Ok(json!({
@@ -3771,6 +3965,7 @@ async fn handle_new_payload(
     if is_v4 {
         let requests: Vec<String> =
             serde_json::from_value(params[3].clone()).wrap_err("decode execution requests")?;
+        validate_execution_request_strings(&requests)?;
         guard.new_payload_requests.push((payload.block_number, requests));
     }
 
@@ -3849,10 +4044,46 @@ fn format_zero_bytes(bytes: usize) -> String {
 }
 
 fn format_execution_requests(requests: &[AlloyBytes]) -> Vec<String> {
-    requests
-        .iter()
-        .map(|request| format!("0x{}", hex::encode(request.as_ref())))
-        .collect()
+    requests.iter().map(|request| format!("0x{}", hex::encode(request.as_ref()))).collect()
+}
+
+fn invalid_execution_requests_out_of_order() -> Vec<AlloyBytes> {
+    vec![AlloyBytes::copy_from_slice(&[0x05, 0xAA]), AlloyBytes::copy_from_slice(&[0x04, 0xBB])]
+}
+
+fn parse_execution_request_hex(request: &str, index: usize) -> Result<Vec<u8>> {
+    let trimmed = request
+        .strip_prefix("0x")
+        .ok_or_else(|| eyre::eyre!("execution request {} missing 0x prefix", index))?;
+    hex::decode(trimmed).wrap_err_with(|| format!("execution request {} has invalid hex", index))
+}
+
+fn validate_execution_request_strings(requests: &[String]) -> Result<()> {
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    let mut prev_type: Option<u8> = None;
+    for (idx, request) in requests.iter().enumerate() {
+        let bytes = parse_execution_request_hex(request, idx)?;
+        if bytes.len() <= 1 {
+            return Err(eyre::eyre!("execution request {} must include type byte and payload", idx));
+        }
+        let request_type = bytes[0];
+        if let Some(prev) = prev_type &&
+            request_type <= prev
+        {
+            return Err(eyre::eyre!(
+                "execution requests must be strictly increasing by type (index {}, prev {}, current {})",
+                idx,
+                prev,
+                request_type
+            ));
+        }
+        prev_type = Some(request_type);
+    }
+
+    Ok(())
 }
 
 fn zero_address() -> String {
@@ -4045,11 +4276,7 @@ async fn open_store_read_only_retry(path: &Path, deadline: Duration) -> Result<S
     .wrap_err("timed out opening store")?
 }
 
-async fn wait_for_pruned_metadata(
-    store: &Store,
-    height: Height,
-    deadline: Duration,
-) -> Result<()> {
+async fn wait_for_pruned_metadata(store: &Store, height: Height, deadline: Duration) -> Result<()> {
     timeout(deadline, async {
         loop {
             if let Some(metadata) = store.get_blob_metadata(height).await? &&
@@ -4086,8 +4313,8 @@ async fn wait_for_pruned_metadata(
 ///
 /// 1. Validators produce blobbed blocks and archive them (blobs are pruned)
 /// 2. A new node (fullnode) joins and attempts to sync from genesis
-/// 3. Despite blob bytes being pruned, the fullnode receives `MetadataOnly` sync packages
-///    with execution payloads
+/// 3. Despite blob bytes being pruned, the fullnode receives `MetadataOnly` sync packages with
+///    execution payloads
 /// 4. The fullnode successfully imports blocks and reaches the same height as validators
 ///
 /// ## Expected behavior after fixes
@@ -4170,8 +4397,9 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
                 network.wait_for_height(3, target_height).await?;
 
                 // Step 6: Verify node 3 executed archived heights via newPayloadV4
-                let expected_requests =
-                    format_execution_requests(&sample_execution_requests_for_height(archived_height));
+                let expected_requests = format_execution_requests(
+                    &sample_execution_requests_for_height(archived_height),
+                );
                 let stub_guard = network.nodes[3].stub_state.lock().await;
                 let archived_call = stub_guard
                     .new_payload_requests
@@ -4185,8 +4413,7 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
                 );
                 let archived_call = archived_call.expect("archived call present");
                 assert_eq!(
-                    archived_call.1,
-                    expected_requests,
+                    archived_call.1, expected_requests,
                     "execution requests mismatch for archived height {}",
                     archived_height
                 );
@@ -4196,8 +4423,10 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
                 // It should have metadata even for archived heights
                 network.stop_node(3).await?;
                 let synced_node = network.node_ref(3)?;
-                let synced_store =
-                    Store::open_read_only(synced_node.home.path().join("store.db"), DbMetrics::new())?;
+                let synced_store = Store::open_read_only(
+                    synced_node.home.path().join("store.db"),
+                    DbMetrics::new(),
+                )?;
 
                 for h in 1..=target_height.as_u64() {
                     let height = Height::new(h);
@@ -4254,10 +4483,10 @@ async fn full_node_genesis_sync_with_archived_blobs() -> Result<()> {
 ///
 /// ## Background (MetadataOnly sync)
 ///
-    /// Following the Lighthouse pattern, blocks outside the blob-retention boundary can be
-    /// imported without blob sidecars. In Load Network, that boundary is defined by
-    /// successful archive notices rather than a fixed DA window. The key requirement is
-    /// that the execution payload must still be available.
+/// Following the Lighthouse pattern, blocks outside the blob-retention boundary can be
+/// imported without blob sidecars. In Load Network, that boundary is defined by
+/// successful archive notices rather than a fixed DA window. The key requirement is
+/// that the execution payload must still be available.
 ///
 /// ## What this test validates
 ///
@@ -4326,14 +4555,9 @@ async fn full_node_metadataonly_sync_returns_payload() -> Result<()> {
                     archived_height
                 );
                 let payload_bytes = block_data.unwrap();
-                assert!(
-                    !payload_bytes.is_empty(),
-                    "execution payload bytes should not be empty"
-                );
-                let execution_requests = state
-                    .get_execution_requests(archived_height, round)
-                    .await?
-                    .unwrap_or_default();
+                assert!(!payload_bytes.is_empty(), "execution payload bytes should not be empty");
+                let execution_requests =
+                    state.get_execution_requests(archived_height, round).await?.unwrap_or_default();
                 assert!(
                     !execution_requests.is_empty(),
                     "execution requests should be retained for archived height {}",
@@ -4459,7 +4683,7 @@ async fn full_node_sync_retry_on_no_payload() -> Result<()> {
 
                 let package_without_payload = SyncedValuePackage::MetadataOnly {
                     value,
-                    archive_notices: vec![], // No archive notices either
+                    archive_notices: vec![],     // No archive notices either
                     execution_payload_ssz: None, // KEY: No payload
                     execution_requests: vec![],
                 };
@@ -4488,7 +4712,8 @@ async fn full_node_sync_retry_on_no_payload() -> Result<()> {
 
                 // Step 5: Now process a valid Full package (simulating successful retry)
                 let bundle_retry = sample_blob_bundle(1);
-                let payload_retry = sample_execution_payload_v3_for_height(height, Some(&bundle_retry));
+                let payload_retry =
+                    sample_execution_payload_v3_for_height(height, Some(&bundle_retry));
                 let (proposed_retry, payload_bytes_retry, maybe_sidecars_retry) =
                     propose_with_optional_blobs(
                         &mut node_state,
@@ -4501,7 +4726,8 @@ async fn full_node_sync_retry_on_no_payload() -> Result<()> {
                 let sidecars_retry = maybe_sidecars_retry.expect("sidecars expected");
 
                 let header_retry = ExecutionPayloadHeader::from_payload(&payload_retry, None)?;
-                let metadata_retry = ValueMetadata::new(header_retry, bundle_retry.commitments.clone());
+                let metadata_retry =
+                    ValueMetadata::new(header_retry, bundle_retry.commitments.clone());
                 let value_retry = StateValue::new(metadata_retry);
 
                 let package_full = SyncedValuePackage::Full {
@@ -4513,7 +4739,8 @@ async fn full_node_sync_retry_on_no_payload() -> Result<()> {
                 };
 
                 let encoded_full = package_full.encode().map_err(|e| eyre::eyre!(e))?;
-                let decoded_full = SyncedValuePackage::decode(&encoded_full).map_err(|e| eyre::eyre!(e))?;
+                let decoded_full =
+                    SyncedValuePackage::decode(&encoded_full).map_err(|e| eyre::eyre!(e))?;
 
                 let result_retry = node_state
                     .process_synced_package(height, round, validator_address, decoded_full)
@@ -4531,6 +4758,73 @@ async fn full_node_sync_retry_on_no_payload() -> Result<()> {
                 assert_eq!(synced_value.value.id(), proposed_retry.value.id());
 
                 drop(node_state);
+                Ok(())
+            })
+        })
+        .await
+}
+
+/// Reject invalid execution requests during sync.
+///
+/// Engine API v4 requires execution requests to be strictly ordered by type and
+/// to include a non-empty payload. Invalid requests must be rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_sync_rejects_invalid_execution_requests() -> Result<()> {
+    init_test_logging();
+
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .start_height(Some(Height::new(0)))
+        .run(|network| {
+            Box::pin(async move {
+                network.stop_node(0).await?;
+                let validator_address = network.node_address(0)?;
+                let mut node_state = {
+                    let node = network.node_ref(0)?;
+                    open_state_ready(node).await?
+                };
+
+                let height = Height::new(0);
+                let round = Round::new(0);
+                let bundle = sample_blob_bundle(1);
+                let payload = sample_execution_payload_v3_for_height(height, Some(&bundle));
+                let payload_bytes = Bytes::from(payload.as_ssz_bytes());
+                let invalid_requests = invalid_execution_requests_out_of_order();
+
+                let requests_hash =
+                    Some(ExecutionPayloadHeader::compute_requests_hash(&invalid_requests));
+                let header = ExecutionPayloadHeader::from_payload(&payload, requests_hash)?;
+                let metadata = ValueMetadata::new(header, bundle.commitments.clone());
+                let value = StateValue::new(metadata);
+
+                let package = SyncedValuePackage::MetadataOnly {
+                    value,
+                    archive_notices: vec![],
+                    execution_payload_ssz: Some(payload_bytes),
+                    execution_requests: invalid_requests,
+                };
+
+                let encoded = package.encode().map_err(|e| eyre::eyre!(e))?;
+                let decoded = SyncedValuePackage::decode(&encoded).map_err(|e| eyre::eyre!(e))?;
+                let result = node_state
+                    .process_synced_package(height, round, validator_address, decoded)
+                    .await;
+
+                assert!(result.is_err(), "invalid execution requests should fail validation");
+                let err = result.expect_err("invalid execution requests should error");
+                assert!(
+                    err.to_string().contains("Invalid execution requests"),
+                    "unexpected error: {err}"
+                );
+
+                let decided = node_state.get_decided_value(height).await?;
+                assert!(
+                    decided.is_none(),
+                    "invalid execution requests should not mark height as decided"
+                );
+
                 Ok(())
             })
         })

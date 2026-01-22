@@ -47,6 +47,11 @@ pub struct Inner {
     // Restream/Sync metrics (counters)
     restream_rebuilds: Counter,
     sync_failures: Counter,
+
+    // Sync health metrics (FIX-007: additional sync health visibility)
+    sync_packages_rejected: Counter,
+    cleanup_failures: Counter,
+    orphaned_blobs_dropped: Counter,
 }
 
 impl Inner {
@@ -69,6 +74,10 @@ impl Inner {
 
             restream_rebuilds: Counter::default(),
             sync_failures: Counter::default(),
+
+            sync_packages_rejected: Counter::default(),
+            cleanup_failures: Counter::default(),
+            orphaned_blobs_dropped: Counter::default(),
         }
     }
 }
@@ -100,6 +109,9 @@ impl BlobEngineMetrics {
             stale_round_cleanup: self.stale_round_cleanup.get(),
             restream_rebuilds: self.restream_rebuilds.get(),
             sync_failures: self.sync_failures.get(),
+            sync_packages_rejected: self.sync_packages_rejected.get(),
+            cleanup_failures: self.cleanup_failures.get(),
+            orphaned_blobs_dropped: self.orphaned_blobs_dropped.get(),
         }
     }
 
@@ -189,6 +201,25 @@ impl BlobEngineMetrics {
                 "Blob sync/fetch failures",
                 metrics.sync_failures.clone(),
             );
+
+            // Sync health metrics (FIX-007)
+            registry.register(
+                "sync_packages_rejected",
+                "Sync packages rejected due to validation failures",
+                metrics.sync_packages_rejected.clone(),
+            );
+
+            registry.register(
+                "cleanup_failures",
+                "Failures during blob cleanup operations",
+                metrics.cleanup_failures.clone(),
+            );
+
+            registry.register(
+                "orphaned_blobs_dropped",
+                "Orphaned blobs dropped during reorg/fork handling",
+                metrics.orphaned_blobs_dropped.clone(),
+            );
         });
 
         metrics
@@ -264,6 +295,21 @@ impl BlobEngineMetrics {
     pub fn record_sync_failure(&self) {
         self.sync_failures.inc();
     }
+
+    /// Record rejected sync package (FIX-007)
+    pub fn record_sync_package_rejected(&self) {
+        self.sync_packages_rejected.inc();
+    }
+
+    /// Record cleanup failure (FIX-007)
+    pub fn record_cleanup_failure(&self) {
+        self.cleanup_failures.inc();
+    }
+
+    /// Record orphaned blobs dropped during reorg/fork handling (FIX-007)
+    pub fn record_orphaned_blobs_dropped(&self, count: usize) {
+        self.orphaned_blobs_dropped.inc_by(count as u64);
+    }
 }
 
 impl Default for BlobEngineMetrics {
@@ -299,4 +345,10 @@ pub struct MetricsSnapshot {
     pub restream_rebuilds: u64,
     /// Total sync failures recorded during blob processing.
     pub sync_failures: u64,
+    /// Total sync packages rejected due to validation failures.
+    pub sync_packages_rejected: u64,
+    /// Total cleanup failures during blob operations.
+    pub cleanup_failures: u64,
+    /// Total orphaned blobs dropped during reorg/fork handling.
+    pub orphaned_blobs_dropped: u64,
 }

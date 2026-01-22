@@ -227,7 +227,7 @@
     "public": {
       "genesis_json": {
         "path": "bundle/public/genesis.json",
-        "sha256": "2c1c4b35e2829d583b94ef8bd34e85675638307a86c6cf829f44ff74be72f6bc"
+        "sha256": "e05fced24b5e89bf948ba47262d57849352b521f9de048cd328538a0021c4797"
       }
     }
   }

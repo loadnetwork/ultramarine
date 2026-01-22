@@ -26,3 +26,6 @@ serde_yaml = "0.9.34"
 
 # Load-reth p2p key generation + enode derivation.
 k256 = { version = "0.13", features = ["ecdsa"] }
+
+# Human-readable duration parsing for sync config.
+humantime = "2.1"
