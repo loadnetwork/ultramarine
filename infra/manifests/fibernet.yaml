@@ -82,6 +82,18 @@ ports:
 # ValueSync must be enabled for multi-host networks.
 sync:
   enabled: true
+  # Fullnode-specific sync tuning for faster catch-up when syncing from genesis.
+  # These settings only apply to non-validator nodes (fullnode/rpc roles).
+  fullnode:
+    # Number of parallel sync requests (default: 5).
+    # Higher values allow faster sync but increase load on validators.
+    # Recommended: 20-30 for syncing a chain with millions of blocks.
+    parallel_requests: 20
+    # Timeout for sync requests (default: 10s).
+    # Increase with higher parallel_requests to avoid timeout storms.
+    request_timeout: "30s"
+    # Batch size for sync requests (default: 5).
+    batch_size: 10
 
 # Validators require archiver. The generator enforces presence of provider+token.
 archiver:

@@ -16,6 +16,7 @@ EnvironmentFile=/opt/loadnet/current/bundle/private/env/ultramarine-%i.env
 EnvironmentFile=-/opt/loadnet/current/bundle/private/ultramarine/secrets/%i.env
 
 ExecStartPre=/bin/bash -lc 'test -d "/var/lib/ultramarine/%i/config"'
+ExecStartPre=/bin/bash -lc 'docker pull $ULTRAMARINE_IMAGE'
 ExecStartPre=/bin/bash -lc 'for i in {1..60}; do if [ -S "$ULTRAMARINE_ENGINE_IPC_PATH" ]; then exit 0; fi; sleep 1; done; echo "engine IPC not ready: $ULTRAMARINE_ENGINE_IPC_PATH" >&2; exit 1'
 ExecStartPre=/bin/bash -lc 'docker rm -f ultramarine-%i >/dev/null 2>&1 || true'
 

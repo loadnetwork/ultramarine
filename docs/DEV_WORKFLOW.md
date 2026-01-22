@@ -19,7 +19,7 @@ This guide shows how to develop, run, test, and observe an Ultramarine local net
 - `crates/consensus`: state + store for proposals, blocks, certificates
 - `crates/types`: consensus types, Context, and Engine API JSON models
 - `crates/utils`: CLI utilities (`genesis`, `spam`)
-- `compose.yaml`: Reth x3 + Prometheus + Grafana stack
+- `compose.yaml`: Reth x3 + Prometheus + Grafana stack (local/dev only; fibernet uses systemd + bundle env)
 - `scripts/`: helper scripts (`add_peers.sh`, `spawn.bash`, tmux spawner)
 - `docs/`: design docs and this workflow guide
 
@@ -243,7 +243,7 @@ Located in `crates/consensus/tests/`, these tests provide rapid feedback during 
 **Command:** `make itest` or individual test via `cargo test -p ultramarine-consensus --test blob_roundtrip -- --nocapture`
 **Location:** `crates/consensus/tests/` (module-level integration tests)
 
-**Tier 1: Full Integration Tests (14 scenarios)**
+**Tier 1: Full Integration Tests (17 scenarios)**
 
 Located in `crates/test/tests/full_node.rs`, these tests provide comprehensive end-to-end coverage with real networking, WAL, and multi-node consensus. Each test boots real Ultramarine nodes (Malachite channel actors, WAL, libp2p) and drives blobbed proposals end-to-end using the Engine API stub.
 
@@ -265,7 +265,7 @@ Located in `crates/test/tests/full_node.rs`, these tests provide comprehensive e
 
 - **Run Tier 1 (full integration)**
   ```bash
-  make itest-node   # 14 tests, ~5-7 minutes total
+  make itest-node   # 17 tests, ~5-7 minutes total
   ```
 
 - **Run entire suite**
@@ -427,7 +427,7 @@ Recommended cadence:
   - Expected on Cancun without sidecars. Either avoid blobs or proceed to V4 sidecar integration (see blueprint doc).
 
 - High TPS measurements flatten:
-  - Increase EL txpool/gas settings in `compose.yaml`.
+  - Increase EL txpool/gas settings in `compose.yaml` for local dev, or in `ultramarine/infra/templates/systemd/load-reth@.service.j2` + bundle env for fibernet.
   - Tune spammer rate and RPC timeout (`reqwest` has 1s timeout by default in utils).
 
 ### Round‑0 Timeouts (Startup Race)

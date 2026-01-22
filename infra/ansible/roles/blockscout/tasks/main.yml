@@ -57,6 +57,28 @@
       - blockscout_compose_cmd | length > 0
     fail_msg: "docker compose not found; install docker-compose-plugin or docker-compose"
 
+- name: Ensure rsync is available (required for synchronize)
+  block:
+    - name: Install rsync (with cache update)
+      ansible.builtin.apt:
+        name: rsync
+        state: present
+        update_cache: true
+        cache_valid_time: "{{ loadnet_apt_cache_valid_time | default(3600) }}"
+        update_cache_retries: "{{ loadnet_apt_update_retries | default(10) }}"
+        update_cache_retry_max_delay: "{{ loadnet_apt_update_max_delay | default(30) }}"
+        lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
+  rescue:
+    - name: Warn about apt cache update failure
+      ansible.builtin.debug:
+        msg: "apt cache update failed; retrying rsync install without update_cache."
+    - name: Install rsync (without cache update)
+      ansible.builtin.apt:
+        name: rsync
+        state: present
+        update_cache: false
+        lock_timeout: "{{ loadnet_apt_lock_timeout | default(120) }}"
+
 - name: Ensure blockscout secrets dir exists (controller-side)
   ansible.builtin.file:
     path: "{{ net_dir }}/bundle/private/blockscout"
@@ -209,6 +231,18 @@
   become: false
   register: blockscout_frontend_src_stat
   run_once: true
+
+- name: Assert backend source or image is available
+  ansible.builtin.assert:
+    that:
+      - blockscout_backend_image_check.rc == 0 or blockscout_backend_src_stat.stat.exists
+    fail_msg: "Blockscout backend image not found and source missing; ensure wvm-blockscout is present or prebuild {{ blockscout_backend_image }}"
+
+- name: Assert frontend source or image is available
+  ansible.builtin.assert:
+    that:
+      - blockscout_frontend_image_check.rc == 0 or blockscout_frontend_src_stat.stat.exists
+    fail_msg: "Blockscout frontend image not found and source missing; ensure wvm-blockscout-frontend is present or prebuild {{ blockscout_frontend_image }}"
 
 - name: Ensure build directory exists on server
   ansible.builtin.file:

@@ -16,7 +16,7 @@ blockscout_nginx_ssl_cert: "/etc/letsencrypt/live/{{ blockscout_nginx_explorer_d
 blockscout_nginx_ssl_key: "/etc/letsencrypt/live/{{ blockscout_nginx_explorer_domain }}/privkey.pem"
 
 # Nginx directories
-blockscout_nginx_config_dir: "/opt/loadnet/current/nginx"
+blockscout_nginx_config_dir: "{{ (loadnet_net_dir | default('/opt/loadnet/current')) }}/nginx"
 blockscout_nginx_webroot: "/var/www/html"
 
 # Backend services (upstream addresses)

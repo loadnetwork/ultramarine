@@ -1,0 +1,72 @@
+groups:
+  - name: loadnet_alerts
+    rules:
+      # Node availability
+      - alert: NodeDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ '{{' }} $labels.instance {{ '}}' }} is down"
+          description: "Prometheus target {{ '{{' }} $labels.instance {{ '}}' }} has been down for more than 2 minutes."
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Memory usage is above 90% on {{ '{{' }} $labels.instance {{ '}}' }} (current value: {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}%)."
+
+      # Disk space low
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Disk usage on root filesystem is above 85% on {{ '{{' }} $labels.instance {{ '}}' }} (current value: {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}%)."
+
+      - alert: DiskSpaceCritical
+        expr: (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Disk usage on root filesystem is above 95% on {{ '{{' }} $labels.instance {{ '}}' }} (current value: {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}%)."
+
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "CPU usage is above 90% on {{ '{{' }} $labels.instance {{ '}}' }} for more than 10 minutes (current value: {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}%)."
+
+      # Transaction pool metrics (if available from load-reth)
+      # Alert at 200K pending (66% of 300K limit) to catch saturation early
+      - alert: TxPoolBacklog
+        expr: reth_txpool_pending > 200000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High txpool backlog on {{ '{{' }} $labels.node_id {{ '}}' }}"
+          description: "Transaction pool has more than 200,000 pending transactions on {{ '{{' }} $labels.node_id {{ '}}' }} (current: {{ '{{' }} $value {{ '}}' }}). Limit is 300K."
+
+      # Execution layer not producing blocks
+      - alert: NoBlocksProduced
+        expr: increase(reth_sync_checkpoint_number[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No blocks produced on {{ '{{' }} $labels.node_id {{ '}}' }}"
+          description: "No new blocks have been produced on {{ '{{' }} $labels.node_id {{ '}}' }} for 5 minutes."

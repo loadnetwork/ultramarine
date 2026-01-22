@@ -94,10 +94,12 @@ fn build_genesis_from_alloc(
         ..Default::default()
     }
     .with_gas_limit(LOAD_EXECUTION_GAS_LIMIT)
-    .with_timestamp(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs())
+    .with_timestamp(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs(),
+    )
     .with_extra_data(Bytes::from_static(b"Load Network Dev"))
     .with_difficulty(U256::ZERO)
     .with_mix_hash(B256::ZERO)

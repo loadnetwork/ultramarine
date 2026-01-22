@@ -10,7 +10,22 @@ loadnet_docker_log_max_size: "50m"
 loadnet_docker_log_max_file: "5"
 
 loadnet_el_http_bind: "0.0.0.0"
-loadnet_el_http_api: "eth,net,web3,txpool"
+loadnet_el_http_api: "eth,net,web3,txpool,debug,trace"
+
+# TxPool settings for high-throughput (10K+ TPS)
+# Sizing heuristics: target_tps * buffer_seconds
+#   - 10K TPS * 30 sec = 300K txs comfortable buffer
+#   - 10K TPS * 50 sec = 500K txs for bursts
+loadnet_el_txpool_pending_max_count: 300000
+loadnet_el_txpool_queued_max_count: 300000
+loadnet_el_txpool_max_pending_txns: 500000
+loadnet_el_txpool_max_new_txns: 50000
+loadnet_el_txpool_max_account_slots: 64
+# Size limits in MB (blobs are ~128KB each, 6 blobs/tx = ~768KB)
+# 2GB pending allows ~2600 blob txs or ~millions of regular txs
+loadnet_el_txpool_pending_max_size: 2048
+loadnet_el_txpool_queued_max_size: 2048
+loadnet_el_txpool_gas_limit: 2000000000
 
 loadnet_prometheus_bind: "127.0.0.1"
 loadnet_prometheus_port: 9090
@@ -25,7 +40,7 @@ loadnet_ultramarine_uid: 10002
 loadnet_ultramarine_gid: 10002
 loadnet_fix_ownership: true
 
-loadnet_journal_max_use: "2G"
+loadnet_journal_max_use: "4G"
 loadnet_journal_max_file_size: "200M"
 loadnet_journal_max_retention: "7day"
 loadnet_forward_journal_to_syslog: false

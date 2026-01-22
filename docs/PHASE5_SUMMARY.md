@@ -69,7 +69,7 @@ Phase 5 was organized into three sequential sub-phases:
 
 - **Integration harness**
   - **Tier 0 (component smokes)** live in `crates/consensus/tests` and cover happy-path proposal/commit, commitment mismatch rejection, and retention logic with real RocksDB + KZG. They run in `make test` and CI by default.
-  - **Tier 1 (full-node)** lives in `crates/test/tests/full_node` and boots Malachite channel actors, WAL, libp2p, and the application loop for 14 scenarios (quorum blob roundtrip, restream, restarts, ValueSync failures, pruning, etc.). Run via `make itest-node`; wired into CI in `itest-tier1` with failure artifacts.
+- **Tier 1 (full-node)** lives in `crates/test/tests/full_node` and boots Malachite channel actors, WAL, libp2p, and the application loop for 17 scenarios (quorum blob roundtrip, restream, restarts, ValueSync failures, pruning, invalid execution requests, missing blobs bundle, etc.). Run via `make itest-node`; wired into CI in `itest-tier1` with failure artifacts.
 
 **Key Design Decisions**:
 
@@ -82,12 +82,12 @@ Phase 5 was organized into three sequential sub-phases:
 ## What We Validated
 
 - **Tier 0 (consensus crate)**: 3 smokes (`blob_roundtrip`, `blob_sync_commitment_mismatch`, `blob_pruning`) validate proposer→commit happy path, metadata/sidecar consistency checks, and retention metrics with real KZG + RocksDB. These run in the default `make test` and CI.
-- **Tier 1 (full-node harness)**: 14 scenarios cover quorum blob roundtrip, restream across validators/rounds, multi-height restarts, ValueSync (happy and failure: commitment mismatch, inclusion proof failure), blobless sequences, pruning, sync package roundtrip, and EL rejection. Run via `make itest-node` (process-isolated) and in CI’s `itest-tier1` lane with artifacts on failure.
+- **Tier 1 (full-node harness)**: 17 scenarios cover quorum blob roundtrip, restream across validators/rounds, multi-height restarts, ValueSync (happy and failure: commitment mismatch, inclusion proof failure), blobless sequences, pruning, sync package roundtrip, EL rejection, and invalid/missing EL payload data. Run via `make itest-node` (process-isolated) and in CI’s `itest-tier1` lane with artifacts on failure.
 
 **Integration Test Results** (Phase 5B):
 
 - ✅ Tier 0: 3/3 passing with real KZG
-- ✅ Tier 1: 14/14 passing with real KZG, libp2p, WAL, channel actors
+- ✅ Tier 1: 17/17 passing with real KZG, libp2p, WAL, channel actors
 - ✅ Metrics accurately track operations (verifications, storage, lifecycle)
 - ✅ Blob lifecycle works correctly (undecided → decided → pruned)
 - ✅ Persistence survives restarts (RocksDB hydration)
@@ -132,7 +132,7 @@ blob_engine_verification_time_bucket{le="0.01"} 1158  # All < 10ms
 
 - **Verification throughput** – Batch KZG verification (c-kzg) validated hundreds of blobs without failures; `blob_engine_verification_time` histogram shows <50 ms P99 during testnet spam.
 - **Storage footprint** – Metrics track undecided/decided bytes. With 6 blobs per block, storage gauges confirm 6 × 131,072 B promoted and zero undecided leftovers.
-- **Test harness runtime** – Tier 0 smokes now run in ~8–10 s (3 scenarios); Tier 1 full-node suite runs separately via `make itest-node` (14 scenarios).
+- **Test harness runtime** – Tier 0 smokes now run in ~8–10 s (3 scenarios); Tier 1 full-node suite runs separately via `make itest-node` (17 scenarios).
 - **Spam campaign** – 60 s at 50 TPS (6 blobs/tx) exercised 1,158 blobs; the system maintained zero verification failures and matched versioned hashes against KZG commitments (see `docs/PHASE5_TESTNET.md:426-440`).
 
 ## Lessons Learned

@@ -656,7 +656,7 @@ spam-blobs: ## Spam all three EL nodes with blob transactions (60s @ 50 tps per 
 #   * blob_roundtrip: Happy path baseline
 #   * blob_sync_commitment_mismatch: Negative path validation
 #   * blob_pruning: Retention logic
-# - Tier1 (14 tests, via itest-node): Full integration with networking/WAL/libp2p
+# - Tier1 (17 tests, via itest-node): Full integration with networking/WAL/libp2p
 # To run all tests: make itest && make itest-node
 
 # Allow overriding offline mode (CI can set CARGO_NET_OFFLINE=false on cold caches).
@@ -689,7 +689,7 @@ itest-list: ## List Tier 0 component tests.
 
 .PHONY: itest-node
 itest-node: ## Run full-node (Tier 1) integration tests (process-isolated for determinism).
-	@echo "$(GREEN)Running Tier 1 full-node integration tests (14 tests, process-isolated)...$(NC)"
+	@echo "$(GREEN)Running Tier 1 full-node integration tests (17 tests, process-isolated)...$(NC)"
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_quorum_roundtrip -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_validator_restart_recovers -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_mid_height -- --ignored
@@ -703,8 +703,11 @@ itest-node: ## Run full-node (Tier 1) integration tests (process-isolated for de
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_blobless_sequence_behaves -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_store_pruning_preserves_decided_history -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_sync_package_roundtrip -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_sync_rejects_invalid_execution_requests -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_rejects_invalid_execution_requests_from_el -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_rejects_payload_without_blobs_bundle -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_proof_failure -- --ignored
-	@echo "$(GREEN)✅ All 14 Tier 1 tests passed!$(NC)"
+	@echo "$(GREEN)✅ All 17 Tier 1 tests passed!$(NC)"
 
 .PHONY: itest-node-archiver
 itest-node-archiver: ## Run Tier 1 archiver/prune full-node integration tests.

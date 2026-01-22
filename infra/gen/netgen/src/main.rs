@@ -141,6 +141,26 @@ struct ClPorts {
 #[derive(Clone, Debug, Deserialize)]
 struct Sync {
     enabled: bool,
+    /// Fullnode-specific sync tuning (optional).
+    /// These settings are applied only to non-validator nodes (fullnode/rpc roles)
+    /// to help them catch up faster when syncing from genesis.
+    #[serde(default)]
+    fullnode: Option<FullnodeSyncConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FullnodeSyncConfig {
+    /// Number of parallel sync requests (default: 5 for validators, higher for fullnodes).
+    /// Recommended: 20-30 for fullnodes syncing a large chain.
+    #[serde(default)]
+    parallel_requests: Option<usize>,
+    /// Timeout for sync requests (default: "10s").
+    /// Recommended: "30s" for fullnodes with high parallel_requests.
+    #[serde(default)]
+    request_timeout: Option<String>,
+    /// Batch size for sync requests (default: 5).
+    #[serde(default)]
+    batch_size: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -872,6 +892,30 @@ fn generate(
 
         // Multi-host requires ValueSync.
         cfg.sync.enabled = true;
+
+        // Apply fullnode-specific sync tuning for non-validator nodes.
+        // These settings help fullnodes catch up faster when syncing a large chain.
+        if n.role != "validator" {
+            if let Some(fullnode_sync) = &manifest.sync.fullnode {
+                if let Some(parallel_requests) = fullnode_sync.parallel_requests {
+                    cfg.sync.parallel_requests = parallel_requests;
+                }
+                if let Some(ref request_timeout) = fullnode_sync.request_timeout {
+                    // Parse humantime duration (e.g. "30s", "1m")
+                    if let Ok(dur) = humantime::parse_duration(request_timeout) {
+                        cfg.sync.request_timeout = dur;
+                    } else {
+                        eprintln!(
+                            "warning: invalid request_timeout '{}' for fullnode sync, using default",
+                            request_timeout
+                        );
+                    }
+                }
+                if let Some(batch_size) = fullnode_sync.batch_size {
+                    cfg.sync.batch_size = batch_size;
+                }
+            }
+        }
 
         // Archiver baseline config (token is supplied via env for validators).
         cfg.archiver.enabled = n.role == "validator";

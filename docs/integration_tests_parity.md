@@ -45,7 +45,7 @@ The parity target remains aligned with Malachite and Snapchain: multi-validator,
 
 ## 4. Notes
 
-- **Tier strategy**: Tier 0 = consensus crate smokes (3 tests, default in `make test`/CI); Tier 1 = full-node harness (14 ignored tests) run via `make itest-node` and CI job `itest-tier1`.
+- **Tier strategy**: Tier 0 = consensus crate smokes (3 tests, default in `make test`/CI); Tier 1 = full-node harness (17 ignored tests) run via `make itest-node` and CI job `itest-tier1`.
 - **Harness builder**: `FullNodeTestBuilder` in `crates/test/tests/full_node/node_harness.rs` centralizes setup/teardown, payload plans, and deterministic ports.
 - **Execution cadence**: Tier 1 scenarios run as separate `cargo test ... -- --ignored` invocations to avoid resource leaks; `cargo test -p ultramarine-test --test full_node -- --ignored` remains available for local ad-hoc runs.
 - **CI**: Tier 1 executes after the main test job and uploads `target/debug/deps/full_node*` and `crates/test/test_output.log` on failure; `CARGO_NET_OFFLINE` is overridable for cold runners.

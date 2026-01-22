@@ -16,6 +16,7 @@ EnvironmentFile=/opt/loadnet/current/bundle/private/env/load-reth-%i.env
 
 ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/bundle/public/genesis.json"'
 ExecStartPre=/bin/bash -lc 'test -f "/opt/loadnet/current/$LOAD_RETH_P2P_KEY_PATH"'
+ExecStartPre=/bin/bash -lc 'docker pull $LOAD_RETH_IMAGE'
 ExecStartPre=/bin/bash -lc 'rm -f "/run/load-reth/%i/engine.ipc"'
 ExecStartPre=/bin/bash -lc 'docker rm -f load-reth-%i >/dev/null 2>&1 || true'
 
@@ -36,6 +37,8 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i --network 
     --datadir=/data/load-reth \
     --chain=/assets/genesis.json \
     --http --http.addr={{ loadnet_el_http_bind | default("0.0.0.0") }} --http.port=$LOAD_RETH_HTTP_PORT --http.api={{ loadnet_el_http_api | default("eth,net,web3,txpool") }} \
+    --rpc.max-request-size={{ loadnet_el_rpc_max_request_size | default(10) }} \
+    --rpc.max-response-size={{ loadnet_el_rpc_max_response_size | default(50) }} \
     --authrpc.addr=127.0.0.1 --authrpc.port=$LOAD_RETH_AUTHRPC_PORT \
     --metrics=127.0.0.1:$LOAD_RETH_METRICS_PORT \
     --port=$LOAD_RETH_P2P_PORT --discovery.port=$LOAD_RETH_P2P_PORT \
@@ -45,7 +48,19 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i --network 
 {% if loadnet_el_debug_tip is defined and loadnet_el_debug_tip %}
     --debug.tip={{ loadnet_el_debug_tip }} \
 {% endif %}
-    --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH'
+    --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH \
+    --builder.gaslimit={{ loadnet_el_builder_gaslimit | default(2000000000) }} \
+    --builder.interval={{ loadnet_el_builder_interval | default("50ms") }} \
+    --builder.deadline={{ loadnet_el_builder_deadline | default(2) }} \
+    --builder.max-tasks={{ loadnet_el_builder_max_tasks | default(10) }} \
+    --txpool.gas-limit={{ loadnet_el_txpool_gas_limit | default(2000000000) }} \
+    --txpool.max-account-slots={{ loadnet_el_txpool_max_account_slots | default(32) }} \
+    --txpool.pending-max-count={{ loadnet_el_txpool_pending_max_count | default(50000) }} \
+    --txpool.queued-max-count={{ loadnet_el_txpool_queued_max_count | default(50000) }} \
+    --txpool.pending-max-size={{ loadnet_el_txpool_pending_max_size | default(512) }} \
+    --txpool.queued-max-size={{ loadnet_el_txpool_queued_max_size | default(512) }} \
+    --txpool.max-pending-txns={{ loadnet_el_txpool_max_pending_txns | default(100000) }} \
+    --txpool.max-new-txns={{ loadnet_el_txpool_max_new_txns | default(10000) }}'
 
 ExecStop=/usr/bin/docker stop -t 10 load-reth-%i
 ExecStartPost=/bin/bash -lc 'for i in {1..60}; do if [ -S "/run/load-reth/%i/engine.ipc" ]; then chgrp {{ loadnet_ultramarine_gid | default(10002) }} "/run/load-reth/%i/engine.ipc"; chmod 660 "/run/load-reth/%i/engine.ipc"; exit 0; fi; sleep 1; done; echo "engine IPC not ready for permission fix: /run/load-reth/%i/engine.ipc" >&2; exit 0'

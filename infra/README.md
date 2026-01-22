@@ -37,6 +37,7 @@ Notes:
 
 - Deploys are **Engine IPC-only**.
 - Validators require archiver config; bearer tokens are expected via decrypted secrets (see `SECRETS.md`).
+- If `blockscout.enabled=true` in the manifest, `net-deploy` / `net-launch` will also deploy Blockscout + nginx on the configured host.
 
 ## Ansible Design Choices (Intentional)
 

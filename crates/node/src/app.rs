@@ -1,4 +1,6 @@
 #![allow(missing_docs)]
+use std::time::{Duration, Instant};
+
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
@@ -136,7 +138,8 @@ pub async fn run(
                 info!("✅ Execution client capabilities check passed.");
 
                 // Try to get the latest block from the execution engine.
-                // If this fails, we'll lazy-fetch it later in GetValue instead of crashing.
+                // CRITICAL: latest_block must be initialized for timestamp validation to work.
+                // If 'latest' fails, fallback to genesis block (EL must have genesis).
                 match execution_layer
                     .eth
                     .get_block_by_number(alloy_rpc_types_eth::BlockNumberOrTag::Latest, false)
@@ -146,15 +149,29 @@ pub async fn run(
                         debug!(block_hash = %latest_block.block_hash, "Fetched latest block from execution client");
                         state.latest_block = Some(latest_block);
                     }
-                    Ok(None) => {
+                    Ok(None) | Err(_) => {
+                        // Fallback: fetch genesis block (block 0) - EL must have genesis
                         warn!(
-                            "Execution client returned no block for 'latest'; will lazy-fetch in GetValue"
+                            "Execution client returned no block for 'latest'; fetching genesis block"
                         );
-                        state.latest_block = None;
-                    }
-                    Err(e) => {
-                        warn!(%e, "Failed to fetch latest block from execution client; will lazy-fetch in GetValue");
-                        state.latest_block = None;
+                        match execution_layer
+                            .eth
+                            .get_block_by_number(BlockNumberOrTag::Number(0), false)
+                            .await
+                        {
+                            Ok(Some(genesis_block)) => {
+                                info!(block_hash = %genesis_block.block_hash, "Using genesis block as latest_block");
+                                state.latest_block = Some(genesis_block);
+                            }
+                            Ok(None) => {
+                                return Err(eyre!(
+                                    "EL has no genesis block - cannot start validator"
+                                ));
+                            }
+                            Err(e) => {
+                                return Err(eyre!("Failed to fetch genesis block from EL: {}", e));
+                            }
+                        }
                     }
                 }
 
@@ -184,8 +201,8 @@ pub async fn run(
                 // This handles the case where rounds keep timing out but no commit happens.
                 // Only cleanup after round 0 (we need at least one previous round to have stale
                 // data).
-                if round.as_u32().is_some_and(|r| r > 0)
-                    && let Err(e) = state.cleanup_stale_round_blobs(height, round).await
+                if round.as_u32().is_some_and(|r| r > 0) &&
+                    let Err(e) = state.cleanup_stale_round_blobs(height, round).await
                 {
                     warn!(
                         %height,
@@ -209,16 +226,29 @@ pub async fn run(
             }
             // At some point, we may end up being the proposer for that round, and the consensus
             // engine will then ask us for a value to propose to the other validators.
-            AppMsg::GetValue { height, round, timeout: _, reply } => {
-                if let Err(e) =
-                    handle_get_value(state, channels, &execution_layer, height, round, reply).await
+            AppMsg::GetValue { height, round, timeout, reply } => {
+                match handle_get_value(
+                    state,
+                    channels,
+                    &execution_layer,
+                    height,
+                    round,
+                    timeout,
+                    reply,
+                )
+                .await
                 {
-                    error!(
-                        %height,
-                        %round,
-                        error = ?e,
-                        "GetValue handler failed; letting consensus timeout drive prevote-nil"
-                    );
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(
+                            %height,
+                            %round,
+                            error = ?e,
+                            "GetValue handler failed; timeout will drive prevote-nil"
+                        );
+                        // NOTE: Not sending reply here - Malachite will timeout and do prevote-nil.
+                        // LocallyProposedValue doesn't have a "nil" representation.
+                    }
                 }
             }
             AppMsg::ExtendVote { reply, .. } => {
@@ -1042,11 +1072,43 @@ async fn handle_get_value(
     execution_layer: &ExecutionClient,
     height: Height,
     round: Round,
+    timeout: Duration,
     reply: oneshot::Sender<LocallyProposedValue<LoadContext>>,
 ) -> eyre::Result<()> {
     info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
+    let started_at = Instant::now();
 
     let latest_block = ensure_latest_block(state, execution_layer).await?;
+
+    // Slot throttle: wait until we can propose with valid timestamp
+    // IMPORTANT: Use Duration with subsecond precision to avoid ~1s jitter
+    use ultramarine_types::constants::LOAD_MIN_BLOCK_TIME_SECS;
+
+    let next_allowed_ts = latest_block.timestamp + LOAD_MIN_BLOCK_TIME_SECS;
+    let target_time = Duration::from_secs(next_allowed_ts);
+
+    let now_duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO); // Fallback to 0 on time error - will wait full slot
+
+    if now_duration < target_time {
+        // Precise wait with subseconds: e.g., if now is 1000.8s and target is 1001s, wait only 0.2s
+        let wait = target_time.saturating_sub(now_duration);
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let max_wait = remaining.saturating_sub(Duration::from_millis(200)); // margin for EL call
+
+        if wait > max_wait {
+            return Err(eyre!(
+                "Slot throttle {:?} exceeds remaining GetValue timeout {:?}; refusing to propose",
+                wait,
+                remaining
+            ));
+        }
+
+        debug!(%height, %round, ?wait, "Throttling: waiting for slot boundary");
+        tokio::time::sleep(wait).await;
+    }
+
     debug!("Requesting EL to build payload with blobs on top of head");
 
     let (execution_payload, blobs_bundle) =

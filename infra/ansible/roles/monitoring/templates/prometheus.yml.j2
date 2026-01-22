@@ -1,5 +1,9 @@
 global:
   scrape_interval: {{ loadnet_prometheus_scrape_interval | default('5s') }}
+
+rule_files:
+  - "/etc/prometheus/alert_rules.yml"
+
 scrape_configs:
 {% for node in loadnet_host_nodes %}
   - job_name: "load-reth-{{ node.id }}"

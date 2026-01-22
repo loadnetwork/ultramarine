@@ -1,22 +1,23 @@
 mod support;
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, str::FromStr, time::Duration};
 
 use alloy_primitives::B256;
 use bytes::Bytes as NetworkBytes;
 use malachitebft_app_channel::app::types::{
-    LocallyProposedValue,
+    LocallyProposedValue, PeerId,
     core::{CommitCertificate, Round, Validity},
 };
 use ssz::Encode;
 use support::*;
 use ultramarine_blob_engine::{BlobEngine, BlobEngineError};
 use ultramarine_types::{
-    aliases::Bytes as BlobBytes,
+    aliases::{Bytes as AlloyBytes, Bytes as BlobBytes},
     archive::{ArchiveNotice, ArchiveNoticeBody},
     blob::{BYTES_PER_BLOB, Blob, BlobsBundle, KzgCommitment, KzgProof},
     blob_metadata::BlobMetadata,
-    engine_api::ExecutionPayloadHeader,
+    constants::{LOAD_MAX_FUTURE_DRIFT_SECS, LOAD_MIN_BLOCK_TIME_SECS},
+    engine_api::{ExecutionBlock, ExecutionPayloadHeader, load_prev_randao},
     height::Height,
     signing::Ed25519Provider,
     sync::SyncedValuePackage,
@@ -629,6 +630,33 @@ async fn process_decided_certificate_rejects_mismatched_prev_randao() {
         .await
         .expect_err("prev_randao mismatch must be rejected");
     assert!(err.to_string().contains("prev_randao mismatch"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn propose_value_rejects_invalid_execution_requests() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    let height = Height::new(1);
+    let round = Round::new(0);
+    state.current_height = height;
+    state.current_round = round;
+
+    let payload = sample_execution_payload_v3();
+    let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
+    let invalid_requests = vec![
+        AlloyBytes::copy_from_slice(&[0x05, 0xAA]),
+        AlloyBytes::copy_from_slice(&[0x04, 0xBB]),
+    ];
+
+    let err = state
+        .propose_value_with_blobs(height, round, payload_bytes, &payload, &invalid_requests, None)
+        .await
+        .expect_err("invalid execution requests must be rejected");
+
+    assert!(err.to_string().contains("Invalid execution requests"), "unexpected error: {err}");
 }
 
 #[tokio::test]
@@ -1631,10 +1659,9 @@ async fn test_history_min_height_returns_genesis_after_pruning() {
     // Step 2: Add blocks up to height 5
     let mut parent_root = BlobMetadata::genesis().to_beacon_header().hash_tree_root();
     for h in 1..=5u64 {
-        parent_root =
-            seed_decided_blob_metadata(&mut state, Height::new(h), parent_root).await.expect(
-                &format!("seed decided blob metadata at height {}", h),
-            );
+        parent_root = seed_decided_blob_metadata(&mut state, Height::new(h), parent_root)
+            .await
+            .expect(&format!("seed decided blob metadata at height {}", h));
     }
 
     // Step 3: Verify get_earliest_height() returns Height(0) even with blocks up to height 5
@@ -1644,4 +1671,499 @@ async fn test_history_min_height_returns_genesis_after_pruning() {
         Height::new(0),
         "BUG-002: get_earliest_height() should return genesis (Height 0) when genesis metadata exists"
     );
+}
+
+/// Test that reorg/fork handling correctly drops orphaned blobs.
+/// When a different round is committed, all other rounds' blobs at that height should be cleaned.
+#[tokio::test]
+async fn test_reorg_drops_orphaned_blobs() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+    let height = Height::new(1);
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    // Create blobs at multiple rounds (simulating a fork scenario)
+    let rounds = [Round::new(0), Round::new(1), Round::new(2)];
+    for &round in &rounds {
+        state.current_height = height;
+        state.current_round = round;
+        let payload = sample_execution_payload_v3();
+        let bundle = sample_blob_bundle(1);
+        state
+            .propose_value_with_blobs(
+                height,
+                round,
+                NetworkBytes::new(),
+                &payload,
+                &[],
+                Some(&bundle),
+            )
+            .await
+            .expect("propose");
+
+        state
+            .store
+            .store_undecided_block_data(
+                height,
+                round,
+                NetworkBytes::from_static(b"block"),
+                Vec::new(),
+            )
+            .await
+            .expect("store block data");
+
+        // Register round in blob_rounds for tracking
+        state.blob_rounds.entry(height).or_insert_with(HashSet::new).insert(round.as_i64());
+    }
+
+    // Verify all rounds have metadata
+    for &round in &rounds {
+        assert!(
+            state.store.get_blob_metadata_undecided(height, round).await.expect("get").is_some(),
+            "Round {:?} should have metadata",
+            round
+        );
+    }
+
+    // Commit round 1 (middle round wins the fork)
+    let winning_round = Round::new(1);
+    let value_metadata = sample_value_metadata(1);
+    let value = Value::new(value_metadata);
+    let proposal = ProposedValue {
+        height,
+        round: winning_round,
+        valid_round: Round::Nil,
+        proposer: state.address,
+        value: value.clone(),
+        validity: Validity::Valid,
+    };
+
+    state.store.store_undecided_proposal(proposal.clone()).await.expect("store proposal");
+
+    let certificate = CommitCertificate {
+        height,
+        round: winning_round,
+        value_id: proposal.value.id(),
+        commit_signatures: Vec::new(),
+    };
+
+    state.commit(certificate).await.expect("commit");
+
+    // Winning round should be promoted to decided
+    assert!(
+        state.store.get_blob_metadata(height).await.expect("get").is_some(),
+        "Winning round metadata should be promoted to decided"
+    );
+
+    // Orphaned rounds (0 and 2) should be cleaned up
+    assert!(
+        state
+            .store
+            .get_blob_metadata_undecided(height, Round::new(0))
+            .await
+            .expect("get")
+            .is_none(),
+        "Round 0 (orphaned) should be cleaned up"
+    );
+    assert!(
+        state
+            .store
+            .get_blob_metadata_undecided(height, Round::new(2))
+            .await
+            .expect("get")
+            .is_none(),
+        "Round 2 (orphaned) should be cleaned up"
+    );
+
+    // Verify blob engine received drop calls for orphaned rounds
+    let drop_calls = mock_engine.drop_calls();
+    assert!(drop_calls.contains(&(height, 0)), "Blob engine should drop round 0");
+    assert!(drop_calls.contains(&(height, 2)), "Blob engine should drop round 2");
+    assert!(!drop_calls.contains(&(height, 1)), "Blob engine should NOT drop winning round 1");
+
+    // FIX-007: Verify orphaned_blobs_dropped metric is recorded correctly
+    // Each orphaned round (0 and 2) had 1 blob each, so total should be 2
+    let metrics = state.blob_metrics.snapshot();
+    assert_eq!(
+        metrics.orphaned_blobs_dropped, 2,
+        "Should record 2 orphaned blobs dropped (1 from round 0 + 1 from round 2)"
+    );
+}
+
+/// Test that sync rejects packages with fewer sidecars than claimed in metadata.
+#[tokio::test]
+async fn test_sync_rejects_partial_sidecars() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    let height = Height::new(1);
+    let round = Round::new(0);
+    state.current_height = height;
+    state.current_round = round;
+
+    // Create a valid package with 3 blobs, then truncate sidecars to 1
+    let payload = sample_execution_payload_v3();
+    let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
+    let bundle = sample_blob_bundle(3); // Create 3 blobs
+
+    let header = ExecutionPayloadHeader::from_payload(&payload, None).expect("build header");
+    let value_metadata = ValueMetadata::new(header.clone(), bundle.commitments.clone());
+    let value = Value::new(value_metadata);
+
+    // Store payload for sync
+    state
+        .store
+        .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
+        .await
+        .expect("store payload");
+
+    // Prepare valid sidecars first, then truncate to create mismatch
+    let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
+    let (_signed_header, mut full_sidecars) = state
+        .prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))
+        .await
+        .expect("prepare sidecars");
+
+    assert_eq!(full_sidecars.len(), 3, "Should have 3 sidecars");
+
+    // Truncate to only 1 sidecar - simulating partial sidecar receipt
+    full_sidecars.truncate(1);
+    let partial_sidecars = full_sidecars;
+
+    // The package has mismatched sidecar count vs metadata
+    let package = SyncedValuePackage::Full {
+        value,
+        execution_payload_ssz: payload_bytes,
+        blob_sidecars: partial_sidecars, // Only 1 sidecar but metadata claims 3
+        execution_requests: Vec::new(),
+        archive_notices: Vec::new(),
+    };
+
+    // Process should return None (rejection) due to count mismatch
+    let result = state
+        .process_synced_package(height, round, state.address, package)
+        .await
+        .expect("process should not error");
+
+    assert!(
+        result.is_none(),
+        "Sync should reject package with partial sidecars (fewer than metadata claims)"
+    );
+
+    // FIX-007: Verify sync_packages_rejected metric is recorded
+    let metrics = state.blob_metrics.snapshot();
+    assert_eq!(
+        metrics.sync_packages_rejected, 1,
+        "Should record 1 rejected sync package due to partial sidecars"
+    );
+}
+
+/// Test that sync rejects packages with duplicate blob indices.
+/// This tests the FIX-003 duplicate index check.
+#[tokio::test]
+async fn test_sync_rejects_duplicate_indices() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(1));
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    let height = Height::new(1);
+    let round = Round::new(0);
+    state.current_height = height;
+    state.current_round = round;
+
+    // Create a valid package first, then tamper with indices
+    let payload = sample_execution_payload_v3();
+    let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
+    let bundle = sample_blob_bundle(2);
+
+    let header = ExecutionPayloadHeader::from_payload(&payload, None).expect("build header");
+    let value_metadata = ValueMetadata::new(header, bundle.commitments.clone());
+    let value = Value::new(value_metadata);
+
+    // Store payload for sync
+    state
+        .store
+        .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
+        .await
+        .expect("store payload");
+
+    // Prepare valid sidecars first
+    let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
+    let (_signed_header, mut sidecars) = state
+        .prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))
+        .await
+        .expect("prepare sidecars");
+
+    assert_eq!(sidecars.len(), 2, "Should have 2 sidecars");
+
+    // Tamper: set both sidecars to have the same index (index 0)
+    sidecars[1].index = 0; // Duplicate index!
+
+    let package = SyncedValuePackage::Full {
+        value,
+        execution_payload_ssz: payload_bytes,
+        blob_sidecars: sidecars,
+        execution_requests: Vec::new(),
+        archive_notices: Vec::new(),
+    };
+
+    // Process should return None (rejection) due to duplicate indices
+    let result = state
+        .process_synced_package(height, round, state.address, package)
+        .await
+        .expect("process should not error");
+
+    assert!(result.is_none(), "Sync should reject package with duplicate blob indices");
+
+    // FIX-007: Verify sync_packages_rejected metric is recorded
+    let metrics = state.blob_metrics.snapshot();
+    assert_eq!(
+        metrics.sync_packages_rejected, 1,
+        "Should record 1 rejected sync package due to duplicate indices"
+    );
+}
+
+/// Test sequential multi-height sync chain continuity - verifies that sync operations
+/// maintain parent root chain integrity across multiple heights from different proposers.
+/// Note: This tests sequential processing, not true concurrency (which would require
+/// Arc<Mutex<State>>).
+///
+/// FIXME: This test has structural issues - process_synced_package validation
+/// rejects packages that don't match EL verification. Needs refactoring to
+/// properly mock the execution layer or use a different approach.
+#[ignore = "Needs refactoring to properly handle EL verification in sync flow"]
+#[tokio::test]
+async fn test_sequential_multi_height_sync_chain_continuity() {
+    use ultramarine_types::signing::PrivateKey;
+
+    // Setup multiple validator keys to simulate different peers
+    let private_keys =
+        [PrivateKey::from([1u8; 32]), PrivateKey::from([2u8; 32]), PrivateKey::from([3u8; 32])];
+    let validators: Vec<Validator> =
+        private_keys.iter().map(|key| Validator::new(key.public_key(), 1)).collect();
+
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine.clone(), Height::new(0));
+
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis metadata");
+    state.hydrate_blob_parent_root().await.expect("hydrate parent root");
+
+    // Process each height sequentially - must do one at a time because preparing
+    // sidecars for height N+1 requires decided metadata for height N to exist.
+    for h in 1..=3u64 {
+        let height = Height::new(h);
+        let round = Round::new(0);
+        let peer_idx = (h as usize - 1) % validators.len();
+        let proposer = validators[peer_idx].address;
+
+        // Set state to current height
+        state.current_height = height;
+        state.current_round = round;
+
+        // Prepare sync package
+        let payload = sample_execution_payload_v3();
+        let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
+        let bundle = sample_blob_bundle(1);
+
+        let header = ExecutionPayloadHeader::from_payload(&payload, None).expect("build header");
+        let value_metadata = ValueMetadata::new(header, bundle.commitments.clone());
+        let value = Value::new(value_metadata);
+
+        // Store payload for this height
+        state
+            .store
+            .store_undecided_block_data(height, round, payload_bytes.clone(), Vec::new())
+            .await
+            .expect("store payload");
+
+        // Prepare sidecars - this needs parent height's decided metadata to exist
+        let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
+        let (_signed_header, sidecars) = state
+            .prepare_blob_sidecar_parts(&locally_proposed, Some(&bundle))
+            .await
+            .expect("prepare sidecars");
+
+        // Create and process sync package
+        let package = SyncedValuePackage::Full {
+            value,
+            execution_payload_ssz: payload_bytes,
+            blob_sidecars: sidecars,
+            execution_requests: Vec::new(),
+            archive_notices: Vec::new(),
+        };
+
+        let result = state
+            .process_synced_package(height, round, proposer, package)
+            .await
+            .expect("process should succeed")
+            .expect("sync should return value");
+
+        assert_eq!(result.height, height, "Synced height should match");
+        assert_eq!(result.round, round, "Synced round should match");
+        assert_eq!(result.proposer, proposer, "Proposer should match");
+    }
+
+    // Verify all heights were synced correctly
+    for h in 1..=3u64 {
+        let height = Height::new(h);
+        assert!(
+            state.store.get_blob_metadata(height).await.expect("load").is_some(),
+            "Height {} should have decided metadata",
+            h
+        );
+    }
+
+    // Verify parent root chain is continuous
+    let genesis_root = BlobMetadata::genesis().to_beacon_header().hash_tree_root();
+    let h1_meta = state.store.get_blob_metadata(Height::new(1)).await.expect("load").expect("h1");
+    let h2_meta = state.store.get_blob_metadata(Height::new(2)).await.expect("load").expect("h2");
+    let h3_meta = state.store.get_blob_metadata(Height::new(3)).await.expect("load").expect("h3");
+
+    assert_eq!(h1_meta.parent_blob_root(), genesis_root, "Height 1 should chain from genesis");
+    assert_eq!(
+        h2_meta.parent_blob_root(),
+        h1_meta.to_beacon_header().hash_tree_root(),
+        "Height 2 should chain from height 1"
+    );
+    assert_eq!(
+        h3_meta.parent_blob_root(),
+        h2_meta.to_beacon_header().hash_tree_root(),
+        "Height 3 should chain from height 2"
+    );
+}
+
+// ============================================================================
+// Timestamp validation tests (BUG-011 fix)
+// ============================================================================
+
+fn test_peer_id() -> PeerId {
+    PeerId::from_str("12D3KooWHRyfTBKcjkqjNk5UZarJhzT7rXZYfr4DmaCWJgen62Xk").expect("valid peer id")
+}
+
+fn set_latest_block(state: &mut State<MockBlobEngine>, block_hash: B256, timestamp: u64) {
+    state.latest_block = Some(ExecutionBlock {
+        block_hash,
+        block_number: 0,
+        parent_hash: B256::ZERO,
+        timestamp,
+        prev_randao: load_prev_randao(),
+    });
+}
+
+async fn send_payload_as_proposal(
+    state: &mut State<MockBlobEngine>,
+    payload: alloy_rpc_types_engine::ExecutionPayloadV3,
+) -> bool {
+    let height = state.current_height;
+    let round = state.current_round;
+    let payload_bytes = NetworkBytes::from(payload.as_ssz_bytes());
+    let proposed = state
+        .propose_value_with_blobs(height, round, payload_bytes.clone(), &payload, &[], None)
+        .await
+        .expect("propose value");
+
+    let msgs: Vec<_> = state.stream_proposal(proposed, payload_bytes, None, &[], None).collect();
+    let peer_id = test_peer_id();
+
+    for msg in msgs {
+        if state.received_proposal_part(peer_id, msg).await.expect("received proposal").is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+#[tokio::test]
+async fn timestamp_validation_rejects_future_drift() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis");
+    state.hydrate_blob_parent_root().await.expect("hydrate");
+
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs();
+    let parent_hash = B256::from([2u8; 32]);
+    let parent_ts = now.saturating_sub(1);
+    set_latest_block(&mut state, parent_hash, parent_ts);
+
+    let mut payload = sample_execution_payload_v3();
+    payload.payload_inner.payload_inner.parent_hash = parent_hash;
+    payload.payload_inner.payload_inner.block_number = 1;
+    payload.payload_inner.payload_inner.timestamp = now + LOAD_MAX_FUTURE_DRIFT_SECS + 5;
+
+    let accepted = send_payload_as_proposal(&mut state, payload).await;
+    assert!(!accepted, "proposal should be rejected for future drift");
+}
+
+#[tokio::test]
+async fn timestamp_validation_rejects_parent_hash_mismatch() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis");
+    state.hydrate_blob_parent_root().await.expect("hydrate");
+
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs();
+    let parent_hash = B256::from([2u8; 32]);
+    let parent_ts = now.saturating_sub(1);
+    set_latest_block(&mut state, parent_hash, parent_ts);
+
+    let mut payload = sample_execution_payload_v3();
+    payload.payload_inner.payload_inner.parent_hash = B256::from([3u8; 32]); // mismatch
+    payload.payload_inner.payload_inner.block_number = 1;
+    payload.payload_inner.payload_inner.timestamp = parent_ts + LOAD_MIN_BLOCK_TIME_SECS;
+
+    let accepted = send_payload_as_proposal(&mut state, payload).await;
+    assert!(!accepted, "proposal should be rejected for parent hash mismatch");
+}
+
+#[tokio::test]
+async fn timestamp_validation_rejects_not_strictly_increasing() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis");
+    state.hydrate_blob_parent_root().await.expect("hydrate");
+
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs();
+    let parent_hash = B256::from([2u8; 32]);
+    let parent_ts = now;
+    set_latest_block(&mut state, parent_hash, parent_ts);
+
+    let mut payload = sample_execution_payload_v3();
+    payload.payload_inner.payload_inner.parent_hash = parent_hash;
+    payload.payload_inner.payload_inner.block_number = 1;
+    payload.payload_inner.payload_inner.timestamp = parent_ts;
+
+    let accepted = send_payload_as_proposal(&mut state, payload).await;
+    assert!(!accepted, "proposal should be rejected for non-increasing timestamp");
+}
+
+#[tokio::test]
+async fn timestamp_validation_accepts_valid_timestamp() {
+    let mock_engine = MockBlobEngine::default();
+    let (mut state, _tmp) = build_state(mock_engine, Height::new(1));
+    state.store.seed_genesis_blob_metadata().await.expect("seed genesis");
+    state.hydrate_blob_parent_root().await.expect("hydrate");
+
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs();
+    let parent_hash = B256::from([2u8; 32]);
+    let parent_ts = now.saturating_sub(1);
+    set_latest_block(&mut state, parent_hash, parent_ts);
+
+    let mut payload = sample_execution_payload_v3();
+    payload.payload_inner.payload_inner.parent_hash = parent_hash;
+    payload.payload_inner.payload_inner.block_number = 1;
+    payload.payload_inner.payload_inner.timestamp = parent_ts + LOAD_MIN_BLOCK_TIME_SECS;
+
+    let accepted = send_payload_as_proposal(&mut state, payload).await;
+    assert!(accepted, "proposal should be accepted with valid timestamp");
 }

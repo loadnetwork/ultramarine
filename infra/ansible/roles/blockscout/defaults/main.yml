@@ -6,6 +6,7 @@ blockscout_enabled: false
 blockscout_domain: "explorer.example.com"
 blockscout_stats_domain: "stats.example.com"
 blockscout_rpc_domain: "rpc.example.com"
+blockscout_ssl_enabled: true
 
 # Chain configuration
 blockscout_chain_id: 1984
@@ -48,7 +49,7 @@ blockscout_rpc_trace_url: "http://172.17.0.1:8545"
 blockscout_rpc_variant: "erigon"
 
 # Paths
-blockscout_base_dir: "/opt/loadnet/current/blockscout"
+blockscout_base_dir: "{{ (loadnet_net_dir | default('/opt/loadnet/current')) }}/blockscout"
 blockscout_data_dir: "/var/lib/blockscout"
 blockscout_postgres_data_dir: "{{ blockscout_data_dir }}/postgres"
 blockscout_stats_postgres_data_dir: "{{ blockscout_data_dir }}/stats-postgres"
@@ -69,8 +70,9 @@ blockscout_postgres_max_connections: 100
 blockscout_postgres_shm_size: "256m"
 
 # Application pool sizes - optimized for 32GB RAM
-blockscout_pool_size: 40
-blockscout_pool_size_api: 5
+# Increase pool size for faster indexing on high-throughput chains (1-sec blocks)
+blockscout_pool_size: 80
+blockscout_pool_size_api: 10
 
 # Docker memory limits for 32GB RAM systems
 blockscout_backend_memory_limit: "8g"
@@ -93,7 +95,9 @@ blockscout_api_rate_limit_by_ip: 3000
 # Indexer configuration
 blockscout_disable_indexer: false
 blockscout_disable_realtime_indexer: false
-blockscout_catchup_blocks_batch_size: 100
+# Batch size for catchup indexing (default: 100).
+# Increase for faster block chains (1-sec blocks) to improve indexing throughput.
+blockscout_catchup_blocks_batch_size: 500
 
 # Microservices configuration
 blockscout_visualizer_enabled: true
