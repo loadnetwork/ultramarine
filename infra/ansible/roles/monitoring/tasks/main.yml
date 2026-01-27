@@ -87,7 +87,10 @@
     dest: "{{ net_dir }}/bundle/private/monitoring/grafana_admin_password.env"
     mode: "0600"
     content: |
-      GRAFANA_ADMIN_PASSWORD_B64={{ lookup('ansible.builtin.password', net_dir + '/bundle/private/monitoring/.grafana_admin_password length=32 chars=ascii_letters,digits') | b64encode }}
+      GRAFANA_ADMIN_PASSWORD_B64={{ lookup(
+        'ansible.builtin.password',
+        net_dir + '/bundle/private/monitoring/.grafana_admin_password length=32 chars=ascii_letters,digits'
+      ) | b64encode }}
   no_log: true
   delegate_to: localhost
   become: false

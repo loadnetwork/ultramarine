@@ -9,12 +9,14 @@
 The infra plane is a **production-grade, manifest-driven deployment system** built on Ansible. It demonstrates strong DevOps practices tailored for blockchain validator operations, including BFT-aware rolling restarts, deterministic configuration generation, and comprehensive observability.
 
 **Key Strengths:**
+
 - Manifest-driven reproducibility with lockfile verification
 - One-command deployment workflows
 - BFT-safe rolling restart with quorum awareness
 - Comprehensive health checks and diagnostics
 
 **Areas for Enhancement:**
+
 - Backup/restore automation (planned, not implemented)
 - Multi-region deployment patterns
 - Chaos engineering / fault injection testing
@@ -25,13 +27,13 @@ The infra plane is a **production-grade, manifest-driven deployment system** bui
 
 ### Design Principles
 
-| Principle | Implementation |
-|-----------|----------------|
-| **Manifest-Driven** | Single YAML source of truth per network |
-| **Deterministic** | Lockfile captures port allocations, checksums, topology |
-| **Reproducible** | Same manifest + generated artifacts = identical deployment |
-| **Non-Destructive** | Deploy never overwrites existing node identity artifacts |
-| **Fail-Fast** | Validation before deployment (netgen validate) |
+| Principle           | Implementation                                             |
+| ------------------- | ---------------------------------------------------------- |
+| **Manifest-Driven** | Single YAML source of truth per network                    |
+| **Deterministic**   | Lockfile captures port allocations, checksums, topology    |
+| **Reproducible**    | Same manifest + generated artifacts = identical deployment |
+| **Non-Destructive** | Deploy never overwrites existing node identity artifacts   |
+| **Fail-Fast**       | Validation before deployment (netgen validate)             |
 
 ### Component Hierarchy
 
@@ -68,14 +70,14 @@ Manifest YAML → netgen validate → netgen plan/gen → Ansible Deploy → Run
 
 ### Phase-Based Deployment
 
-| Phase | Command | Purpose |
-|-------|---------|---------|
-| **Validate** | `make net-validate` | Check manifest syntax |
-| **Plan** | `make net-plan` | Generate without sensitive inputs (dry-run) |
-| **Bootstrap** | `make net-bootstrap` | Prepare hosts (storage, pre-checks) |
-| **Generate** | `make net-gen` | Generate with sensitive inputs (bootable) |
-| **Deploy** | `make net-deploy` | Apply configuration |
-| **Health** | `make net-health` | Verify services running |
+| Phase         | Command              | Purpose                                     |
+| ------------- | -------------------- | ------------------------------------------- |
+| **Validate**  | `make net-validate`  | Check manifest syntax                       |
+| **Plan**      | `make net-plan`      | Generate without sensitive inputs (dry-run) |
+| **Bootstrap** | `make net-bootstrap` | Prepare hosts (storage, pre-checks)         |
+| **Generate**  | `make net-gen`       | Generate with sensitive inputs (bootable)   |
+| **Deploy**    | `make net-deploy`    | Apply configuration                         |
+| **Health**    | `make net-health`    | Verify services running                     |
 
 ### One-Command Workflows
 
@@ -103,18 +105,18 @@ make net-bootstrap NET=fibernet
 
 ### Playbooks (13 total)
 
-| Playbook | Purpose | BFT-Safe |
-|----------|---------|----------|
-| `deploy.yml` | Main deployment orchestrator | - |
-| `up.yml` / `down.yml` | Start/stop services | Yes |
-| `roll.yml` | Rolling restart (serial=1) | Yes |
-| `status.yml` / `logs.yml` | Service inspection | - |
-| `health.yml` | Validate services + height advancing | - |
-| `doctor.yml` / `doctor_pre.yml` | Pre/post deploy diagnostics | - |
-| `storage.yml` | Storage bootstrap (RAID, mounts) | - |
-| `firewall.yml` | UFW rules for P2P ports | - |
-| `wipe.yml` | Destructive cleanup | - |
-| `clean_logs.yml` | Log rotation/vacuum | - |
+| Playbook                        | Purpose                              | BFT-Safe |
+| ------------------------------- | ------------------------------------ | -------- |
+| `deploy.yml`                    | Main deployment orchestrator         | -        |
+| `up.yml` / `down.yml`           | Start/stop services                  | Yes      |
+| `roll.yml`                      | Rolling restart (serial=1)           | Yes      |
+| `status.yml` / `logs.yml`       | Service inspection                   | -        |
+| `health.yml`                    | Validate services + height advancing | -        |
+| `doctor.yml` / `doctor_pre.yml` | Pre/post deploy diagnostics          | -        |
+| `storage.yml`                   | Storage bootstrap (RAID, mounts)     | -        |
+| `firewall.yml`                  | UFW rules for P2P ports              | -        |
+| `wipe.yml`                      | Destructive cleanup                  | -        |
+| `clean_logs.yml`                | Log rotation/vacuum                  | -        |
 
 ### Roles (6 total, applied in order)
 
@@ -137,13 +139,13 @@ common → firewall → load_reth → ultramarine → monitoring
 
 ### Strengths
 
-| Feature | Rating | Notes |
-|---------|--------|-------|
-| **Discoverability** | Excellent | `make help` provides full reference |
-| **Defaults** | Good | `make net-use` sets default network |
-| **Safety** | Excellent | Destructive ops require `*_CONFIRM=YES` |
-| **Flexibility** | Good | `LIMIT=host` for targeted operations |
-| **Idempotency** | Good | Re-running deploy is safe |
+| Feature             | Rating    | Notes                                   |
+| ------------------- | --------- | --------------------------------------- |
+| **Discoverability** | Excellent | `make help` provides full reference     |
+| **Defaults**        | Good      | `make net-use` sets default network     |
+| **Safety**          | Excellent | Destructive ops require `*_CONFIRM=YES` |
+| **Flexibility**     | Good      | `LIMIT=host` for targeted operations    |
+| **Idempotency**     | Good      | Re-running deploy is safe               |
 
 ### Common Operations
 
@@ -163,14 +165,14 @@ make net-logs LIMIT=lon2-0
 
 ### Advanced Variables
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `SECRETS_FILE` | Path to encrypted inputs | Auto-detected |
-| `LIMIT` | Target specific host | All hosts |
-| `RESTART_ON_DEPLOY` | Restart after deploy | false |
-| `APPLY_FIREWALL` | Enable firewall automation | false |
-| `EL_HTTP_BIND` | EL JSON-RPC bind address | 0.0.0.0 |
-| `STORAGE_WIPE` | Destructive storage setup | false |
+| Variable            | Purpose                    | Default       |
+| ------------------- | -------------------------- | ------------- |
+| `SECRETS_FILE`      | Path to encrypted inputs   | Auto-detected |
+| `LIMIT`             | Target specific host       | All hosts     |
+| `RESTART_ON_DEPLOY` | Restart after deploy       | false         |
+| `APPLY_FIREWALL`    | Enable firewall automation | false         |
+| `EL_HTTP_BIND`      | EL JSON-RPC bind address   | 0.0.0.0       |
+| `STORAGE_WIPE`      | Destructive storage setup  | false         |
 
 ---
 
@@ -206,10 +208,10 @@ Deploy checks manifest_sha256 → fails if changed
 
 ### Components
 
-| Component | Purpose | Default Bind |
-|-----------|---------|--------------|
+| Component      | Purpose            | Default Bind   |
+| -------------- | ------------------ | -------------- |
 | **Prometheus** | Metrics collection | 127.0.0.1:9090 |
-| **Grafana** | Dashboards | 127.0.0.1:3000 |
+| **Grafana**    | Dashboards         | 127.0.0.1:3000 |
 
 ### Metrics Exposure
 
@@ -292,12 +294,12 @@ make net-deploy LIMIT=lon2-0
 
 ### Validator Key Lifecycle
 
-| Operation | Automation | Risk Level |
-|-----------|------------|------------|
-| Initial seeding | Automated (if missing) | Low |
-| Identity persistence | Enforced (never overwrite) | - |
-| Identity rotation | Manual (protocol event) | High |
-| Identity backup | Recommended (operator duty) | - |
+| Operation            | Automation                  | Risk Level |
+| -------------------- | --------------------------- | ---------- |
+| Initial seeding      | Automated (if missing)      | Low        |
+| Identity persistence | Enforced (never overwrite)  | -          |
+| Identity rotation    | Manual (protocol event)     | High       |
+| Identity backup      | Recommended (operator duty) | -          |
 
 ### Consensus Safety
 
@@ -324,13 +326,13 @@ make net-deploy LIMIT=lon2-0
 
 ### Recommended Enhancements
 
-| Priority | Enhancement | Rationale |
-|----------|-------------|-----------|
-| High | **Backup automation** | Protect against data loss |
-| High | **Alerting integration** | Proactive incident detection |
-| Medium | **Multi-region patterns** | Geographic redundancy |
-| Medium | **Chaos testing** | Validate fault tolerance |
-| Low | **GitOps workflow** | Automated deployment pipeline |
+| Priority | Enhancement               | Rationale                     |
+| -------- | ------------------------- | ----------------------------- |
+| High     | **Backup automation**     | Protect against data loss     |
+| High     | **Alerting integration**  | Proactive incident detection  |
+| Medium   | **Multi-region patterns** | Geographic redundancy         |
+| Medium   | **Chaos testing**         | Validate fault tolerance      |
+| Low      | **GitOps workflow**       | Automated deployment pipeline |
 
 ### Backup Strategy (Recommended)
 
@@ -377,5 +379,5 @@ The primary gaps are in recovery automation (backup/restore) and proactive monit
 
 ---
 
-*Assessment Date: 2026-01-12*
-*Reviewed By: Claude Code*
+_Assessment Date: 2026-01-12_
+_Reviewed By: Claude Code_

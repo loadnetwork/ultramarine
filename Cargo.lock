@@ -7068,9 +7068,12 @@ name = "ultramarine-node"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
+ "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
+ "alloy-trie",
  "async-trait",
  "bytes",
  "color-eyre",
@@ -7132,6 +7135,7 @@ dependencies = [
  "ultramarine-cli",
  "ultramarine-consensus",
  "ultramarine-execution",
+ "ultramarine-genesis",
  "ultramarine-node",
  "ultramarine-test-support",
  "ultramarine-types",

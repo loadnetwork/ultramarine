@@ -33,9 +33,11 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name ultramarine-%i --networ
   --env ULTRAMARINE_ARCHIVER_BEARER_TOKEN \
   -v /var/lib/ultramarine/%i:/home \
   -v /run/load-reth/%i:/run/load-reth/%i \
+  -v /opt/loadnet/current/bundle/public:/assets:ro \
   $ULTRAMARINE_IMAGE start \
     --home=/home \
     --engine-ipc-path=$ULTRAMARINE_ENGINE_IPC_PATH \
+    --execution-genesis-path=/assets/genesis.json \
     --eth1-rpc-url=$ULTRAMARINE_ETH1_RPC_URL'
 
 # Allow 30 seconds for graceful shutdown (flush blob engine, drain archiver queue)

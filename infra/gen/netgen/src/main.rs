@@ -495,25 +495,26 @@ fn validate_manifest(m: &Manifest, allow_unsafe_failure_domains: bool) -> Result
         bail!("nodes must be non-empty");
     }
 
-    if let Some(blockscout) = &m.blockscout {
-        if blockscout.enabled {
-            if !host_ids.contains(&blockscout.host) {
-                bail!("blockscout.host {} not found in hosts", blockscout.host);
-            }
-            if !m.nodes.iter().any(|n| n.id == blockscout.rpc_node) {
-                bail!("blockscout.rpc_node {} not found in nodes", blockscout.rpc_node);
-            }
-            if blockscout.domains.explorer.trim().is_empty() ||
-                blockscout.domains.stats.trim().is_empty() ||
-                blockscout.domains.rpc.trim().is_empty()
-            {
-                bail!("blockscout.domains must include explorer/stats/rpc");
-            }
-            if let Some(ssl) = &blockscout.ssl {
-                if ssl.enabled && ssl.email.trim().is_empty() {
-                    bail!("blockscout.ssl.email must be set when ssl.enabled=true");
-                }
-            }
+    if let Some(blockscout) = &m.blockscout &&
+        blockscout.enabled
+    {
+        if !host_ids.contains(&blockscout.host) {
+            bail!("blockscout.host {} not found in hosts", blockscout.host);
+        }
+        if !m.nodes.iter().any(|n| n.id == blockscout.rpc_node) {
+            bail!("blockscout.rpc_node {} not found in nodes", blockscout.rpc_node);
+        }
+        if blockscout.domains.explorer.trim().is_empty() ||
+            blockscout.domains.stats.trim().is_empty() ||
+            blockscout.domains.rpc.trim().is_empty()
+        {
+            bail!("blockscout.domains must include explorer/stats/rpc");
+        }
+        if let Some(ssl) = &blockscout.ssl &&
+            ssl.enabled &&
+            ssl.email.trim().is_empty()
+        {
+            bail!("blockscout.ssl.email must be set when ssl.enabled=true");
         }
     }
 
@@ -895,25 +896,25 @@ fn generate(
 
         // Apply fullnode-specific sync tuning for non-validator nodes.
         // These settings help fullnodes catch up faster when syncing a large chain.
-        if n.role != "validator" {
-            if let Some(fullnode_sync) = &manifest.sync.fullnode {
-                if let Some(parallel_requests) = fullnode_sync.parallel_requests {
-                    cfg.sync.parallel_requests = parallel_requests;
+        if n.role != "validator" &&
+            let Some(fullnode_sync) = &manifest.sync.fullnode
+        {
+            if let Some(parallel_requests) = fullnode_sync.parallel_requests {
+                cfg.sync.parallel_requests = parallel_requests;
+            }
+            if let Some(ref request_timeout) = fullnode_sync.request_timeout {
+                // Parse humantime duration (e.g. "30s", "1m")
+                if let Ok(dur) = humantime::parse_duration(request_timeout) {
+                    cfg.sync.request_timeout = dur;
+                } else {
+                    eprintln!(
+                        "warning: invalid request_timeout '{}' for fullnode sync, using default",
+                        request_timeout
+                    );
                 }
-                if let Some(ref request_timeout) = fullnode_sync.request_timeout {
-                    // Parse humantime duration (e.g. "30s", "1m")
-                    if let Ok(dur) = humantime::parse_duration(request_timeout) {
-                        cfg.sync.request_timeout = dur;
-                    } else {
-                        eprintln!(
-                            "warning: invalid request_timeout '{}' for fullnode sync, using default",
-                            request_timeout
-                        );
-                    }
-                }
-                if let Some(batch_size) = fullnode_sync.batch_size {
-                    cfg.sync.batch_size = batch_size;
-                }
+            }
+            if let Some(batch_size) = fullnode_sync.batch_size {
+                cfg.sync.batch_size = batch_size;
             }
         }
 

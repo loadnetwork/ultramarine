@@ -44,7 +44,7 @@ Path note: this repo keeps infra under `ultramarine/infra/`. If extracted into a
   - Infra default: **Engine IPC** (local-only; Ultramarine does not require JWT for IPC), i.e. load-reth `--auth-ipc` / `--auth-ipc.path=...` and Ultramarine `--engine-ipc-path=...`.
   - HTTP+JWT Engine mode is deferred to M4. Code supports it, but infra generator/deploy are IPC-only today.
   - Code reality: Ultramarine has local-dev fallback defaults for Engine/Eth RPC if endpoints are not provided (moniker `test-0/1/2` → localhost ports) in `ultramarine/crates/node/src/node.rs`; infra must always provide explicit endpoints and must not rely on these dev defaults.
-  - Code reality: Ultramarine performs fail-fast preflight checks for Engine capabilities and Eth RPC reachability during startup (`ultramarine/crates/node/src/node.rs`).
+  - Code reality: Ultramarine performs fail-fast preflight checks for **Engine API capabilities** during startup (`ultramarine/crates/node/src/node.rs`).
 - **Archiver is mandatory for validators** (current Ultramarine behavior): validator nodes must have archiver enabled + configured (provider URL/ID + bearer token), or they will fail fast on startup.
   - Code reality: validator enforcement + strict archiver config validation live in `ultramarine/crates/node/src/node.rs` (`validate_validator_archiver_setting`, `validate_archiver_config_strict`). Operator contract and alerting guidance are documented in `ultramarine/docs/ARCHIVER_OPS.md`.
 - **No “manual peer wiring”**: local docker workflow can use `admin_addPeer`, but multi-host must rely on explicit peer/bootnode configuration and correct dialable addresses.

@@ -1,8 +1,17 @@
 //! The Application (or Node) definition. The Node trait implements the Consensus context and the
 //! cryptographic library used for signing.
 #![allow(missing_docs)]
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+};
 
+use alloy_consensus::{Header, constants::EMPTY_WITHDRAWALS};
+use alloy_eips::{eip1559::INITIAL_BASE_FEE, eip7685::EMPTY_REQUESTS_HASH};
+use alloy_genesis::Genesis as ExecutionGenesis;
+use alloy_primitives::{B64, B256};
+use alloy_trie::root::state_root_ref_unhashed;
 use async_trait::async_trait;
 use color_eyre::eyre;
 use malachitebft_app_channel::app::{
@@ -26,6 +35,7 @@ use ultramarine_types::{
     archive::ArchiveNotice,
     codec::proto::ProtobufCodec,
     context::LoadContext,
+    engine_api::{ExecutionBlock, load_prev_randao},
     genesis::Genesis,
     height::Height,
     signing::{Ed25519Provider, PrivateKey, PublicKey},
@@ -91,12 +101,91 @@ pub struct App {
     pub genesis_file: PathBuf,
     pub private_key_file: PathBuf,
     pub start_height: Option<Height>,
+    /// Execution-layer genesis file (same JSON used by load-reth --chain).
+    pub execution_genesis_file: Option<PathBuf>,
 
     // Optional execution-layer configuration overrides
     pub engine_http_url: Option<Url>,
     pub engine_ipc_path: Option<PathBuf>,
     pub eth1_rpc_url: Option<Url>,
     pub jwt_path: Option<PathBuf>,
+}
+
+fn fork_block_active_at_genesis(block: Option<u64>) -> bool {
+    matches!(block, Some(0))
+}
+
+fn fork_time_active_at_genesis(time: Option<u64>, genesis_ts: u64) -> bool {
+    time.map(|t| t <= genesis_ts).unwrap_or(false)
+}
+
+fn build_execution_genesis_header(genesis: &ExecutionGenesis) -> eyre::Result<Header> {
+    let london_active = fork_block_active_at_genesis(genesis.config.london_block);
+    let base_fee_per_gas = if london_active {
+        let base_fee = genesis.base_fee_per_gas.unwrap_or(u128::from(INITIAL_BASE_FEE));
+        let base_fee_u64 = u64::try_from(base_fee).map_err(|_| {
+            eyre::eyre!("genesis base_fee_per_gas {} does not fit in u64", base_fee)
+        })?;
+        Some(base_fee_u64)
+    } else {
+        None
+    };
+
+    let shanghai_active =
+        fork_time_active_at_genesis(genesis.config.shanghai_time, genesis.timestamp);
+    let withdrawals_root = if shanghai_active { Some(EMPTY_WITHDRAWALS) } else { None };
+
+    let cancun_active = fork_time_active_at_genesis(genesis.config.cancun_time, genesis.timestamp);
+    let (parent_beacon_block_root, blob_gas_used, excess_blob_gas) = if cancun_active {
+        (
+            Some(B256::ZERO),
+            Some(genesis.blob_gas_used.unwrap_or(0)),
+            Some(genesis.excess_blob_gas.unwrap_or(0)),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let prague_active = fork_time_active_at_genesis(genesis.config.prague_time, genesis.timestamp);
+    let requests_hash = if prague_active { Some(EMPTY_REQUESTS_HASH) } else { None };
+
+    Ok(Header {
+        parent_hash: genesis.parent_hash.unwrap_or_default(),
+        number: genesis.number.unwrap_or_default(),
+        gas_limit: genesis.gas_limit,
+        difficulty: genesis.difficulty,
+        nonce: B64::from(genesis.nonce),
+        extra_data: genesis.extra_data.clone(),
+        timestamp: genesis.timestamp,
+        mix_hash: genesis.mix_hash,
+        beneficiary: genesis.coinbase,
+        state_root: state_root_ref_unhashed(&genesis.alloc),
+        base_fee_per_gas,
+        withdrawals_root,
+        parent_beacon_block_root,
+        blob_gas_used,
+        excess_blob_gas,
+        requests_hash,
+        ..Default::default()
+    })
+}
+
+fn execution_genesis_block_from_file(path: &Path) -> eyre::Result<ExecutionBlock> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        eyre::eyre!("Failed to read execution genesis at {}: {}", path.display(), e)
+    })?;
+    let genesis: ExecutionGenesis = serde_json::from_str(&raw).map_err(|e| {
+        eyre::eyre!("Failed to parse execution genesis at {}: {}", path.display(), e)
+    })?;
+    let header = build_execution_genesis_header(&genesis)?;
+    let block_hash = header.hash_slow();
+    Ok(ExecutionBlock {
+        block_hash,
+        block_number: header.number,
+        parent_hash: header.parent_hash,
+        timestamp: header.timestamp,
+        prev_randao: load_prev_randao(),
+    })
 }
 
 pub struct Handle {
@@ -272,6 +361,18 @@ impl Node for App {
             blob_metrics, // Clone already done above
             archive_metrics,
         );
+
+        let execution_genesis_path = self
+            .execution_genesis_file
+            .clone()
+            .or_else(|| std::env::var("ULTRAMARINE_EL_GENESIS_JSON").ok().map(PathBuf::from))
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "execution genesis path missing; set --execution-genesis-path or ULTRAMARINE_EL_GENESIS_JSON"
+                )
+            })?;
+        let execution_genesis = execution_genesis_block_from_file(&execution_genesis_path)?;
+        state.latest_block = Some(execution_genesis);
 
         // Phase 4: Hydrate blob parent root from BlobMetadata (Layer 2)
         state.hydrate_blob_parent_root().await?;
@@ -488,21 +589,7 @@ impl Node for App {
             ));
         }
 
-        // 2) Eth RPC reachability and basic sanity (latest block must exist)
-        match execution_client
-            .eth()
-            .get_block_by_number(alloy_rpc_types_eth::BlockNumberOrTag::Latest, false)
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return Err(eyre::eyre!(
-                    "Eth RPC at {} returned no 'latest' block. Check genesis/chain is initialized.",
-                    eth_url_str
-                ))
-            }
-            Err(e) => return Err(eyre::eyre!("Failed to reach Eth RPC at {}: {}", eth_url_str, e)),
-        }
+        // 2) No Eth RPC preflight here: Engine API is the consensus oracle.
 
         // Extract job_tx and notice_rx from archiver_channels
         let (archiver_handle, archiver_job_tx, archive_notice_rx) = match archiver_channels {

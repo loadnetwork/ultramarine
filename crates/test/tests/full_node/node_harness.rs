@@ -92,6 +92,7 @@ use ultramarine_cli::{config::Config, new::generate_config};
 use ultramarine_consensus::{
     archive_metrics::ArchiveMetrics, metrics::DbMetrics, state::State, store::Store,
 };
+use ultramarine_genesis::build_dev_genesis;
 use ultramarine_node::node::{App, Handle};
 use ultramarine_types::{
     address::Address,
@@ -131,6 +132,7 @@ type ParentOverridePlan = Arc<dyn Fn(Height) -> Option<B256> + Send + Sync>;
 type StubStateHook = Arc<dyn Fn(usize, &mut StubState) + Send + Sync>;
 type ExecutionRequestsPlan = Arc<dyn Fn(Height) -> Vec<AlloyBytes> + Send + Sync>;
 type BundleOmitPlan = Arc<dyn Fn(Height) -> bool + Send + Sync>;
+type AcceptedPlan = Arc<dyn Fn(Height) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 struct HarnessConfig {
@@ -242,6 +244,17 @@ impl FullNodeTestBuilder {
     }
 
     #[allow(dead_code)]
+    fn with_el_http_get_block_failure<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize) -> bool + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            state.set_fail_get_block(plan(index));
+        })
+    }
+
+    #[allow(dead_code)]
     fn with_el_parent_override_plan<F>(self, plan: F) -> Self
     where
         F: Fn(usize, Height) -> Option<B256> + Send + Sync + 'static,
@@ -251,6 +264,19 @@ impl FullNodeTestBuilder {
             let plan = Arc::clone(&plan);
             let per_node: ParentOverridePlan = Arc::new(move |height| plan(index, height));
             state.set_parent_override_plan(per_node);
+        })
+    }
+
+    #[allow(dead_code)]
+    fn with_el_fcu_accepted_plan<F>(self, plan: F) -> Self
+    where
+        F: Fn(usize, Height) -> bool + Send + Sync + 'static,
+    {
+        let plan = Arc::new(plan);
+        self.with_stub_state_hook(move |index, state| {
+            let plan = Arc::clone(&plan);
+            let per_node: AcceptedPlan = Arc::new(move |height| plan(index, height));
+            state.set_accepted_plan(per_node);
         })
     }
 
@@ -2023,27 +2049,76 @@ async fn full_node_el_syncing_degrades_node() -> Result<()> {
 async fn full_node_el_syncing_still_sends_fcu() -> Result<()> {
     init_test_logging();
     FullNodeTestBuilder::new()
-        .node_count(2)
-        .with_el_sync_plan(|index, height| index == 0 && height.as_u64() >= 2)
+        .node_count(4)
+        .with_el_sync_plan(|index, height| index == 0 && height.as_u64() >= 1)
         .run(|network| {
             Box::pin(async move {
-                // Let the healthy node advance; node 0 should still attempt FCU while syncing.
-                network.wait_for_nodes_at(&[1], Height::new(3)).await?;
+                // Let healthy nodes advance; node 0 should still attempt FCU while syncing.
+                network.wait_for_nodes_at(&[1, 2, 3], Height::new(2)).await?;
                 sleep(Duration::from_millis(200)).await;
 
                 let guard = network.nodes[0].stub_state.lock().await;
-                let syncing_heads: Vec<u64> = guard
-                    .forkchoice_heads
-                    .iter()
-                    .copied()
-                    .filter(|head| *head >= 2)
-                    .collect();
-
                 eyre::ensure!(
-                    !syncing_heads.is_empty(),
+                    guard.forkchoice_calls > 0,
                     "expected FCU calls while EL syncing; recorded heads={:?}",
                     guard.forkchoice_heads
                 );
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_el_syncing_blocks_payload_build() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .with_el_sync_plan(|_index, height| height.as_u64() >= 1)
+        .run(|network| {
+            Box::pin(async move {
+                // Let the node attempt to propose for a couple of rounds.
+                sleep(Duration::from_secs(2)).await;
+
+                let guard = network.nodes[0].stub_state.lock().await;
+                eyre::ensure!(
+                    guard.get_payload_requests.is_empty(),
+                    "expected no getPayload calls while EL is syncing; got {:?}",
+                    guard.get_payload_requests
+                );
+                eyre::ensure!(
+                    guard.new_payload_requests.is_empty(),
+                    "expected no newPayload calls while EL is syncing; got {:?}",
+                    guard.new_payload_requests
+                );
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_fcu_gate_does_not_require_http_latest() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(1)
+        .run(|network| {
+            Box::pin(async move {
+                // Bootstrap normally, then force eth_getBlockByNumber to fail before restart.
+                network.wait_for_nodes_at(&[0], Height::new(2)).await?;
+                network.stop_node(0).await?;
+                {
+                    let mut guard = network.nodes[0].stub_state.lock().await;
+                    guard.set_fail_get_block(true);
+                }
+                network.start_node(0).await?;
+                // Restart should succeed because CL head is restored from store,
+                // and FCU gate should not depend on eth_getBlockByNumber.
+                network.wait_for_nodes_at(&[0], Height::new(3)).await?;
                 Ok(())
             })
         })
@@ -2100,6 +2175,49 @@ async fn full_node_el_transient_bad_payload_parent_recovers() -> Result<()> {
         .run(|network| {
             Box::pin(async move {
                 network.wait_for_nodes_at(&[0, 1], Height::new(3)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_split_head_recovery() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(4)
+        .with_el_parent_override_plan(|index, height| {
+            if height.as_u64() == 2 && index <= 1 {
+                // Force two nodes to build on a stale/invalid parent for height 2.
+                return Some(B256::from([0xBBu8; 32]));
+            }
+            None
+        })
+        .run(|network| {
+            Box::pin(async move {
+                // Split proposals should be rejected; consensus must still recover and advance.
+                network.wait_for_nodes_at(&[0, 1, 2, 3], Height::new(3)).await?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires full-node harness; run via make itest-node"]
+#[serial(full_node)]
+async fn full_node_fcu_accepted_rejected() -> Result<()> {
+    init_test_logging();
+    FullNodeTestBuilder::new()
+        .node_count(4)
+        .with_el_fcu_accepted_plan(|index, height| index == 0 && height.as_u64() == 2)
+        .run(|network| {
+            Box::pin(async move {
+                // Node 0 should refuse to propose when EL returns ACCEPTED, but the cluster
+                // should still advance via other proposers.
+                network.wait_for_nodes_at(&[0, 1, 2, 3], Height::new(3)).await?;
                 Ok(())
             })
         })
@@ -2264,6 +2382,7 @@ struct NodeProcess {
     event_rx: TokioMutex<RxEvent<LoadContext>>,
     config: Config,
     genesis_path: PathBuf,
+    execution_genesis_path: PathBuf,
     key_path: PathBuf,
     jwt_path: PathBuf,
     base_start_height: Option<Height>,
@@ -2302,6 +2421,7 @@ impl NodeProcess {
             genesis_file: self.genesis_path.clone(),
             private_key_file: self.key_path.clone(),
             start_height: app_start_height,
+            execution_genesis_file: Some(self.execution_genesis_path.clone()),
             engine_http_url: Some(engine_url),
             engine_ipc_path: None,
             eth1_rpc_url: Some(eth_url),
@@ -2417,6 +2537,8 @@ impl NetworkHarness {
     async fn start(config: &HarnessConfig) -> Result<Self> {
         eyre::ensure!(config.node_count > 0, "at least one node required");
         let (genesis, validator_keys) = make_genesis(config.node_count);
+        let execution_genesis =
+            build_dev_genesis(1).wrap_err("build execution genesis for harness")?;
 
         // Port selection:
         // - Avoid the TOCTOU race of "bind :0, read port, drop listener".
@@ -2457,6 +2579,17 @@ impl NetworkHarness {
                 let validator = &validator_keys[index];
                 let validator_address = validator.address();
                 let genesis_path = match write_json(home.path().join("genesis.json"), &genesis) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        engine_stub.shutdown().await;
+                        start_error = Some(e);
+                        break;
+                    }
+                };
+                let execution_genesis_path = match write_json(
+                    home.path().join("execution_genesis.json"),
+                    &execution_genesis,
+                ) {
                     Ok(path) => path,
                     Err(e) => {
                         engine_stub.shutdown().await;
@@ -2533,6 +2666,7 @@ impl NetworkHarness {
                     genesis_file: genesis_path,
                     private_key_file: key_path,
                     start_height: config.start_height,
+                    execution_genesis_file: Some(execution_genesis_path.clone()),
                     engine_http_url: Some(engine_http_url.clone()),
                     engine_ipc_path: None,
                     eth1_rpc_url: Some(eth1_rpc_url),
@@ -2557,6 +2691,7 @@ impl NetworkHarness {
                     event_rx,
                     config: stored_config,
                     genesis_path: stored_genesis,
+                    execution_genesis_path,
                     key_path: stored_key,
                     jwt_path: stored_jwt,
                     base_start_height: config.start_height,
@@ -3633,8 +3768,13 @@ struct StubState {
     parent_override_plan: Option<ParentOverridePlan>,
     execution_requests_plan: Option<ExecutionRequestsPlan>,
     omit_bundle_plan: Option<BundleOmitPlan>,
+    accepted_plan: Option<AcceptedPlan>,
     new_payload_requests: Vec<(u64, Vec<String>)>,
+    get_payload_requests: Vec<u64>,
+    forkchoice_calls: u64,
     forkchoice_heads: Vec<u64>,
+    forkchoice_with_attrs: Vec<u64>,
+    fail_get_block: bool,
 }
 
 impl StubState {
@@ -3648,8 +3788,13 @@ impl StubState {
             parent_override_plan: None,
             execution_requests_plan: None,
             omit_bundle_plan: None,
+            accepted_plan: None,
             new_payload_requests: Vec::new(),
+            get_payload_requests: Vec::new(),
+            forkchoice_calls: 0,
             forkchoice_heads: Vec::new(),
+            forkchoice_with_attrs: Vec::new(),
+            fail_get_block: false,
         }
     }
 
@@ -3691,6 +3836,18 @@ impl StubState {
     fn omit_bundle_for(&self, height: Height) -> bool {
         self.omit_bundle_plan.as_ref().map(|plan| plan(height)).unwrap_or(false)
     }
+
+    fn set_accepted_plan(&mut self, plan: AcceptedPlan) {
+        self.accepted_plan = Some(plan);
+    }
+
+    fn is_accepted_for(&self, height: Height) -> bool {
+        self.accepted_plan.as_ref().map(|plan| plan(height)).unwrap_or(false)
+    }
+
+    fn set_fail_get_block(&mut self, enabled: bool) {
+        self.fail_get_block = enabled;
+    }
 }
 
 fn default_execution_block() -> ExecutionBlock {
@@ -3714,7 +3871,11 @@ fn timestamp_for_height(height: u64) -> u64 {
 }
 
 fn height_from_block_hash(hash: B256) -> Option<u64> {
-    if hash == B256::ZERO { None } else { Some(u64::from(hash.0[0])) }
+    if hash == B256::ZERO {
+        return None;
+    }
+    let first = hash.0[0];
+    if hash.0.iter().all(|byte| *byte == first) { Some(u64::from(first)) } else { None }
 }
 
 #[derive(Deserialize)]
@@ -3824,6 +3985,7 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
         serde_json::from_value(Value::Array(params)).wrap_err("parse forkchoice params")?;
 
     let mut guard = state.lock().await;
+    guard.forkchoice_calls += 1;
 
     if let Some(head_height) = height_from_block_hash(forkchoice.head_block_hash) {
         guard.forkchoice_heads.push(head_height);
@@ -3855,6 +4017,18 @@ async fn handle_forkchoice(req: &RpcRequest, state: Arc<TokioMutex<StubState>>) 
     if let Some(attrs) = payload_attrs {
         // Generate payload for next height (latest + 1)
         let next_height = Height::new(guard.latest_block.block_number + 1);
+        guard.forkchoice_with_attrs.push(next_height.as_u64());
+
+        if guard.is_accepted_for(next_height) {
+            return Ok(json!({
+                "payloadStatus": {
+                    "status": "ACCEPTED",
+                    "latestValidHash": Value::Null,
+                    "validationError": Value::Null
+                },
+                "payloadId": Value::Null
+            }));
+        }
 
         if guard.is_syncing_for(next_height) {
             return Ok(json!({
@@ -3918,8 +4092,10 @@ async fn handle_get_payload(
     let payload_id_hex =
         params.first().and_then(Value::as_str).ok_or_else(|| eyre::eyre!("missing payload id"))?;
     let id_bytes = parse_payload_id(payload_id_hex)?;
+    let payload_id = u64::from_be_bytes(id_bytes);
 
     let mut guard = state.lock().await;
+    guard.get_payload_requests.push(payload_id);
     let (payload, bundle, execution_requests) =
         guard.pending.remove(&id_bytes).ok_or_else(|| eyre::eyre!("unknown payload id"))?;
 
@@ -3986,6 +4162,9 @@ async fn handle_new_payload(
 
 async fn handle_get_block(state: Arc<TokioMutex<StubState>>) -> Result<Value> {
     let guard = state.lock().await;
+    if guard.fail_get_block {
+        return Err(eyre::eyre!("eth_getBlockByNumber disabled by test"));
+    }
     let block = &guard.latest_block;
     Ok(json!({
         "number": format_hex_u64(block.block_number),

@@ -1661,7 +1661,7 @@ async fn test_history_min_height_returns_genesis_after_pruning() {
     for h in 1..=5u64 {
         parent_root = seed_decided_blob_metadata(&mut state, Height::new(h), parent_root)
             .await
-            .expect(&format!("seed decided blob metadata at height {}", h));
+            .unwrap_or_else(|_| panic!("seed decided blob metadata at height {}", h));
     }
 
     // Step 3: Verify get_earliest_height() returns Height(0) even with blocks up to height 5

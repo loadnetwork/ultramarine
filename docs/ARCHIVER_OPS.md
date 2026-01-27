@@ -8,10 +8,10 @@ For the full Phase 6 design and its code-audited status, see `docs/PHASE6_ARCHIV
 
 **IMPORTANT**: Load Network uses the **archive event as the boundary for blob pruning**, NOT the Ethereum DA window.
 
-| What Gets Pruned | What Gets Retained Forever |
-|------------------|---------------------------|
+| What Gets Pruned                      | What Gets Retained Forever               |
+| ------------------------------------- | ---------------------------------------- |
 | Blob bytes (after archive + finality) | Decided values, certificates, block data |
-| | BlobMetadata, archive records/locators |
+|                                       | BlobMetadata, archive records/locators   |
 
 **Key invariant**: `history_min_height == 0` for all validators, enabling fullnode sync from genesis.
 

@@ -13,6 +13,7 @@
 ### Session 4: Blockscout Fixes & Ansible Role Improvements (2026-01-15 ~23:30 UTC)
 
 **Problems Found**:
+
 1. Blockscout had stale data with 1970 timestamps from previous deployment
 2. Blockscout Ansible role tried to build images locally on macOS → QEMU crash (exit 139)
 3. `blockscout.service` used `Type=simple` with `docker compose up -d` → service exited immediately
@@ -45,6 +46,7 @@
    - Prevents stale `--debug.tip` or other overrides from breaking fresh deployments
 
 **Verification**:
+
 - Blockscout API: `curl http://127.0.0.1:4000/api/v2/stats` → `total_blocks: 33` (and counting)
 - Block timestamps: `2026-01-16T09:49:56.000000Z` (correct, not 1970!)
 - All containers healthy: redis, db, stats-db, backend, frontend, stats, visualizer, sig-provider
@@ -56,6 +58,7 @@
 **Problem**: Network needed clean restart to apply all fixes from Sessions 1-2.
 
 **Actions**:
+
 1. Codex CLI review (gpt-5.2-codex) - passed
 2. cargo test - 44/44 passed
 3. cargo clippy - fixed `collapsible_if` warning in state.rs
@@ -65,6 +68,7 @@
 7. Health check passed all hosts
 
 **Issue Found**: Fullnode (blockscout) had stale systemd override files:
+
 - `/etc/systemd/system/load-reth@node-rpc.service.d/debug-tip.conf`
 - `/etc/systemd/system/load-reth@node-rpc.service.d/override.conf`
 
@@ -85,23 +89,26 @@ These contained hardcoded `--debug.tip` with OLD genesis hash, preventing sync.
 - **Blockscout**: Rebuilding with corrected RPC URL
 
 ### Verified Fixes
-| Fix | Status | Verification |
-|-----|--------|--------------|
-| FIX-001: store.prune() | ✅ Working | Decided data retained, fullnode syncs from h=1 |
-| FIX-002: history_min_height | ✅ Working | Returns 0, peers accept sync requests |
-| FIX-003: Archive notice handling | ✅ Deployed | Warn+continue pattern active |
-| FIX-004: Cleanup logging | ✅ Deployed | Proper error logging |
-| FIX-005: EL --debug.tip | ✅ Working | EL syncs without FCU chicken-egg (temp workaround) |
-| FIX-006: Blockscout RPC URL | ✅ Working | Changed to 172.17.0.1 |
-| FIX-007: UFW rule for docker | ✅ Working | Allow docker→host:11545 |
-| FIX-008: FCU before newPayload | ✅ Implemented | Permanent fix for CL-EL deadlock |
+
+| Fix                              | Status         | Verification                                       |
+| -------------------------------- | -------------- | -------------------------------------------------- |
+| FIX-001: store.prune()           | ✅ Working     | Decided data retained, fullnode syncs from h=1     |
+| FIX-002: history_min_height      | ✅ Working     | Returns 0, peers accept sync requests              |
+| FIX-003: Archive notice handling | ✅ Deployed    | Warn+continue pattern active                       |
+| FIX-004: Cleanup logging         | ✅ Deployed    | Proper error logging                               |
+| FIX-005: EL --debug.tip          | ✅ Working     | EL syncs without FCU chicken-egg (temp workaround) |
+| FIX-006: Blockscout RPC URL      | ✅ Working     | Changed to 172.17.0.1                              |
+| FIX-007: UFW rule for docker     | ✅ Working     | Allow docker→host:11545                            |
+| FIX-008: FCU before newPayload   | ✅ Implemented | Permanent fix for CL-EL deadlock                   |
 
 ### Network Restart
+
 - Full wipe via `make net-wipe NET=fibernet WIPE_CONFIRM=YES`
 - Fresh deploy via `make net-gen` + `make net-deploy` + `make net-up`
 - All nodes started from genesis with new image
 
 ### Docker Image
+
 - Tag: `loadnetwork/ultramarine:fibernet`
 - SHA: `sha256:465e8568e92fe9d5faddd69f8cd02abcc8009239d31f0da9a2daaedd28240073`
 
@@ -115,37 +122,38 @@ Fixed all issues identified by Codex review (gpt-5.2-codex), plus genesis timest
 
 ### Code Changes (Rust)
 
-| File | Change | Status |
-|------|--------|--------|
-| `crates/consensus/src/state.rs` | FCU before newPayload (gated to sync mode) | ✅ |
-| `crates/consensus/src/state.rs` | Use `new_payload_sync_timeout` (2s) in sync mode | ✅ |
-| `crates/consensus/src/state.rs` | Only ignore `SyncingForkchoice` FCU errors | ✅ |
-| `crates/consensus/src/state.rs` | Added `new_payload_sync_timeout` to ExecutionRetryConfig | ✅ |
-| `crates/consensus/src/state/tests/mod.rs` | Updated test config | ✅ |
-| `crates/genesis/src/lib.rs` | Genesis timestamp: 0 → current time | ✅ |
+| File                                      | Change                                                   | Status |
+| ----------------------------------------- | -------------------------------------------------------- | ------ |
+| `crates/consensus/src/state.rs`           | FCU before newPayload (gated to sync mode)               | ✅     |
+| `crates/consensus/src/state.rs`           | Use `new_payload_sync_timeout` (2s) in sync mode         | ✅     |
+| `crates/consensus/src/state.rs`           | Only ignore `SyncingForkchoice` FCU errors               | ✅     |
+| `crates/consensus/src/state.rs`           | Added `new_payload_sync_timeout` to ExecutionRetryConfig | ✅     |
+| `crates/consensus/src/state/tests/mod.rs` | Updated test config                                      | ✅     |
+| `crates/genesis/src/lib.rs`               | Genesis timestamp: 0 → current time                      | ✅     |
 
 ### Infrastructure Changes (Ansible)
 
-| File | Change | Status |
-|------|--------|--------|
-| `infra/templates/systemd/load-reth@.service.j2` | Optional `--debug.tip` support | ✅ |
-| `infra/ansible/roles/blockscout/defaults/main.yml` | RPC URL: `172.17.0.1`, Chain ID: `1984` | ✅ |
-| `infra/ansible/roles/firewall/tasks/main.yml` | UFW rule for Docker subnet | ✅ |
-| `infra/manifests/fibernet.yaml` | Chain ID: `1984` | ✅ |
+| File                                               | Change                                  | Status |
+| -------------------------------------------------- | --------------------------------------- | ------ |
+| `infra/templates/systemd/load-reth@.service.j2`    | Optional `--debug.tip` support          | ✅     |
+| `infra/ansible/roles/blockscout/defaults/main.yml` | RPC URL: `172.17.0.1`, Chain ID: `1984` | ✅     |
+| `infra/ansible/roles/firewall/tasks/main.yml`      | UFW rule for Docker subnet              | ✅     |
+| `infra/manifests/fibernet.yaml`                    | Chain ID: `1984`                        | ✅     |
 
 ### Codex Review (gpt-5.2-codex)
 
 All high/medium severity issues resolved:
+
 - ✅ Sync timeout now used correctly (2s in sync mode, 30s in normal)
 - ✅ FCU gated to sync mode only (no extra latency in consensus)
 - ✅ Error handling distinguishes SYNCING from other errors
 
 ### Bugs Fixed
 
-| Bug | Description | Status |
-|-----|-------------|--------|
-| BUG-009 | Genesis timestamp = 0 (1970) | ✅ Fixed |
-| BUG-010 | Placeholder fee_recipient | Pending |
+| Bug     | Description                   | Status   |
+| ------- | ----------------------------- | -------- |
+| BUG-009 | Genesis timestamp = 0 (1970)  | ✅ Fixed |
+| BUG-010 | Placeholder fee_recipient     | Pending  |
 | BUG-011 | Wrong chain ID (16384 → 1984) | ✅ Fixed |
 
 ### Build Status
@@ -155,11 +163,11 @@ All high/medium severity issues resolved:
 
 ### Remaining Tasks (Requires Network Wipe)
 
-| Task | Impact | Priority |
-|------|--------|----------|
-| Fix placeholder fee_recipient (`0x2A2a...`) | Make configurable per validator | Medium |
-| Deploy new Docker image | Build with all fixes | High |
-| Network wipe + redeploy | Apply genesis changes (timestamp, chain ID) | High |
+| Task                                        | Impact                                      | Priority |
+| ------------------------------------------- | ------------------------------------------- | -------- |
+| Fix placeholder fee_recipient (`0x2A2a...`) | Make configurable per validator             | Medium   |
+| Deploy new Docker image                     | Build with all fixes                        | High     |
+| Network wipe + redeploy                     | Apply genesis changes (timestamp, chain ID) | High     |
 
 ### Deployment Commands
 
@@ -185,6 +193,7 @@ make net-health NET=fibernet
 **Symptom**: Fullnode syncing at ~1 block/minute instead of fast catch-up.
 
 **Root Cause**: Chicken-and-egg deadlock:
+
 1. CL (ultramarine) syncs blocks via ValueSync
 2. CL sends `newPayloadV4` to EL (load-reth)
 3. EL returns `SYNCING` because it hasn't started pipeline sync
@@ -194,6 +203,7 @@ make net-health NET=fibernet
 7. **Result**: CL blocked on EL, EL blocked on CL
 
 **Evidence from logs**:
+
 ```
 EL: WARN Post-merge network, but never seen beacon client. Please launch one to follow the chain!
 CL: WARN Execution layer new_payload returned SYNCING; retrying
@@ -222,11 +232,13 @@ The `--debug.tip` was a temporary workaround. Permanent fix now implemented.
 #### Root Cause Confirmed
 
 **Problem**: Ultramarine doesn't send `forkchoiceUpdated` during initial fullnode sync:
+
 - `process_synced_package()` only sends `newPayloadV4`, not FCU
 - EL (load-reth) has no sync target → returns SYNCING
 - CL retries for 30s per block → 1 block/minute
 
 **Industry Standard** (Lighthouse, Prysm, Teku):
+
 - Send FCU with `headBlockHash` **before** `newPayloadV4` during sync
 - EL learns sync target immediately, starts pipeline sync
 - Use shorter timeout (2s) during sync mode, normal (30s) during consensus
@@ -281,12 +293,12 @@ The `--debug.tip` was a temporary workaround. Permanent fix now implemented.
 
 #### Codex Review Findings (gpt-5.2-codex) - ALL FIXED ✅
 
-| Severity | Issue | Status |
-|----------|-------|--------|
-| **High** | `new_payload_sync_timeout` added but never used | ✅ FIXED: Now uses sync timeout when `blobs_already_decided` |
-| **Medium** | FCU errors ignored unconditionally | ✅ FIXED: Only ignores `SyncingForkchoice`, warns on other errors |
-| **Medium** | FCU-before-newPayload is unconditional | ✅ FIXED: Gated to sync mode (`blobs_already_decided`) |
-| **Low** | No tests for new FCU ordering behavior | TODO: Add integration tests |
+| Severity   | Issue                                           | Status                                                            |
+| ---------- | ----------------------------------------------- | ----------------------------------------------------------------- |
+| **High**   | `new_payload_sync_timeout` added but never used | ✅ FIXED: Now uses sync timeout when `blobs_already_decided`      |
+| **Medium** | FCU errors ignored unconditionally              | ✅ FIXED: Only ignores `SyncingForkchoice`, warns on other errors |
+| **Medium** | FCU-before-newPayload is unconditional          | ✅ FIXED: Gated to sync mode (`blobs_already_decided`)            |
+| **Low**    | No tests for new FCU ordering behavior          | TODO: Add integration tests                                       |
 
 **Codex Assessment:** All high/medium issues resolved. Code now follows industry best practices.
 
@@ -307,6 +319,7 @@ The `--debug.tip` was a temporary workaround. Permanent fix now implemented.
 **File created**: `/etc/systemd/system/load-reth@node-rpc.service.d/override.conf`
 
 **Content**:
+
 ```ini
 [Service]
 ExecStart=
@@ -314,6 +327,7 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i ... --debu
 ```
 
 **Ansible status**: ✅ Added to `infra/templates/systemd/load-reth@.service.j2:45-47`
+
 - Optional `--debug.tip` via `loadnet_el_debug_tip` variable
 - Note: With FIX-008, this should no longer be needed
 
@@ -340,12 +354,14 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i ... --debu
 ## Current Status (2026-01-15 13:55 UTC)
 
 ### Network Status
+
 - **Validators**: 6 nodes producing blocks (synced)
 - **Fullnode CL (node-rpc)**: Syncing fast (height ~2400+)
 - **Fullnode EL (load-reth)**: Syncing fast after debug.tip fix
 - **Blockscout**: Rebuilding, will index when ready
 
 ### What Works
+
 - Network consensus: validators are producing blocks normally
 - ValueSync MetadataOnly: implemented support for syncing from pruned peers
 - Consensus data preservation: decided values, certificates, and block data now retained indefinitely
@@ -354,6 +370,7 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i ... --debu
 - **Fullnode sync from genesis**: Operational after debug.tip fix
 
 ### Deployment Complete
+
 - ✅ All fixes (FIX-001 through FIX-007) completed and tested
 - ✅ All codex reviews APPROVED
 - ✅ TEST-003 written and passing
@@ -367,6 +384,7 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i ... --debu
 ### Problem: "No peer to request sync from"
 
 **Symptom**: Fullnode logs show:
+
 ```
 sync{height.tip=0 height.sync=1}: Received peer status peer.id=... peer.height=6725859
 SYNC REQUIRED: Falling behind height.tip=0 height.sync=1 height.peer=6725859
@@ -418,23 +436,23 @@ Peer scores: {}
 
 ### Expected vs Actual Behavior (FIXED)
 
-| Component | Expected | Actual (After Fixes) |
-|-----------|----------|---------------------|
-| Blob bytes | Pruned after archival | Pruned after archival (correct) |
-| Decided values | Retained forever | Retained forever (FIXED) |
-| Certificates | Retained forever | Retained forever (FIXED) |
-| Block data | Retained forever | Retained forever (FIXED) |
-| BlobMetadata | Retained forever | Retained forever (correct) |
-| history_min_height | 0 (invariant) | 0 (FIXED via FIX-002) |
+| Component          | Expected              | Actual (After Fixes)            |
+| ------------------ | --------------------- | ------------------------------- |
+| Blob bytes         | Pruned after archival | Pruned after archival (correct) |
+| Decided values     | Retained forever      | Retained forever (FIXED)        |
+| Certificates       | Retained forever      | Retained forever (FIXED)        |
+| Block data         | Retained forever      | Retained forever (FIXED)        |
+| BlobMetadata       | Retained forever      | Retained forever (correct)      |
+| history_min_height | 0 (invariant)         | 0 (FIXED via FIX-002)           |
 
 ### Archive-Based Pruning Policy (Load Network)
 
 **IMPORTANT**: Load Network uses the **archive event as the boundary for blob pruning**, NOT the Ethereum DA window.
 
-| Ethereum Approach | Load Network Approach |
-|-------------------|----------------------|
-| Time-based DA window (~18 days / 4096 epochs) | Archive event + finality |
-| Prune after epochs elapse | Prune after verified archival |
+| Ethereum Approach                             | Load Network Approach         |
+| --------------------------------------------- | ----------------------------- |
+| Time-based DA window (~18 days / 4096 epochs) | Archive event + finality      |
+| Prune after epochs elapse                     | Prune after verified archival |
 
 This follows the Lighthouse pattern: beacon blocks (decided values, certs, block data) are retained forever, only blob bytes are pruned after verified archival.
 
@@ -447,6 +465,7 @@ This follows the Lighthouse pattern: beacon blocks (decided values, certs, block
 Extended `SyncedValuePackage::MetadataOnly` to include execution payload:
 
 **Files changed**:
+
 - `types/proto/sync.proto` - Added `execution_payload_ssz` and `execution_requests` fields
 - `types/src/sync.rs` - Extended MetadataOnly struct
 - `node/src/app.rs` - GetDecidedValue returns payload even when blobs pruned
@@ -457,6 +476,7 @@ Extended `SyncedValuePackage::MetadataOnly` to include execution payload:
 Fixed panic when syncing from pruned peers where keccak hashes are not available:
 
 **Files changed**:
+
 - `types/src/blob_metadata.rs` - Added `update_keccak_hash` method
 - `consensus/src/state.rs` - Use B256::ZERO placeholder, learn hashes from archive notices
 
@@ -471,26 +491,31 @@ Documented `docker buildx` approach in CLAUDE.md.
 ### Why MetadataOnly Fix Is Not Sufficient
 
 The MetadataOnly enhancement helps when:
+
 - Peer has the block data but blob bytes are pruned
 - Syncing fullnode is within the pruning window
 
 It does NOT help when:
+
 - Peer has pruned ALL data (decided values, certificates, block data)
 - Syncing fullnode needs data from height 1 but all peers pruned data below ~6.7M
 
 ### Required Fix Options
 
 **Option A: Stop pruning consensus data (recommended)**
+
 - Only prune blob bytes in `blob_engine`
 - Keep decided values, certificates, block data indefinitely
 - Requires disk space planning
 
 **Option B: Archive-based sync**
+
 - Fullnode fetches pruned data from archive instead of peers
 - Requires archive read API implementation
 - Complex: need to reconstruct block data from archived blobs
 
 **Option C: Checkpoint sync**
+
 - Fullnode starts from recent checkpoint (like Ethereum weak subjectivity)
 - Requires checkpoint distribution mechanism
 - State sync from EL needed
@@ -500,6 +525,7 @@ It does NOT help when:
 ## Server Logs
 
 ### Validator Status (lon2-1, Jan 15)
+
 ```
 ● ultramarine@node-0.service - Ultramarine Consensus Client (node-0)
    Active: active (running)
@@ -507,6 +533,7 @@ Height: 6725859+ and increasing
 ```
 
 ### Fullnode Status (blockscout, Jan 15)
+
 ```
 ● ultramarine@node-rpc.service - Ultramarine Consensus Client (node-rpc)
    Active: active (running)
@@ -544,6 +571,7 @@ Peer scores: {}
 **Problem:** Returns pruned minimum (e.g. 6718092) instead of genesis (0)
 **Fix:** Return Height(0) if genesis metadata exists in BLOB_METADATA_DECIDED_TABLE
 **Codex Review:** APPROVED with caveats:
+
 - Storage growth is now unbounded (documented concern)
 - Recommend adding explicit genesis bootstrap test
 - Documentation should be updated
@@ -555,12 +583,14 @@ Peer scores: {}
 **Result:** APPROVED ✅
 
 **Key findings:**
+
 1. Changes correctly follow Lighthouse pattern
 2. Genesis seeding logic is sound and idempotent
 3. Error handling is safe with fallback
 4. Storage growth is now unbounded concern (needs documentation)
 
 **Recommended tests:**
+
 - test_bootstrap_seeds_genesis_blob_metadata()
 - test_fullnode_sync_from_genesis()
 - test_storage_retention_across_restart()
@@ -573,6 +603,7 @@ Peer scores: {}
 **File:** `crates/consensus/src/state.rs` (3 locations: 1707-1716, 1833-1843, 1866-1876)
 **Change:** Archive notice failures now warn and continue instead of aborting sync
 **Codex Review:** APPROVED with medium-severity note:
+
 - Consider distinguishing validation errors from storage errors
 - Consider rate-limiting warnings for noisy scenarios
 
@@ -612,11 +643,13 @@ Peer scores: {}
 **Target:** Linux x86_64 (amd64)
 
 **Build Method:** docker buildx with QEMU emulation
+
 ```bash
 docker buildx build --platform linux/amd64 -t loadnetwork/ultramarine:fibernet --push .
 ```
 
 **Why buildx:**
+
 - Native macOS M-series support
 - QEMU emulation for linux/amd64 architecture
 - Avoids `cross` toolchain issues with ghcr.io image pulls
@@ -631,23 +664,27 @@ docker buildx build --platform linux/amd64 -t loadnetwork/ultramarine:fibernet -
 **External Review Source:** Codex CLI review of all consensus fixes
 
 ### Ethereum Specification Compliance
+
 - ✅ Changes follow standard Ethereum consensus patterns
 - ✅ Lighthouse pattern adherence verified for DA window handling
 - ✅ Execution payload handling follows EL integration best practices
 
 ### Lighthouse Pattern Match
+
 - ✅ Blob pruning strategy aligns with Lighthouse implementation
 - ✅ Consensus data retention matches Lighthouse requirements
 - ✅ Sync request filtering follows proven patterns
 - ✅ Block import with MetadataOnly mirrors Lighthouse sidcar coupling logic
 
 ### Malachite Sync Requirements
+
 - ✅ Genesis seeding enables full-node sync from genesis (Height 0)
 - ✅ History tracking now provides accurate earliest height
 - ✅ Peer filtering logic correctly identifies peers with required data
 - ✅ Archive notice handling prevents sync abortion on recoverable errors
 
 ### Archive Event as Boundary
+
 - ✅ Archive events mark DA window boundary (deviation from strict DA window)
 - ✅ Blocks within DA window: full blobs required (standard behavior)
 - ✅ Blocks outside DA window: execution payload sufficient with MetadataOnly
@@ -662,6 +699,7 @@ docker buildx build --platform linux/amd64 -t loadnetwork/ultramarine:fibernet -
 **Symptom in Blockscout:** "56y ago | Jan 01 1970 01:58:14 AM"
 
 **Root Cause:** `crates/genesis/src/lib.rs:97`
+
 ```rust
 // BEFORE:
 .with_timestamp(0)
@@ -683,6 +721,7 @@ docker buildx build --platform linux/amd64 -t loadnetwork/ultramarine:fibernet -
 **Symptom in Blockscout:** Miner = `0x2A2a2a2a2a2A2A2a2a2a2A2a2A2A2A2a2A2A2a2a`
 
 **Root Cause:** `crates/execution/src/client.rs:212, 398`
+
 ```rust
 // CRITICAL TODO comment in code acknowledges this is a placeholder
 suggested_fee_recipient: Address::repeat_byte(42).to_alloy_address(),
@@ -701,6 +740,7 @@ suggested_fee_recipient: Address::repeat_byte(42).to_alloy_address(),
 **Required:** Chain ID must be **1984** for Fibernet
 
 **Files updated:**
+
 - ✅ `infra/ansible/roles/blockscout/defaults/main.yml:11` - changed to 1984
 - ✅ `infra/manifests/fibernet.yaml:5` - changed to 1984
 - `crates/genesis/src/lib.rs` - already uses parameter (no hardcoding)

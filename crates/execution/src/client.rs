@@ -179,11 +179,15 @@ impl ExecutionClient {
         match payload_status.status {
             PayloadStatusEnum::Valid => {
                 if payload_status.latest_valid_hash != Some(head_block_hash) {
-                    tracing::warn!(
+                    tracing::error!(
                         latest_valid_hash = ?payload_status.latest_valid_hash,
                         head_block_hash = ?head_block_hash,
                         "VALID status but latest_valid_hash does not match head"
                     );
+                    return Err(eyre::eyre!(
+                        "Engine API violation: latest_valid_hash mismatch for head {:?}",
+                        head_block_hash
+                    ));
                 }
                 payload_status.latest_valid_hash.ok_or_else(|| {
                     eyre::eyre!("Engine API spec violation: VALID status without latestValidHash")
@@ -272,7 +276,7 @@ impl ExecutionClient {
         // We handle that via retry in `forkchoice_updated_with_attributes_retry`.
 
         match payload_status.status {
-            PayloadStatusEnum::Valid | PayloadStatusEnum::Accepted => {
+            PayloadStatusEnum::Valid => {
                 let Some(payload_id) = payload_id else {
                     tracing::error!(
                         status = ?payload_status.status,
@@ -283,13 +287,6 @@ impl ExecutionClient {
                         payload_status.status
                     ));
                 };
-                if payload_status.status == PayloadStatusEnum::Accepted {
-                    tracing::warn!(
-                        head = ?block_hash,
-                        latest_valid_hash = ?payload_status.latest_valid_hash,
-                        "forkchoiceUpdated returned ACCEPTED with payload attributes; proceeding using payloadId"
-                    );
-                }
                 // See how payload is constructed: https://github.com/ethereum/consensus-specs/blob/v1.1.5/specs/merge/validator.md#block-proposal
                 let payload_result = self.engine.get_payload(payload_id).await?;
                 let payload_inner = &payload_result.payload.payload_inner.payload_inner;
@@ -335,6 +332,14 @@ impl ExecutionClient {
             // Additionally, the CRITICAL TODO for `suggested_fee_recipient` in this function
             // must be addressed before any real-world use to ensure transaction fees are
             // collected.
+            PayloadStatusEnum::Accepted => {
+                tracing::error!(
+                    head = ?block_hash,
+                    latest_valid_hash = ?payload_status.latest_valid_hash,
+                    "Engine API spec violation: forkchoiceUpdated returned ACCEPTED"
+                );
+                Err(eyre::eyre!("Engine API spec violation: forkchoiceUpdated returned ACCEPTED"))
+            }
             status => {
                 tracing::error!(
                     ?status,
@@ -463,7 +468,7 @@ impl ExecutionClient {
         // We handle that via retry in `forkchoice_updated_with_attributes_retry`.
 
         match payload_status.status {
-            PayloadStatusEnum::Valid | PayloadStatusEnum::Accepted => {
+            PayloadStatusEnum::Valid => {
                 let Some(payload_id) = payload_id else {
                     tracing::error!(
                         status = ?payload_status.status,
@@ -474,14 +479,6 @@ impl ExecutionClient {
                         payload_status.status
                     ));
                 };
-                if payload_status.status == PayloadStatusEnum::Accepted {
-                    tracing::warn!(
-                        head = ?block_hash,
-                        latest_valid_hash = ?payload_status.latest_valid_hash,
-                        "forkchoiceUpdated returned ACCEPTED with payload attributes; proceeding using payloadId"
-                    );
-                }
-
                 // Step 2: Call getPayloadV3 to retrieve the block and blob bundle
                 //
                 // This uses the new get_payload_with_blobs() method which:
@@ -537,6 +534,14 @@ impl ExecutionClient {
             }
             // TODO: A production-ready client must handle all possible statuses gracefully.
             // See comments in generate_block() for full status handling requirements.
+            PayloadStatusEnum::Accepted => {
+                tracing::error!(
+                    head = ?block_hash,
+                    latest_valid_hash = ?payload_status.latest_valid_hash,
+                    "Engine API spec violation: forkchoiceUpdated returned ACCEPTED"
+                );
+                Err(eyre::eyre!("Engine API spec violation: forkchoiceUpdated returned ACCEPTED"))
+            }
             status => {
                 tracing::error!(
                     ?status,
@@ -626,40 +631,10 @@ impl ExecutionClient {
                     continue;
                 }
                 PayloadStatusEnum::Accepted => {
-                    // `ACCEPTED` is not listed as a valid response for forkchoiceUpdated in the
-                    // spec. Be liberal:
-                    // - If the EL provides a payloadId, proceed so proposers can keep producing
-                    //   blocks.
-                    // - Otherwise retry briefly, then fail so consensus can progress to nil.
-                    if res.payload_status.latest_valid_hash.is_some() {
-                        tracing::warn!(
-                            head = ?head,
-                            latest_valid_hash = ?res.payload_status.latest_valid_hash,
-                            "engine_forkchoiceUpdatedV3 returned ACCEPTED with non-null latestValidHash"
-                        );
-                    }
-                    if res.payload_id.is_some() {
-                        tracing::warn!(
-                            head = ?head,
-                            latest_valid_hash = ?res.payload_status.latest_valid_hash,
-                            "engine_forkchoiceUpdatedV3 returned ACCEPTED with payloadId; proceeding"
-                        );
-                        return Ok(res);
-                    }
-                    if attempts >= max_attempts {
-                        return Err(eyre::eyre!(
-                            "engine_forkchoiceUpdatedV3 stuck in ACCEPTED after {} attempts (head={:?})",
-                            attempts,
-                            head
-                        ));
-                    }
-                    tracing::warn!(
-                        head = ?head,
-                        latest_valid_hash = ?res.payload_status.latest_valid_hash,
-                        "engine_forkchoiceUpdatedV3 returned ACCEPTED without payloadId; retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
+                    return Err(eyre::eyre!(
+                        "Engine API spec violation: forkchoiceUpdated returned ACCEPTED (head={:?})",
+                        head
+                    ));
                 }
                 status => {
                     return Err(eyre::eyre!(
@@ -910,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_with_payload_id_proceeds_to_get_payload() {
+    async fn accepted_with_payload_id_is_rejected() {
         let head = AB256::from([9u8; 32]);
         let payload_id = PayloadId::from(FixedBytes::<8>::from([1u8; 8]));
         let payload_result = sample_payload_result(AB256::from([7u8; 32]), head, 2);
@@ -932,11 +907,8 @@ mod tests {
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
-        let res = client.generate_block(&latest_block).await.unwrap();
-        assert_eq!(
-            res.payload.payload_inner.payload_inner.parent_hash, head,
-            "payload returned by get_payload should be used"
-        );
+        let err = client.generate_block(&latest_block).await.unwrap_err();
+        assert!(err.to_string().contains("ACCEPTED"), "unexpected error: {err:?}");
     }
 
     #[tokio::test]
@@ -1003,6 +975,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_valid_hash_mismatch_is_error() {
+        let head = AB256::from([9u8; 32]);
+        let payload_id = PayloadId::from(FixedBytes::<8>::from([6u8; 8]));
+        let payload_result = sample_payload_result(AB256::from([7u8; 32]), head, 2);
+        let other = AB256::from([8u8; 32]);
+
+        let engine = ScriptedEngineApi::new(
+            vec![ForkchoiceUpdated {
+                payload_status: PayloadStatus::new(PayloadStatusEnum::Valid, Some(other)),
+                payload_id: Some(payload_id),
+            }],
+            payload_result,
+        );
+
+        let client = ExecutionClient {
+            engine: Arc::new(engine),
+            eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
+            forkchoice_with_attrs_max_attempts: 1,
+            forkchoice_with_attrs_delay: Duration::from_millis(0),
+        };
+
+        let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
+        let err = client.generate_block(&latest_block).await.unwrap_err();
+        assert!(err.to_string().contains("latestValidHash"), "unexpected error: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn state_update_latest_valid_hash_mismatch_is_error() {
+        let head = AB256::from([9u8; 32]);
+        let payload_result = sample_payload_result(AB256::from([7u8; 32]), head, 2);
+        let other = AB256::from([8u8; 32]);
+
+        let engine = ScriptedEngineApi::new(
+            vec![ForkchoiceUpdated {
+                payload_status: PayloadStatus::new(PayloadStatusEnum::Valid, Some(other)),
+                payload_id: None,
+            }],
+            payload_result,
+        );
+
+        let client = ExecutionClient {
+            engine: Arc::new(engine),
+            eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
+            forkchoice_with_attrs_max_attempts: 1,
+            forkchoice_with_attrs_delay: Duration::from_millis(0),
+        };
+
+        let err = client.set_latest_forkchoice_state(head).await.unwrap_err();
+        assert!(err.to_string().contains("latest_valid_hash"), "unexpected error: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn state_update_valid_with_mismatched_latest_valid_hash_rejected() {
+        let head = AB256::from([9u8; 32]);
+        let other = AB256::from([7u8; 32]);
+        let payload_result = sample_payload_result(AB256::from([1u8; 32]), head, 2);
+
+        let engine = ScriptedEngineApi::new(
+            vec![ForkchoiceUpdated {
+                payload_status: PayloadStatus::new(PayloadStatusEnum::Valid, Some(other)),
+                payload_id: None,
+            }],
+            payload_result,
+        );
+
+        let client = ExecutionClient {
+            engine: Arc::new(engine),
+            eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
+            forkchoice_with_attrs_max_attempts: 1,
+            forkchoice_with_attrs_delay: Duration::from_millis(0),
+        };
+
+        let err = client.set_latest_forkchoice_state(head).await.unwrap_err();
+        assert!(
+            err.to_string().contains("latest_valid_hash mismatch"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_update_accepted_is_rejected() {
+        let head = AB256::from([9u8; 32]);
+        let payload_result = sample_payload_result(AB256::from([2u8; 32]), head, 2);
+
+        let engine = ScriptedEngineApi::new(
+            vec![ForkchoiceUpdated {
+                payload_status: PayloadStatus::new(PayloadStatusEnum::Accepted, None),
+                payload_id: None,
+            }],
+            payload_result,
+        );
+
+        let client = ExecutionClient {
+            engine: Arc::new(engine),
+            eth: Arc::new(NoopEthRpc),
+            time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
+            forkchoice_with_attrs_max_attempts: 1,
+            forkchoice_with_attrs_delay: Duration::from_millis(0),
+        };
+
+        let err = client.set_latest_forkchoice_state(head).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid payload status: ACCEPTED"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_payload_built_on_wrong_parent() {
         let head = AB256::from([9u8; 32]);
         let payload_id = PayloadId::from(FixedBytes::<8>::from([3u8; 8]));
@@ -1012,7 +1095,7 @@ mod tests {
 
         let engine = ScriptedEngineApi::new(
             vec![ForkchoiceUpdated {
-                payload_status: PayloadStatus::new(PayloadStatusEnum::Accepted, None),
+                payload_status: PayloadStatus::new(PayloadStatusEnum::Valid, Some(head)),
                 payload_id: Some(payload_id),
             }],
             payload_result,

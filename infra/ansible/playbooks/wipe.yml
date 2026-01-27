@@ -17,6 +17,7 @@
     loadnet_blockscout_base_dir: "{{ loadnet_net_dir }}/blockscout"
     loadnet_blockscout_data_dir: "/var/lib/blockscout"
     loadnet_wipe_confirm: "{{ wipe_confirm | default('') }}"
+    loadnet_wipe_nodes_raw: "{{ wipe_nodes | default('') }}"
   tasks:
     - name: Assert required vars
       ansible.builtin.assert:
@@ -28,25 +29,39 @@
         that:
           - loadnet_wipe_confirm == "YES"
         fail_msg: "Refusing to wipe without wipe_confirm=YES"
-      when: loadnet_wipe_state | bool or loadnet_wipe_firewall | bool or loadnet_wipe_monitoring | bool or loadnet_wipe_containers | bool or loadnet_wipe_blockscout | bool
+      when: >-
+        loadnet_wipe_state | bool
+        or loadnet_wipe_firewall | bool
+        or loadnet_wipe_monitoring | bool
+        or loadnet_wipe_containers | bool
+        or loadnet_wipe_blockscout | bool
 
     - name: Build node path lists
       ansible.builtin.set_fact:
+        loadnet_wipe_nodes: >-
+          {{
+            (loadnet_wipe_nodes_raw is string)
+            | ternary(
+              (loadnet_wipe_nodes_raw | length > 0)
+              | ternary(loadnet_wipe_nodes_raw.split(',') | map('trim') | reject('equalto', '') | list, (loadnet_nodes | default([]))),
+              (loadnet_wipe_nodes_raw | default(loadnet_nodes | default([])))
+            )
+          }}
         loadnet_node_state_paths: >-
           {{
-            (loadnet_nodes | default([]))
+            (loadnet_wipe_nodes | default([]))
             | map('regex_replace', '^', '/var/lib/load-reth/')
             | list
           }}
         loadnet_node_ultramarine_paths: >-
           {{
-            (loadnet_nodes | default([]))
+            (loadnet_wipe_nodes | default([]))
             | map('regex_replace', '^', '/var/lib/ultramarine/')
             | list
           }}
         loadnet_node_runtime_paths: >-
           {{
-            (loadnet_nodes | default([]))
+            (loadnet_wipe_nodes | default([]))
             | map('regex_replace', '^', '/run/load-reth/')
             | list
           }}
@@ -67,15 +82,26 @@
       ansible.builtin.set_fact:
         loadnet_node_state_paths_resolved: >-
           {{
-            (loadnet_nodes | default([]))
+            (loadnet_wipe_nodes | default([]))
             | map('regex_replace', '^', (loadnet_load_reth_root.stdout | default('/var/lib/load-reth')) + '/')
             | list
           }}
         loadnet_node_ultramarine_paths_resolved: >-
           {{
-            (loadnet_nodes | default([]))
+            (loadnet_wipe_nodes | default([]))
             | map('regex_replace', '^', (loadnet_ultramarine_root.stdout | default('/var/lib/ultramarine')) + '/')
             | list
+          }}
+
+    - name: Build combined wipe path list
+      ansible.builtin.set_fact:
+        loadnet_wipe_paths: >-
+          {{
+            loadnet_node_state_paths
+            + loadnet_node_ultramarine_paths
+            + loadnet_node_runtime_paths
+            + loadnet_node_state_paths_resolved
+            + loadnet_node_ultramarine_paths_resolved
           }}
 
     - name: Stop ultramarine instances (best-effort)
@@ -83,8 +109,8 @@
         name: "ultramarine@{{ item }}.service"
         state: stopped
         enabled: false
-      loop: "{{ loadnet_nodes | default([]) }}"
-      ignore_errors: true
+      loop: "{{ loadnet_wipe_nodes | default([]) }}"
+      failed_when: false
 
     - name: Remove systemd service.d overrides for load-reth (prevents stale config)
       ansible.builtin.file:
@@ -110,8 +136,8 @@
         name: "load-reth@{{ item }}.service"
         state: stopped
         enabled: false
-      loop: "{{ loadnet_nodes | default([]) }}"
-      ignore_errors: true
+      loop: "{{ loadnet_wipe_nodes | default([]) }}"
+      failed_when: false
 
     - name: Stop monitoring services (best-effort)
       ansible.builtin.systemd:
@@ -121,38 +147,38 @@
       loop:
         - grafana.service
         - prometheus.service
-      ignore_errors: true
+      failed_when: false
       when: loadnet_wipe_monitoring | bool
 
     - name: Remove loadnet containers (best-effort)
       ansible.builtin.shell: |
         set -euo pipefail
         if command -v docker >/dev/null 2>&1; then
-          ids="$(docker ps -aq --filter 'name=^/load-reth-')"
-          if [ -n "$ids" ]; then
-            docker rm -f $ids >/dev/null 2>&1 || true
-          fi
-          ids="$(docker ps -aq --filter 'name=^/ultramarine-')"
-          if [ -n "$ids" ]; then
-            docker rm -f $ids >/dev/null 2>&1 || true
+          nodes="{{ loadnet_wipe_nodes | default([]) | join(' ') }}"
+          if [ -n "$nodes" ]; then
+            for node_id in $nodes; do
+              docker rm -f "load-reth-${node_id}" >/dev/null 2>&1 || true
+              docker rm -f "ultramarine-${node_id}" >/dev/null 2>&1 || true
+            done
           fi
           docker rm -f loadnet-prometheus loadnet-grafana >/dev/null 2>&1 || true
         fi
       args:
         executable: /bin/bash
+      changed_when: true
       when: loadnet_wipe_containers | bool
 
     - name: Wipe node state (optional)
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
-      loop: "{{ loadnet_node_state_paths + loadnet_node_ultramarine_paths + loadnet_node_runtime_paths + loadnet_node_state_paths_resolved + loadnet_node_ultramarine_paths_resolved }}"
+      loop: "{{ loadnet_wipe_paths }}"
       when: loadnet_wipe_state | bool
 
     - name: Verify node state removed (optional)
       ansible.builtin.stat:
         path: "{{ item }}"
-      loop: "{{ loadnet_node_state_paths + loadnet_node_ultramarine_paths + loadnet_node_runtime_paths + loadnet_node_state_paths_resolved + loadnet_node_ultramarine_paths_resolved }}"
+      loop: "{{ loadnet_wipe_paths }}"
       register: loadnet_wipe_state_stats
       when: loadnet_wipe_state | bool
 
@@ -180,7 +206,7 @@
         name: blockscout.service
         state: stopped
         enabled: false
-      ignore_errors: true
+      failed_when: false
       when: loadnet_wipe_blockscout | bool
 
     - name: Stop nginx-blockscout service (best-effort)
@@ -188,7 +214,7 @@
         name: nginx-blockscout.service
         state: stopped
         enabled: false
-      ignore_errors: true
+      failed_when: false
       when: loadnet_wipe_blockscout | bool
 
     - name: Detect docker binary (wipe)
@@ -226,12 +252,17 @@
     - name: Remove blockscout containers and volumes via docker compose
       ansible.builtin.shell: |
         set -euo pipefail
-        if [ -d "{{ loadnet_blockscout_base_dir }}" ] && [ -f "{{ loadnet_blockscout_base_dir }}/docker-compose.yml" ] && [ -n "{{ blockscout_compose_cmd | default('') }}" ]; then
-          cd "{{ loadnet_blockscout_base_dir }}"
-          {{ blockscout_compose_cmd }} down -v --remove-orphans 2>/dev/null || true
+        if [ -d "{{ loadnet_blockscout_base_dir }}" ]; then
+          if [ -f "{{ loadnet_blockscout_base_dir }}/docker-compose.yml" ]; then
+            if [ -n "{{ blockscout_compose_cmd | default('') }}" ]; then
+              cd "{{ loadnet_blockscout_base_dir }}"
+              {{ blockscout_compose_cmd }} down -v --remove-orphans 2>/dev/null || true
+            fi
+          fi
         fi
       args:
         executable: /bin/bash
+      changed_when: true
       when: loadnet_wipe_blockscout | bool
 
     - name: Wipe blockscout data directory (postgres, redis, logs)
@@ -252,6 +283,7 @@
         docker network rm blockscout-network 2>/dev/null || true
       args:
         executable: /bin/bash
+      changed_when: true
       when: loadnet_wipe_blockscout | bool
 
     - name: Wipe network artifacts under /opt/loadnet (optional)
@@ -293,4 +325,5 @@
         fi
       args:
         executable: /bin/bash
+      changed_when: true
       when: loadnet_wipe_firewall | bool

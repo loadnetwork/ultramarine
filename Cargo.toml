@@ -60,6 +60,7 @@ alloy-rpc-types-txpool = { version = "1.0.23" }
 alloy-signer = { version = "1.0.23" }
 alloy-signer-local = { version = "1.0.23", features = ["keystore", "mnemonic"] }
 alloy-transport-http = { version = "1.0.23", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
+alloy-trie = { version = "0.9.0", features = ["ethereum"] }
 
 async-trait = "0.1.85"
 axum = "0.8.4"
@@ -113,6 +114,7 @@ ultramarine-blob-engine = { path = "crates/blob_engine" }
 ultramarine-cli = { path = "crates/cli" }
 ultramarine-consensus = { path = "crates/consensus" }
 ultramarine-execution = { path = "crates/execution" }
+ultramarine-genesis = { path = "crates/genesis" }
 ultramarine-node = { path = "crates/node" }
 ultramarine-test-support = { path = "crates/test_support" }
 ultramarine-types = { path = "crates/types" }

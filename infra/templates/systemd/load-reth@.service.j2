@@ -49,6 +49,7 @@ ExecStart=/bin/bash -lc '/usr/bin/docker run --rm --name load-reth-%i --network 
     --debug.tip={{ loadnet_el_debug_tip }} \
 {% endif %}
     --auth-ipc --auth-ipc.path=$LOAD_RETH_ENGINE_IPC_PATH \
+    --engine.persistence-threshold={{ loadnet_el_engine_persistence_threshold | default(0) }} \
     --builder.gaslimit={{ loadnet_el_builder_gaslimit | default(2000000000) }} \
     --builder.interval={{ loadnet_el_builder_interval | default("50ms") }} \
     --builder.deadline={{ loadnet_el_builder_deadline | default(2) }} \

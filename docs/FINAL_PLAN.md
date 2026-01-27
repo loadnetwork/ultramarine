@@ -835,15 +835,15 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 
 #### Fixes Implemented
 
-| Fix ID  | Issue                                    | Location                      | Resolution                                                             |
-| ------- | ---------------------------------------- | ----------------------------- | ---------------------------------------------------------------------- |
-| FIX-001 | Missing cleanup after parent_root mismatch | `state.rs:1727-1750`         | Added `drop_round` + `delete_blob_metadata_undecided` before rejection |
-| FIX-002 | `debug_assert` not enforced in release   | `state.rs:1662-1668`         | Replaced with hard check that returns `Err(...)` on parent_root mismatch |
-| FIX-003 | Duplicate blob indices not detected      | `state.rs:1587-1600`         | Added `HashSet` check before processing sidecars                        |
-| FIX-004 | Silent cleanup failures                  | `state.rs:1604-1605`         | Added logging + `record_cleanup_failure()` metric call                  |
-| FIX-005 | Missing metric on commitment count mismatch | `state.rs:1581-1584`       | Added `record_sync_package_rejected()` call                             |
-| FIX-006 | Misleading test name                     | `state/tests/mod.rs`         | Renamed `test_concurrent_sync_from_multiple_peers` → `test_sequential_multi_height_sync_chain_continuity` |
-| FIX-007 | `orphaned_blobs_dropped` counting rounds not blobs | `state.rs:2711-2764` | Now fetches blob count from metadata before deletion                   |
+| Fix ID  | Issue                                              | Location             | Resolution                                                                                                |
+| ------- | -------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------- |
+| FIX-001 | Missing cleanup after parent_root mismatch         | `state.rs:1727-1750` | Added `drop_round` + `delete_blob_metadata_undecided` before rejection                                    |
+| FIX-002 | `debug_assert` not enforced in release             | `state.rs:1662-1668` | Replaced with hard check that returns `Err(...)` on parent_root mismatch                                  |
+| FIX-003 | Duplicate blob indices not detected                | `state.rs:1587-1600` | Added `HashSet` check before processing sidecars                                                          |
+| FIX-004 | Silent cleanup failures                            | `state.rs:1604-1605` | Added logging + `record_cleanup_failure()` metric call                                                    |
+| FIX-005 | Missing metric on commitment count mismatch        | `state.rs:1581-1584` | Added `record_sync_package_rejected()` call                                                               |
+| FIX-006 | Misleading test name                               | `state/tests/mod.rs` | Renamed `test_concurrent_sync_from_multiple_peers` → `test_sequential_multi_height_sync_chain_continuity` |
+| FIX-007 | `orphaned_blobs_dropped` counting rounds not blobs | `state.rs:2711-2764` | Now fetches blob count from metadata before deletion                                                      |
 
 #### Metrics Added
 
@@ -864,6 +864,7 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 **Problem**: The test attempts to validate multi-height sync chain continuity, but `process_synced_package` returns `Ok(None)` (rejects package) due to validation flow issues.
 
 **Root Cause Investigation**:
+
 - Test was renamed from `test_concurrent_sync_from_multiple_peers` (misleading name)
 - `process_synced_package` validation rejects packages that don't match EL verification
 - Likely related to: commitment matching, parent root resolution, or EL verification mocking
@@ -873,6 +874,7 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 **Impact**: Core sync functionality is working (other sync tests pass). This test covers an edge case around chain continuity across multiple heights.
 
 **Files Modified**:
+
 - `crates/consensus/src/state.rs` (FIX-001 through FIX-005, FIX-007)
 - `crates/consensus/src/state/tests/mod.rs` (test fixes, FIX-006)
 - `crates/blob_engine/src/metrics.rs` (metric additions)

@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 use std::time::{Duration, Instant};
 
-use alloy_rpc_types_eth::BlockNumberOrTag;
 use bytes::Bytes;
 use color_eyre::eyre::{self, eyre};
 use malachitebft_app_channel::{
@@ -18,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use ultramarine_blob_engine::BlobEngine;
 use ultramarine_consensus::state::State;
-use ultramarine_execution::client::ExecutionClient;
+use ultramarine_execution::{ExecutionError, ExecutionNotifier, client::ExecutionClient};
 use ultramarine_types::{
     archive::ArchiveNotice,
     context::LoadContext,
@@ -137,42 +136,22 @@ pub async fn run(
 
                 info!("✅ Execution client capabilities check passed.");
 
-                // Try to get the latest block from the execution engine.
-                // CRITICAL: latest_block must be initialized for timestamp validation to work.
-                // If 'latest' fails, fallback to genesis block (EL must have genesis).
-                match execution_layer
-                    .eth
-                    .get_block_by_number(alloy_rpc_types_eth::BlockNumberOrTag::Latest, false)
-                    .await
-                {
-                    Ok(Some(latest_block)) => {
-                        debug!(block_hash = %latest_block.block_hash, "Fetched latest block from execution client");
-                        state.latest_block = Some(latest_block);
-                    }
-                    Ok(None) | Err(_) => {
-                        // Fallback: fetch genesis block (block 0) - EL must have genesis
-                        warn!(
-                            "Execution client returned no block for 'latest'; fetching genesis block"
-                        );
-                        match execution_layer
-                            .eth
-                            .get_block_by_number(BlockNumberOrTag::Number(0), false)
-                            .await
-                        {
-                            Ok(Some(genesis_block)) => {
-                                info!(block_hash = %genesis_block.block_hash, "Using genesis block as latest_block");
-                                state.latest_block = Some(genesis_block);
-                            }
-                            Ok(None) => {
-                                return Err(eyre!(
-                                    "EL has no genesis block - cannot start validator"
-                                ));
-                            }
-                            Err(e) => {
-                                return Err(eyre!("Failed to fetch genesis block from EL: {}", e));
-                            }
-                        }
-                    }
+                // Establish latest_block for timestamp/parent validation.
+                // Prefer consensus store (decided metadata) so restarts don't regress
+                // to an EL that is lagging or restarting.
+                if let Some(decided_block) = load_decided_block(state).await? {
+                    info!(
+                        height = %decided_block.block_number,
+                        block_hash = %decided_block.block_hash,
+                        "Initialized latest_block from consensus store"
+                    );
+                    state.latest_block = Some(decided_block);
+                }
+
+                if state.latest_block.is_none() {
+                    return Err(eyre!(
+                        "latest_block is None after startup; execution genesis not initialized"
+                    ));
                 }
 
                 // Calculate start_height following Malachite's pattern:
@@ -181,6 +160,17 @@ pub async fn run(
                 let max_decided = state.get_latest_decided_height().await;
                 let start_height =
                     max_decided.map(|h| h.increment()).unwrap_or_else(|| Height::new(1));
+
+                // Best-effort alignment: apply FCU to the CL decided head. If EL reports
+                // SYNCING/INVALID, enter observer-only mode until EL catches up.
+                if let Err(e) =
+                    ensure_el_matches_cl_head(state, &execution_layer, "consensus_ready").await
+                {
+                    warn!(
+                        error = %e,
+                        "EL not aligned with CL head at startup; proposals/votes will be gated until alignment"
+                    );
+                }
 
                 info!(?max_decided, %start_height, "Sending StartHeight to consensus engine.");
 
@@ -594,6 +584,24 @@ pub async fn run(
                         // This is the success path
                         if let Some(ref complete_proposal) = proposed_value {
                             debug!("✅ Received complete proposal: {:?}", complete_proposal);
+
+                            // Safety gate: if EL head doesn't match CL decided head, vote nil.
+                            if let Err(e) = ensure_el_matches_cl_head(
+                                state,
+                                &execution_layer,
+                                "received_proposal_part",
+                            )
+                            .await
+                            {
+                                warn!(
+                                    error = %e,
+                                    "EL not aligned with CL head; refusing to vote on proposal"
+                                );
+                                if reply.send(None).is_err() {
+                                    error!("Failed to send ReceivedProposalPart reply");
+                                }
+                                continue;
+                            }
                         }
                         if reply.send(proposed_value).is_err() {
                             error!("Failed to send ReceivedProposalPart reply");
@@ -727,6 +735,12 @@ pub async fn run(
                             "[DIAG] ✅ process_decided_certificate succeeded: {} txs, {} blobs, current_height now={}",
                             outcome.tx_count, outcome.blob_count, state.current_height
                         );
+                        if outcome.execution_pending {
+                            warn!(
+                                height = %height,
+                                "Execution layer still syncing; execution finalization deferred"
+                            );
+                        }
                         outcome
                     }
                     Err(e) => {
@@ -1078,7 +1092,15 @@ async fn handle_get_value(
     info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
     let started_at = Instant::now();
 
-    let latest_block = ensure_latest_block(state, execution_layer).await?;
+    if state.is_el_degraded() {
+        warn!(
+            %height,
+            %round,
+            "Execution layer marked degraded; attempting to realign before proposing"
+        );
+    }
+
+    let latest_block = ensure_el_matches_cl_head(state, execution_layer, "get_value").await?;
 
     // Slot throttle: wait until we can propose with valid timestamp
     // IMPORTANT: Use Duration with subsecond precision to avoid ~1s jitter
@@ -1147,6 +1169,7 @@ async fn handle_get_value(
 
     let (_signed_header, sidecars) = state
         .prepare_blob_sidecar_parts(&proposal, blobs_bundle.as_ref())
+        .await
         .map_err(|e| eyre!("Failed to prepare blob sidecars: {}", e))?;
 
     let round_i64 = round.as_i64();
@@ -1219,21 +1242,82 @@ async fn handle_get_value(
     Ok(())
 }
 
-async fn ensure_latest_block(
-    state: &mut State,
-    execution_layer: &ExecutionClient,
-) -> eyre::Result<ExecutionBlock> {
-    if let Some(block) = state.latest_block {
+async fn load_decided_block(state: &State) -> eyre::Result<Option<ExecutionBlock>> {
+    let Some(height) = state.get_latest_decided_height().await else {
+        return Ok(None);
+    };
+    match state.get_blob_metadata(height).await? {
+        Some(meta) => {
+            let header = meta.execution_payload_header();
+            Ok(Some(ExecutionBlock {
+                block_hash: header.block_hash,
+                block_number: header.block_number,
+                parent_hash: header.parent_hash,
+                timestamp: header.timestamp,
+                prev_randao: load_prev_randao(),
+            }))
+        }
+        None => {
+            warn!(
+                %height,
+                "Missing BlobMetadata for latest decided height; cannot derive CL head"
+            );
+            Ok(None)
+        }
+    }
+}
+
+async fn resolve_cl_head(state: &mut State) -> eyre::Result<ExecutionBlock> {
+    if let Some(block) = load_decided_block(state).await? {
+        state.latest_block = Some(block);
         return Ok(block);
     }
+    state.latest_block.ok_or_else(|| eyre!("latest_block is None; CL head unavailable"))
+}
 
-    warn!("latest execution block missing; refetching from EL");
-    let block = execution_layer
-        .eth
-        .get_block_by_number(BlockNumberOrTag::Latest, false)
-        .await
-        .map_err(|e| eyre!("Failed to fetch latest block: {}", e))?
-        .ok_or_else(|| eyre!("Execution client returned no block for 'latest'"))?;
-    state.latest_block = Some(block);
-    Ok(block)
+async fn ensure_el_matches_cl_head(
+    state: &mut State,
+    execution_layer: &ExecutionClient,
+    context: &str,
+) -> eyre::Result<ExecutionBlock> {
+    let cl_head = resolve_cl_head(state).await?;
+
+    if state.is_el_degraded() &&
+        let Some(since) = state.el_degraded_since
+    {
+        const EL_GATE_COOLDOWN: Duration = Duration::from_millis(500);
+        if since.elapsed() < EL_GATE_COOLDOWN {
+            return Err(eyre!("EL degraded; skipping FCU during cooldown (context={})", context));
+        }
+    }
+
+    if let (Some(last_head), Some(last_success)) = (state.last_fcu_head, state.last_fcu_success) {
+        const EL_FCU_SUCCESS_CACHE: Duration = Duration::from_millis(500);
+        if last_head == cl_head.block_hash && last_success.elapsed() < EL_FCU_SUCCESS_CACHE {
+            return Ok(cl_head);
+        }
+    }
+
+    let mut notifier = execution_layer.as_notifier();
+    match notifier.set_latest_forkchoice_state(cl_head.block_hash).await {
+        Ok(_) => {
+            state.clear_el_degraded();
+            state.last_fcu_head = Some(cl_head.block_hash);
+            state.last_fcu_success = Some(tokio::time::Instant::now());
+            Ok(cl_head)
+        }
+        Err(e) => {
+            let is_syncing = matches!(
+                e.downcast_ref::<ExecutionError>(),
+                Some(ExecutionError::SyncingForkchoice { .. })
+            );
+            let reason = if is_syncing {
+                format!("EL syncing for head {}", cl_head.block_hash)
+            } else {
+                format!("EL rejected forkchoice for head {}: {}", cl_head.block_hash, e)
+            };
+            state.mark_el_degraded(reason);
+            Err(e)
+        }
+    }
 }

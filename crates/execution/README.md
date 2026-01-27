@@ -22,13 +22,13 @@ The crate is designed to be modular, flexible, and resilient.
 
 When Ultramarine calls `engine_forkchoiceUpdatedV3`, it supplies these payload attributes:
 
-| Field                      | Value                                               | Implementation                                         |
-| -------------------------- | --------------------------------------------------- | ------------------------------------------------------ |
-| `timestamp`                | `max(now(), parent + LOAD_MIN_BLOCK_TIME_SECS)`     | Wall-clock aligned, validator-enforced                 |
-| **`prev_randao`**          | **Constant `0x01`**          | [`load_prev_randao()`](../types/src/engine_api.rs#L21) |
-| `suggested_fee_recipient`  | Placeholder `0x2a...2a`      | TODO: Make validator-configurable                      |
-| `withdrawals`              | Empty array `[]`             | Load Network has no withdrawals                        |
-| `parent_beacon_block_root` | Previous `block_hash`                               | EIP-4788 compatibility                                 |
+| Field                      | Value                                           | Implementation                                         |
+| -------------------------- | ----------------------------------------------- | ------------------------------------------------------ |
+| `timestamp`                | `max(now(), parent + LOAD_MIN_BLOCK_TIME_SECS)` | Wall-clock aligned, validator-enforced                 |
+| **`prev_randao`**          | **Constant `0x01`**                             | [`load_prev_randao()`](../types/src/engine_api.rs#L21) |
+| `suggested_fee_recipient`  | Placeholder `0x2a...2a`                         | TODO: Make validator-configurable                      |
+| `withdrawals`              | Empty array `[]`                                | Load Network has no withdrawals                        |
+| `parent_beacon_block_root` | Previous `block_hash`                           | EIP-4788 compatibility                                 |
 
 **Note**: With 1 block/sec (EVM timestamp granularity), throughput requires high gas limit (2B+).
 

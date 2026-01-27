@@ -10,29 +10,59 @@
 
     - name: Build node->ports map
       ansible.builtin.set_fact:
-        loadnet_ports_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='ports'))) }}"
+        loadnet_ports_by_node: >-
+          {{
+            dict(
+              loadnet_lock.nodes
+              | map(attribute='id')
+              | zip(loadnet_lock.nodes | map(attribute='ports'))
+            )
+          }}
 
     - name: Build node->engine IPC path map
       ansible.builtin.set_fact:
-        loadnet_engine_ipc_by_node: "{{ dict(loadnet_lock.nodes | map(attribute='id') | zip(loadnet_lock.nodes | map(attribute='engine') | map(attribute='ipc_path'))) }}"
+        loadnet_engine_ipc_by_node: >-
+          {{
+            dict(
+              loadnet_lock.nodes
+              | map(attribute='id')
+              | zip(loadnet_lock.nodes | map(attribute='engine') | map(attribute='ipc_path'))
+            )
+          }}
 
     - name: Build metrics scrape host (from lockfile policy)
       ansible.builtin.set_fact:
         loadnet_metrics_bind: "{{ loadnet_lock.policy.metrics_bind | default('127.0.0.1') }}"
 
+    - name: Define metrics regex helpers
+      ansible.builtin.set_fact:
+        loadnet_height_regex: >-
+          ^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)
+        loadnet_height_match_regex: >-
+          ^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+\\d+
+
     - name: Normalize metrics scrape host
       ansible.builtin.set_fact:
         loadnet_metrics_scrape_host: "{{ '127.0.0.1' if loadnet_metrics_bind in ['0.0.0.0', '::'] else loadnet_metrics_bind }}"
 
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
     - name: Assert load-reth service is active
-      ansible.builtin.command: "systemctl is-active --quiet load-reth@{{ item }}.service"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['load-reth@' + item + '.service'] is defined
+          - ansible_facts.services['load-reth@' + item + '.service'].state == 'running'
+        fail_msg: "load-reth@{{ item }}.service is not running"
       loop: "{{ loadnet_nodes }}"
-      changed_when: false
 
     - name: Assert ultramarine service is active
-      ansible.builtin.command: "systemctl is-active --quiet ultramarine@{{ item }}.service"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['ultramarine@' + item + '.service'] is defined
+          - ansible_facts.services['ultramarine@' + item + '.service'].state == 'running'
+        fail_msg: "ultramarine@{{ item }}.service is not running"
       loop: "{{ loadnet_nodes }}"
-      changed_when: false
 
     - name: Assert Engine IPC socket exists
       ansible.builtin.stat:
@@ -98,11 +128,19 @@
         loadnet_cl_height_first: >-
           {{
             loadnet_cl_height_first | default({})
-            | combine({item.item: (item.content | regex_findall('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)', multiline=True) | first | default('0', true) | int)})
+            | combine({
+                item.item: (
+                  item.content
+                  | regex_findall(loadnet_height_regex, multiline=True)
+                  | first
+                  | default('0', true)
+                  | int
+                )
+              })
           }}
       loop: "{{ cl_metrics_first.results }}"
       changed_when: false
-      failed_when: item.content is not search('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+\\d+', multiline=True)
+      failed_when: item.content is not search(loadnet_height_match_regex, multiline=True)
 
     - name: Fetch CL metrics until height advances
       ansible.builtin.uri:
@@ -116,10 +154,10 @@
       delay: 15
       until: >-
         (cl_metrics_second.content is defined)
-        and (cl_metrics_second.content is search('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+\\d+', multiline=True))
+        and (cl_metrics_second.content is search(loadnet_height_match_regex, multiline=True))
         and
         (
-          (cl_metrics_second.content | regex_findall('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)', multiline=True) | first | default('0', true) | int)
+          (cl_metrics_second.content | regex_findall(loadnet_height_regex, multiline=True) | first | default('0', true) | int)
           != (loadnet_cl_height_first[item] | int)
         )
 
@@ -128,7 +166,15 @@
         loadnet_cl_height_second: >-
           {{
             loadnet_cl_height_second | default({})
-            | combine({item.item: (item.content | regex_findall('^malachitebft_core_consensus_height(?:\\{[^}]*\\})?\\s+(\\d+)', multiline=True) | first | default('0', true) | int)})
+            | combine({
+                item.item: (
+                  item.content
+                  | regex_findall(loadnet_height_regex, multiline=True)
+                  | first
+                  | default('0', true)
+                  | int
+                )
+              })
           }}
       loop: "{{ cl_metrics_second.results }}"
       changed_when: false

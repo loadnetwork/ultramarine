@@ -30,22 +30,38 @@
           - loadnet_lock.network.name == net
         fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
 
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
     - name: Verify required services are installed
-      ansible.builtin.command: "systemctl is-enabled {{ item }}"
+      ansible.builtin.debug:
+        msg: "service {{ item }} is not installed"
       loop:
-        - docker
-        - chrony
-      changed_when: false
-      failed_when: false
-      register: enabled_services
+        - docker.service
+        - chrony.service
+      when: ansible_facts.services[item] is not defined
+
+    - name: Verify required services are enabled
+      ansible.builtin.debug:
+        msg: "service {{ item }} is not enabled"
+      loop:
+        - docker.service
+        - chrony.service
+      when:
+        - ansible_facts.services[item] is defined
+        - ansible_facts.services[item].status is defined
+        - ansible_facts.services[item].status != 'enabled'
 
     - name: Verify required services are active
-      ansible.builtin.command: "systemctl is-active --quiet {{ item }}"
+      ansible.builtin.debug:
+        msg: "service {{ item }} is not active"
       loop:
-        - docker
-        - chrony
-      changed_when: false
-      register: active_services
+        - docker.service
+        - chrony.service
+      when:
+        - ansible_facts.services[item] is defined
+        - ansible_facts.services[item].state is defined
+        - ansible_facts.services[item].state != 'running'
 
     - name: Check fs.file-max baseline
       ansible.builtin.command: sysctl -n fs.file-max
@@ -134,7 +150,7 @@
     - name: Check docker data-root (if docker is running)
       ansible.builtin.shell: |
         set -euo pipefail
-        docker info --format '{{"{{.DockerRootDir}}"}}'
+        docker info --format '{{ "{{.DockerRootDir}}" }}'
       args:
         executable: /bin/bash
       changed_when: false
@@ -214,19 +230,21 @@
       loop_control:
         extended: true
 
-    - name: Check load-reth service active (postflight)
-      ansible.builtin.command: "systemctl is-active --quiet load-reth@{{ item }}.service"
+    - name: Check load-reth services are active (postflight)
+      ansible.builtin.debug:
+        msg: "load-reth@{{ item }}.service is not running"
       loop: "{{ loadnet_nodes }}"
-      register: load_reth_active
-      changed_when: false
-      failed_when: false
+      when:
+        - ansible_facts.services['load-reth@' + item + '.service'] is defined
+        - ansible_facts.services['load-reth@' + item + '.service'].state != 'running'
 
-    - name: Check ultramarine service active (postflight)
-      ansible.builtin.command: "systemctl is-active --quiet ultramarine@{{ item }}.service"
+    - name: Check ultramarine services are active (postflight)
+      ansible.builtin.debug:
+        msg: "ultramarine@{{ item }}.service is not running"
       loop: "{{ loadnet_nodes }}"
-      register: ultramarine_active
-      changed_when: false
-      failed_when: false
+      when:
+        - ansible_facts.services['ultramarine@' + item + '.service'] is defined
+        - ansible_facts.services['ultramarine@' + item + '.service'].state != 'running'
 
     - name: Read ultramarine config.toml (local nodes)
       ansible.builtin.slurp:

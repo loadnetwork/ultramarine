@@ -11,10 +11,10 @@ For the code-audited, source-linked specification of what is implemented today, 
 
 **IMPORTANT**: Load Network uses the **archive event as the pruning boundary**, NOT the Ethereum DA window.
 
-| Ethereum Approach | Load Network Approach |
-|-------------------|----------------------|
-| Time-based DA window (~18 days) | Archive event + finality |
-| Prune after epochs elapse | Prune after verified archival |
+| Ethereum Approach               | Load Network Approach         |
+| ------------------------------- | ----------------------------- |
+| Time-based DA window (~18 days) | Archive event + finality      |
+| Prune after epochs elapse       | Prune after verified archival |
 
 ### What Gets Retained Forever
 
@@ -31,6 +31,7 @@ For the code-audited, source-linked specification of what is implemented today, 
 ### history_min_height Invariant
 
 `get_earliest_height()` returns `Height(0)` when genesis metadata exists:
+
 - Validators MUST serve complete chain history
 - `history_min_height == 0` for all validators
 - Enables fullnode sync from genesis
