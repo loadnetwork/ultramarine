@@ -111,6 +111,8 @@ where
     pub el_degraded: bool,
     pub el_degraded_since: Option<Instant>,
     pub el_last_error: Option<String>,
+    pub last_fcu_head: Option<BlockHash>,
+    pub last_fcu_success: Option<Instant>,
     execution_retry: ExecutionRetryConfig,
 
     // Track rounds with blobs for cleanup
@@ -269,6 +271,8 @@ where
             el_degraded: false,
             el_degraded_since: None,
             el_last_error: None,
+            last_fcu_head: None,
+            last_fcu_success: None,
             execution_retry: ExecutionRetryConfig::default(),
             blob_rounds: HashMap::new(),
             last_blob_sidecar_root: B256::ZERO,
@@ -303,6 +307,8 @@ where
         }
         self.el_degraded = true;
         self.el_last_error = Some(error.into());
+        self.last_fcu_head = None;
+        self.last_fcu_success = None;
     }
 
     pub fn clear_el_degraded(&mut self) {
@@ -1937,6 +1943,23 @@ where
                     );
                     self.last_blob_sidecar_root = new_root;
                     self.last_blob_sidecar_height = height;
+
+                    // Keep latest_block aligned so parent validation doesn't regress after sync.
+                    let header = value_metadata.execution_payload_header.clone();
+                    let execution_block = ExecutionBlock {
+                        block_hash: header.block_hash,
+                        block_number: header.block_number,
+                        parent_hash: header.parent_hash,
+                        timestamp: header.timestamp,
+                        prev_randao: load_prev_randao(),
+                    };
+                    let should_update = self
+                        .latest_block
+                        .map(|blk| blk.block_number < execution_block.block_number)
+                        .unwrap_or(true);
+                    if should_update {
+                        self.latest_block = Some(execution_block);
+                    }
 
                     // Process archive notices - continue even if some fail (BUG-006 fix)
                     for notice in archive_notices {

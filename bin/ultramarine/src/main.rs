@@ -112,6 +112,7 @@ fn start(args: &Args, cmd: &StartCmd, logging: config::LoggingConfig) -> Result<
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: cmd.start_height.map(Height::new),
+        execution_genesis_file: cmd.execution_genesis_path.clone(),
         engine_http_url: cmd.engine_http_url.clone(),
         engine_ipc_path: cmd.engine_ipc_path.clone(),
         eth1_rpc_url: cmd.eth1_rpc_url.clone(),
@@ -130,6 +131,7 @@ fn init(args: &Args, cmd: &InitCmd, logging: config::LoggingConfig) -> Result<()
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: Some(Height::new(1)), // We always start at height 1
+        execution_genesis_file: None,
         engine_http_url: None,
         engine_ipc_path: None,
         eth1_rpc_url: None,
@@ -154,6 +156,7 @@ fn testnet(args: &Args, cmd: &TestnetCmd, logging: config::LoggingConfig) -> Res
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: Some(Height::new(1)), // We always start at height 1
+        execution_genesis_file: None,
         engine_http_url: None,
         engine_ipc_path: None,
         eth1_rpc_url: None,
@@ -176,6 +179,7 @@ fn distributed_testnet(
         genesis_file: args.get_genesis_file_path()?,
         private_key_file: args.get_priv_validator_key_file_path()?,
         start_height: Some(Height::new(1)), // We always start at height 1
+        execution_genesis_file: None,
         engine_http_url: None,
         engine_ipc_path: None,
         eth1_rpc_url: None,

@@ -606,6 +606,7 @@ Phase 5 Testnet is complete when:
 ## Post-Phase 5: Sync Layer Security Review (2026-01-16)
 
 A comprehensive security review of `process_synced_package` and related sync/cleanup paths was completed. See [FINAL_PLAN.md - Sync Layer Security Review](./FINAL_PLAN.md#sync-layer-security-review--complete-2026-01-16) for:
+
 - 7 fixes implemented (FIX-001 through FIX-007)
 - New metrics: `sync_packages_rejected_total`, `cleanup_failures_total`
 - Fixed `orphaned_blobs_dropped` counting (now counts blobs, not rounds)

@@ -689,7 +689,7 @@ itest-list: ## List Tier 0 component tests.
 
 .PHONY: itest-node
 itest-node: ## Run full-node (Tier 1) integration tests (process-isolated for determinism).
-	@echo "$(GREEN)Running Tier 1 full-node integration tests (17 tests, process-isolated)...$(NC)"
+	@echo "$(GREEN)Running Tier 1 full-node integration tests (20 tests, process-isolated)...$(NC)"
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_blob_quorum_roundtrip -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_validator_restart_recovers -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_restart_mid_height -- --ignored
@@ -707,7 +707,10 @@ itest-node: ## Run full-node (Tier 1) integration tests (process-isolated for de
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_rejects_invalid_execution_requests_from_el -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_rejects_payload_without_blobs_bundle -- --ignored
 	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_value_sync_proof_failure -- --ignored
-	@echo "$(GREEN)✅ All 17 Tier 1 tests passed!$(NC)"
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_fcu_gate_does_not_require_http_latest -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_split_head_recovery -- --ignored
+	@CARGO_NET_OFFLINE=$(CARGO_NET_OFFLINE) cargo test -p ultramarine-test --test full_node node_harness::full_node_fcu_accepted_rejected -- --ignored
+	@echo "$(GREEN)✅ All 20 Tier 1 tests passed!$(NC)"
 
 .PHONY: itest-node-archiver
 itest-node-archiver: ## Run Tier 1 archiver/prune full-node integration tests.

@@ -27,6 +27,10 @@ pub struct StartCmd {
     #[clap(long)]
     pub eth1_rpc_url: Option<Url>,
 
+    /// Path to execution-layer genesis.json (same file used by load-reth --chain)
+    #[clap(long)]
+    pub execution_genesis_path: Option<PathBuf>,
+
     /// Override JWT secret path used for Engine API authentication
     #[clap(long)]
     pub jwt_path: Option<PathBuf>,

@@ -4,24 +4,25 @@
   gather_facts: false
   become: true
   tasks:
-    - name: Fetch Load-reth status
-      ansible.builtin.command: "systemctl --no-pager --full status load-reth@{{ item }}.service"
-      loop: "{{ loadnet_nodes }}"
-      register: reth_status
-      changed_when: false
-      failed_when: false
+    - name: Gather service facts
+      ansible.builtin.service_facts:
 
-    - name: Display Load-reth status
+    - name: Display load-reth status
       ansible.builtin.debug:
-        var: reth_status.results
-
-    - name: Fetch Ultramarine status
-      ansible.builtin.command: "systemctl --no-pager --full status ultramarine@{{ item }}.service"
+        msg: >-
+          load-reth@{{ item }}.service:
+          {{
+            (ansible_facts.services['load-reth@' + item + '.service'] | default({})).state
+            | default('unknown')
+          }}
       loop: "{{ loadnet_nodes }}"
-      register: ultra_status
-      changed_when: false
-      failed_when: false
 
-    - name: Display Ultramarine status
+    - name: Display ultramarine status
       ansible.builtin.debug:
-        var: ultra_status.results
+        msg: >-
+          ultramarine@{{ item }}.service:
+          {{
+            (ansible_facts.services['ultramarine@' + item + '.service'] | default({})).state
+            | default('unknown')
+          }}
+      loop: "{{ loadnet_nodes }}"

@@ -6,12 +6,12 @@
 
 **IMPORTANT**: Load Network uses the **archive event as the boundary for blob pruning**, NOT the Ethereum DA window.
 
-| Aspect | Ethereum | Load Network |
-|--------|----------|--------------|
-| Pruning trigger | Time-based DA window (~18 days) | Archive event + finality |
-| Consensus data | Retained forever | Retained forever |
-| Blob bytes | Pruned after DA window | Pruned after verified archival |
-| history_min_height | Varies with pruning | Always 0 (invariant) |
+| Aspect             | Ethereum                        | Load Network                   |
+| ------------------ | ------------------------------- | ------------------------------ |
+| Pruning trigger    | Time-based DA window (~18 days) | Archive event + finality       |
+| Consensus data     | Retained forever                | Retained forever               |
+| Blob bytes         | Pruned after DA window          | Pruned after verified archival |
+| history_min_height | Varies with pruning             | Always 0 (invariant)           |
 
 Primary references:
 

@@ -29,20 +29,26 @@
           - loadnet_lock.network.name == net
         fail_msg: "network.lock.json is for '{{ loadnet_lock.network.name }}' but net='{{ net }}'"
 
-    - name: Check required services are active (best-effort)
-      ansible.builtin.command: "systemctl is-active --quiet {{ item }}"
-      loop:
-        - docker
-        - chrony
-      changed_when: false
-      failed_when: false
-      register: active_services
+    - name: Gather service facts
+      ansible.builtin.service_facts:
 
-    - name: Warn if required services are not active
+    - name: Check required services are active (best-effort)
       ansible.builtin.debug:
-        msg: "service {{ item.item }} is not active yet (expected after net-deploy)."
-      loop: "{{ active_services.results }}"
-      when: item.rc != 0
+        msg: "service {{ item }} is not active yet (expected after net-deploy)."
+      loop:
+        - docker.service
+        - chrony.service
+      when:
+        - ansible_facts.services[item] is defined
+        - ansible_facts.services[item].state != 'running'
+
+    - name: Warn if required services are missing
+      ansible.builtin.debug:
+        msg: "service {{ item }} is not installed"
+      loop:
+        - docker.service
+        - chrony.service
+      when: ansible_facts.services[item] is not defined
 
     - name: Check fs.file-max baseline
       ansible.builtin.command: sysctl -n fs.file-max
@@ -103,7 +109,7 @@
     - name: Check docker data-root
       ansible.builtin.shell: |
         set -euo pipefail
-        docker info --format '{{"{{.DockerRootDir}}"}}'
+        docker info --format '{{ "{{.DockerRootDir}}" }}'
       args:
         executable: /bin/bash
       changed_when: false

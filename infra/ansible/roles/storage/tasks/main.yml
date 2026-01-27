@@ -271,7 +271,9 @@
     path: /etc/fstab
     create: true
     mode: "0644"
-    line: "{{ loadnet_effective_source_dir }} {{ loadnet_data_mountpoint }} none bind,x-systemd.requires-mounts-for={{ loadnet_effective_source_mountpoint }} 0 0"
+    line: >-
+      {{ loadnet_effective_source_dir }} {{ loadnet_data_mountpoint }} none
+      bind,x-systemd.requires-mounts-for={{ loadnet_effective_source_mountpoint }} 0 0
     regexp: "^{{ loadnet_effective_source_dir | regex_escape() }}\\s+{{ loadnet_data_mountpoint | regex_escape() }}\\s+none\\s+"
   when:
     - not (loadnet_storage_wipe | bool)

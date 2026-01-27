@@ -9,20 +9,20 @@
         name: "ultramarine@{{ item }}.service"
         state: stopped
       loop: "{{ loadnet_nodes }}"
-      ignore_errors: true
+      failed_when: false
     - name: Stop load-reth instances
       ansible.builtin.systemd:
         name: "load-reth@{{ item }}.service"
         state: stopped
       loop: "{{ loadnet_nodes }}"
-      ignore_errors: true
+      failed_when: false
     - name: Stop Grafana (monitoring)
       ansible.builtin.systemd:
         name: grafana.service
         state: stopped
-      ignore_errors: true
+      failed_when: false
     - name: Stop Prometheus (monitoring)
       ansible.builtin.systemd:
         name: prometheus.service
         state: stopped
-      ignore_errors: true
+      failed_when: false

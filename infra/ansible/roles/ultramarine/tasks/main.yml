@@ -121,7 +121,7 @@
     owner: root
     group: root
     mode: "0644"
-  loop: "{{ loadnet_nodes | product(['config.toml','genesis.json']) | list }}"
+  loop: "{{ loadnet_nodes | product(['config.toml', 'genesis.json']) | list }}"
   loop_control:
     loop_var: pair
   vars:

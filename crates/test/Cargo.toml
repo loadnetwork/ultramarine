@@ -15,6 +15,7 @@ ultramarine-blob-engine.workspace = true
 ultramarine-cli.workspace = true
 ultramarine-consensus.workspace = true
 ultramarine-execution.workspace = true
+ultramarine-genesis.workspace = true
 ultramarine-node = { workspace = true, features = ["test-harness"] }
 ultramarine-test-support.workspace = true
 ultramarine-types.workspace = true

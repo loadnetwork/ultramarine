@@ -64,12 +64,7 @@
     content: |
       # Load Network baseline (multi-host)
       fs.file-max = 1048576
-  register: loadnet_sysctl_conf
-
-- name: Apply sysctl settings
-  ansible.builtin.command: sysctl --system
-  when: loadnet_sysctl_conf.changed
-  changed_when: true
+  notify: Apply sysctl settings
 
 - name: Create base directories
   ansible.builtin.file:
@@ -102,13 +97,7 @@
       SystemMaxFileSize={{ loadnet_journal_max_file_size | default('200M') }}
       MaxRetentionSec={{ loadnet_journal_max_retention | default('7day') }}
       ForwardToSyslog={{ (loadnet_forward_journal_to_syslog | default(false)) | ternary('yes', 'no') }}
-  register: loadnet_journald_conf
-
-- name: Restart journald to apply limits
-  ansible.builtin.systemd:
-    name: systemd-journald
-    state: restarted
-  when: loadnet_journald_conf.changed
+  notify: Restart journald
 
 - name: Install rsyslog logrotate policy (size-based)
   ansible.builtin.copy:
@@ -135,7 +124,7 @@
 
 - name: Install systemd unit templates
   ansible.builtin.template:
-    src: "{{ playbook_dir }}/../../templates/systemd/{{ item.src }}"
+    src: "{{ (playbook_dir | dirname | dirname) }}/templates/systemd/{{ item.src }}"
     dest: "/etc/systemd/system/{{ item.dest }}"
     owner: root
     group: root

@@ -1,28 +1,4 @@
 ---
-profile: production
-
-exclude_paths:
-  - .cache/
-  - .git/
-
 skip_list:
-  - yaml[line-length]  # Checked by yamllint with 160 limit
-  - var-naming[no-role-prefix]  # loadnet_ prefix is project-wide convention
-  - no-relative-paths  # Intentional: templates located relative to infra root
-  - no-handler  # Intentional design: inline restart for sysctl/journald
-
-warn_list:
-  - command-instead-of-module  # Some commands are intentional (systemctl for status checks)
-  - ignore-errors  # Used for best-effort service stops
-  - jinja[spacing]  # Docker template escaping requires specific format
-  - no-changed-when  # Best-effort cleanup tasks in wipe.yml
-
-use_default_rules: true
-offline: false
-
-kinds:
-  - playbook: "playbooks/*.yml"
-  - tasks: "roles/*/tasks/*.yml"
-  - handlers: "roles/*/handlers/*.yml"
-  - vars: "roles/*/defaults/*.yml"
-  - vars: "roles/*/vars/*.yml"
+  - var-naming[no-role-prefix]
+  - command-instead-of-module
