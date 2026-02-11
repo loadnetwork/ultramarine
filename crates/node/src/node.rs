@@ -571,6 +571,12 @@ impl Node for App {
             engine_api_endpoint: engine_endpoint,
             eth1_rpc_url: eth_url,
             jwt_secret,
+            forkchoice_with_attrs_max_attempts: Some(20),
+            forkchoice_with_attrs_delay_ms: Some(500),
+            // Delay before get_payload to let builder fill payload with transactions.
+            // Builder polls txpool every 25ms, so 500ms ≈ 20 iterations.
+            // Reduced from 700ms to leave more time for block validation/consensus.
+            get_payload_delay_ms: Some(500),
         };
 
         let execution_client = ExecutionClient::new(execution_config).await?;

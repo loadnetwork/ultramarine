@@ -59,6 +59,8 @@ pub struct ExecutionClient {
     time_provider: Arc<dyn TimeProvider>,
     forkchoice_with_attrs_max_attempts: usize,
     forkchoice_with_attrs_delay: Duration,
+    /// Delay before calling get_payload to give the builder time to fill the payload.
+    get_payload_delay: Duration,
 }
 
 impl fmt::Debug for ExecutionClient {
@@ -106,6 +108,7 @@ impl ExecutionClient {
             config.forkchoice_with_attrs_max_attempts.unwrap_or(10).max(1);
         let forkchoice_with_attrs_delay =
             Duration::from_millis(config.forkchoice_with_attrs_delay_ms.unwrap_or(200));
+        let get_payload_delay = Duration::from_millis(config.get_payload_delay_ms.unwrap_or(0));
 
         Ok(Self {
             engine: engine_client,
@@ -113,6 +116,7 @@ impl ExecutionClient {
             time_provider: Arc::new(SystemTimeProvider),
             forkchoice_with_attrs_max_attempts,
             forkchoice_with_attrs_delay,
+            get_payload_delay,
         })
     }
 
@@ -287,6 +291,16 @@ impl ExecutionClient {
                         payload_status.status
                     ));
                 };
+                // Give the builder time to fill the payload with transactions.
+                // The builder works incrementally, polling txpool every `interval` (e.g., 25ms).
+                // Without this delay, we may get an empty or nearly-empty payload.
+                if !self.get_payload_delay.is_zero() {
+                    tracing::debug!(
+                        delay_ms = self.get_payload_delay.as_millis(),
+                        "Waiting before get_payload to allow builder to fill payload"
+                    );
+                    tokio::time::sleep(self.get_payload_delay).await;
+                }
                 // See how payload is constructed: https://github.com/ethereum/consensus-specs/blob/v1.1.5/specs/merge/validator.md#block-proposal
                 let payload_result = self.engine.get_payload(payload_id).await?;
                 let payload_inner = &payload_result.payload.payload_inner.payload_inner;
@@ -479,6 +493,16 @@ impl ExecutionClient {
                         payload_status.status
                     ));
                 };
+                // Give the builder time to fill the payload with transactions.
+                // The builder works incrementally, polling txpool every `interval` (e.g., 25ms).
+                // Without this delay, we may get an empty or nearly-empty payload.
+                if !self.get_payload_delay.is_zero() {
+                    tracing::debug!(
+                        delay_ms = self.get_payload_delay.as_millis(),
+                        "Waiting before get_payload to allow builder to fill payload"
+                    );
+                    tokio::time::sleep(self.get_payload_delay).await;
+                }
                 // Step 2: Call getPayloadV3 to retrieve the block and blob bundle
                 //
                 // This uses the new get_payload_with_blobs() method which:
@@ -904,6 +928,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
@@ -937,6 +962,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 10,
             forkchoice_with_attrs_delay: Duration::from_millis(1),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
@@ -964,6 +990,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
@@ -995,6 +1022,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
@@ -1022,6 +1050,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let err = client.set_latest_forkchoice_state(head).await.unwrap_err();
@@ -1048,6 +1077,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let err = client.set_latest_forkchoice_state(head).await.unwrap_err();
@@ -1076,6 +1106,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let err = client.set_latest_forkchoice_state(head).await.unwrap_err();
@@ -1107,6 +1138,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 1,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([1u8; 32]), 1_700_000_001);
@@ -1142,6 +1174,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 5,
             forkchoice_with_attrs_delay: Duration::from_millis(1),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);
@@ -1172,6 +1205,7 @@ mod tests {
             time_provider: Arc::new(FixedTimeProvider { time: TEST_NOW }),
             forkchoice_with_attrs_max_attempts: 2,
             forkchoice_with_attrs_delay: Duration::from_millis(0),
+            get_payload_delay: Duration::from_millis(0),
         };
 
         let latest_block = make_latest_block(head, 1, AB256::from([8u8; 32]), 1_700_000_001);

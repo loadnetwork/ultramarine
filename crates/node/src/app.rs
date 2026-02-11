@@ -632,17 +632,11 @@ pub async fn run(
 
                 // Realign latest execution block from disk so parent-hash checks
                 // stay in sync after restarts/replays.
+                // Uses load_execution_block which prefers DecidedValue (immune to
+                // BUG-014 blob metadata corruption) over blob metadata.
                 if let Some(prev_height) = height.decrement() &&
-                    let Ok(Some(prev_meta)) = state.get_blob_metadata(prev_height).await
+                    let Ok(Some(prev_block)) = load_execution_block(state, prev_height).await
                 {
-                    let prev_header = prev_meta.execution_payload_header();
-                    let prev_block = ExecutionBlock {
-                        block_hash: prev_header.block_hash,
-                        block_number: prev_header.block_number,
-                        parent_hash: prev_header.parent_hash,
-                        timestamp: prev_header.timestamp,
-                        prev_randao: load_prev_randao(),
-                    };
                     let needs_realignment = state
                         .latest_block
                         .map(|blk| blk.block_number != prev_block.block_number)
@@ -1092,6 +1086,26 @@ async fn handle_get_value(
     info!(%height, %round, "🟢🟢 Consensus is requesting a value to propose");
     let started_at = Instant::now();
 
+    // BUG-014 fix: During WAL recovery, the consensus engine replays the
+    // proposal from the WAL but still fires GetValue because the app returned
+    // empty reply_value in StartedRound.  If we build a NEW block here, it gets
+    // a different timestamp → different block_hash → corrupts blob metadata →
+    // permanent parent-hash-mismatch stall.
+    //
+    // Guard: if block data already exists for this (height, round), another code
+    // path (WAL replay or sync) already stored the correct payload.  Skip the EL
+    // build entirely.  Malachite already has the value from WAL and does not wait
+    // for our reply.
+    if let Ok(Some(_)) = state.get_block_data(height, round).await {
+        warn!(
+            %height, %round,
+            "Block data already exists for this height/round (WAL recovery); skipping EL build"
+        );
+        // Don't send reply — Malachite already has the value from WAL replay
+        // and will proceed to decision without waiting for this response.
+        return Ok(());
+    }
+
     if state.is_el_degraded() {
         warn!(
             %height,
@@ -1242,10 +1256,30 @@ async fn handle_get_value(
     Ok(())
 }
 
-async fn load_decided_block(state: &State) -> eyre::Result<Option<ExecutionBlock>> {
-    let Some(height) = state.get_latest_decided_height().await else {
-        return Ok(None);
-    };
+/// Loads the [`ExecutionBlock`] for a given decided height.
+///
+/// Prefers the consensus-authoritative [`DecidedValue`] (immune to BUG-014
+/// blob-metadata corruption) over blob metadata.  Falls back to blob metadata
+/// only when the decided value is unavailable (e.g. pruned).
+async fn load_execution_block(
+    state: &State,
+    height: Height,
+) -> eyre::Result<Option<ExecutionBlock>> {
+    // Primary: DecidedValue — stored from the undecided *proposal* which uses
+    // an is_none() guard and therefore cannot be overwritten during WAL replay.
+    if let Ok(Some(decided_value)) = state.get_decided_value(height).await {
+        let header = &decided_value.value.metadata.execution_payload_header;
+        return Ok(Some(ExecutionBlock {
+            block_hash: header.block_hash,
+            block_number: header.block_number,
+            parent_hash: header.parent_hash,
+            timestamp: header.timestamp,
+            prev_randao: load_prev_randao(),
+        }));
+    }
+
+    // Fallback: blob metadata (may be corrupted by BUG-014 but useful when
+    // decided values have been pruned).
     match state.get_blob_metadata(height).await? {
         Some(meta) => {
             let header = meta.execution_payload_header();
@@ -1257,14 +1291,22 @@ async fn load_decided_block(state: &State) -> eyre::Result<Option<ExecutionBlock
                 prev_randao: load_prev_randao(),
             }))
         }
-        None => {
-            warn!(
-                %height,
-                "Missing BlobMetadata for latest decided height; cannot derive CL head"
-            );
-            Ok(None)
-        }
+        None => Ok(None),
     }
+}
+
+async fn load_decided_block(state: &State) -> eyre::Result<Option<ExecutionBlock>> {
+    let Some(height) = state.get_latest_decided_height().await else {
+        return Ok(None);
+    };
+    let block = load_execution_block(state, height).await?;
+    if block.is_none() {
+        warn!(
+            %height,
+            "Missing both DecidedValue and BlobMetadata for latest decided height; cannot derive CL head"
+        );
+    }
+    Ok(block)
 }
 
 async fn resolve_cl_head(state: &mut State) -> eyre::Result<ExecutionBlock> {

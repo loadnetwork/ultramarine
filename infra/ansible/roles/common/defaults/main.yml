@@ -12,19 +12,49 @@ loadnet_docker_log_max_file: "5"
 loadnet_el_http_bind: "0.0.0.0"
 loadnet_el_http_api: "eth,net,web3,txpool,debug,trace"
 
-# TxPool settings for high-throughput (10K+ TPS)
-# Sizing heuristics: target_tps * buffer_seconds
-#   - 10K TPS * 30 sec = 300K txs comfortable buffer
-#   - 10K TPS * 50 sec = 500K txs for bursts
-loadnet_el_txpool_pending_max_count: 300000
-loadnet_el_txpool_queued_max_count: 300000
-loadnet_el_txpool_max_pending_txns: 500000
-loadnet_el_txpool_max_new_txns: 50000
-loadnet_el_txpool_max_account_slots: 64
+# Keep debug/trace APIs exposed for operational troubleshooting and Blockscout.
+# RPC admission defaults are tuned to protect node latency
+# under sustained high load.
+loadnet_el_rpc_max_connections: 12000
+loadnet_el_rpc_max_request_size: 100
+loadnet_el_rpc_max_response_size: 200
+loadnet_el_rpc_max_tracing_requests: 256
+loadnet_el_rpc_max_blocking_io_requests: 512
+loadnet_el_rpc_send_raw_transaction_sync_timeout: "3s"
+
+# load-reth method-specific RPC backpressure middleware
+loadnet_el_rpc_bp_send_raw_tx_limit: 1024
+loadnet_el_rpc_bp_get_transaction_count_limit: 2048
+loadnet_el_rpc_bp_send_raw_tx_sync_limit: 256
+# Legacy alias supported by template for backward compatibility:
+# loadnet_el_rpc_send_raw_tx_sync_timeout
+
+# RPC cache sizing keeps hot data resident while bounding DB fan-out.
+loadnet_el_rpc_cache_max_blocks: 100000
+loadnet_el_rpc_cache_max_receipts: 50000
+loadnet_el_rpc_cache_max_headers: 50000
+loadnet_el_rpc_cache_max_concurrent_db_requests: 2048
+
+# Builder settings for high-throughput (200k+ TPS)
+# Reduce interval for more responsive block building
+# Increase max-tasks for more parallel payload construction
+loadnet_el_builder_gaslimit: 2000000000
+loadnet_el_builder_interval: "25ms"
+loadnet_el_builder_deadline: 1
+loadnet_el_builder_max_tasks: 512
+
+# TxPool settings for high-throughput with bounded failure domains.
+# Large pools increase survivability for short bursts,
+# but can amplify nonce-gap storms.
+loadnet_el_txpool_pending_max_count: 1000000
+loadnet_el_txpool_queued_max_count: 1000000
+loadnet_el_txpool_max_pending_txns: 1500000
+loadnet_el_txpool_max_new_txns: 100000
+loadnet_el_txpool_max_account_slots: 128
 # Size limits in MB (blobs are ~128KB each, 6 blobs/tx = ~768KB)
-# 2GB pending allows ~2600 blob txs or ~millions of regular txs
-loadnet_el_txpool_pending_max_size: 2048
-loadnet_el_txpool_queued_max_size: 2048
+# 32GB pending allows ~40k blob txs or ~hundreds of millions of regular txs
+loadnet_el_txpool_pending_max_size: 32768
+loadnet_el_txpool_queued_max_size: 32768
 loadnet_el_txpool_gas_limit: 2000000000
 
 loadnet_prometheus_bind: "127.0.0.1"

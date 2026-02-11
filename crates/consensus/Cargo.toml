@@ -11,7 +11,6 @@ rust-version.workspace = true
 
 [dependencies]
 ultramarine-blob-engine.workspace = true
-ultramarine-cli.workspace = true
 ultramarine-execution.workspace = true
 ultramarine-types.workspace = true
 

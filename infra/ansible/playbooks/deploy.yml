@@ -151,7 +151,14 @@
       until:
         - el_syncing_status.status == 200
         - el_syncing_status.json is defined
-        - el_syncing_status.json.result == false
+        # eth_syncing returns false when synced, or object with currentBlock/highestBlock when syncing
+        # Consider synced if: result==false OR currentBlock >= highestBlock
+        - >-
+          el_syncing_status.json.result == false or
+          (el_syncing_status.json.result is mapping and
+           el_syncing_status.json.result.currentBlock is defined and
+           el_syncing_status.json.result.highestBlock is defined and
+           (el_syncing_status.json.result.currentBlock | int(base=16)) >= (el_syncing_status.json.result.highestBlock | int(base=16)))
       loop: "{{ loadnet_nodes }}"
       changed_when: false
 

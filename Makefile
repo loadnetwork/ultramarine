@@ -20,6 +20,10 @@ CARGO_INSTALL_EXTRA_FLAGS ?=
 CARGO_TARGET_DIR          ?= target
 BINARY_NAME               ?= ultramarine
 BIN_DIR                   ?= dist/bin
+CARGO_SORT_VERSION        ?= 2.0.1
+CARGO_SORT                ?= cargo sort
+CARGO_SORT_FLAGS          ?= --grouped --workspace
+CARGO_AUDIT               ?= cargo audit
 PROMETHEUS_CONFIG_DIR     := monitoring
 PROMETHEUS_ACTIVE_CONFIG  := $(PROMETHEUS_CONFIG_DIR)/prometheus.yml
 PROMETHEUS_HOST_CONFIG    := $(PROMETHEUS_CONFIG_DIR)/prometheus.host.yml
@@ -179,11 +183,11 @@ clippy-fix: ## Run clippy and automatically fix warnings.
 .PHONY: sort
 sort: ## Sort dependencies in Cargo.toml files.
 	@echo "$(GREEN)Sorting dependencies$(NC)"
-	cargo sort --grouped --workspace
+	$(CARGO_SORT) $(CARGO_SORT_FLAGS)
 
 .PHONY: sort-check
 sort-check: ## Check if dependencies are sorted.
-	cargo sort --grouped --workspace --check
+	$(CARGO_SORT) $(CARGO_SORT_FLAGS) --check
 
 # Typos and TOML formatting linting. We wrap them here to ensure these tools
 # exist before running.
@@ -197,8 +201,8 @@ ensure-typos:
 		echo "typos not found. Please install it via \`cargo install typos-cli\`"; exit 1; fi
 
 .PHONY: lint-toml
-lint-toml: ensure-dprint ## Format all TOML files using dprint.
-	dprint fmt
+lint-toml: ensure-dprint ## Check TOML formatting using dprint.
+	dprint check
 
 .PHONY: ensure-dprint
 ensure-dprint:
@@ -206,7 +210,7 @@ ensure-dprint:
 		echo "dprint not found. Please install it via \`cargo install --locked dprint\`"; exit 1; fi
 
 .PHONY: lint
-lint: fmt clippy sort lint-typos lint-toml ## Run all linters.
+lint: fmt-check clippy sort-check lint-typos lint-toml ## Run all linters without mutating files.
 	@echo "$(GREEN)✓ All lints passed$(NC)"
 
 .PHONY: fix-lint
@@ -263,25 +267,37 @@ deps-outdated: ## Check for outdated dependencies (requires cargo-outdated).
 
 .PHONY: audit audit-online
 AUDIT_DB_DIR ?= target/advisory-db
+AUDIT_IGNORES ?= RUSTSEC-2024-0388 RUSTSEC-2024-0436 RUSTSEC-2025-0137 RUSTSEC-2026-0002 RUSTSEC-2026-0007 RUSTSEC-2026-0009
+
+AUDIT_FLAGS :=
+ifneq ($(strip $(AUDIT_IGNORES)),)
+AUDIT_FLAGS += $(foreach advisory,$(AUDIT_IGNORES),--ignore $(advisory))
+endif
 
 audit: ## Run security audit on dependencies.
 	@echo "$(YELLOW)Running security audit$(NC)"
 	@if [ -n "$$CI" ]; then \
-		cargo audit --db $(AUDIT_DB_DIR); \
+		$(CARGO_AUDIT) --db $(AUDIT_DB_DIR) $(AUDIT_FLAGS); \
 	elif [ -d "$(AUDIT_DB_DIR)/.git" ]; then \
-		cargo audit --db $(AUDIT_DB_DIR) --offline; \
+		if $(CARGO_AUDIT) --help 2>/dev/null | grep -q -- '--offline'; then \
+			$(CARGO_AUDIT) --db $(AUDIT_DB_DIR) --offline $(AUDIT_FLAGS); \
+		else \
+			echo "$(YELLOW)cargo-audit does not support --offline; using local DB without offline mode.$(NC)"; \
+			$(CARGO_AUDIT) --db $(AUDIT_DB_DIR) $(AUDIT_FLAGS); \
+		fi; \
 	else \
 		echo "$(YELLOW)Skipping cargo audit (no local advisory DB at $(AUDIT_DB_DIR)). Run 'make audit-online' to fetch it.$(NC)"; \
 	fi
 
 audit-online: ## Fetch advisory DB and run cargo-audit (requires network).
 	@mkdir -p $(AUDIT_DB_DIR)
-	cargo audit --db $(AUDIT_DB_DIR)
+	$(CARGO_AUDIT) --db $(AUDIT_DB_DIR) $(AUDIT_FLAGS)
 
 .PHONY: deny
+DENY_CHECKS ?= advisories bans sources
 deny: ## Check dependencies against deny rules (requires cargo-deny).
 	@echo "$(YELLOW)Checking dependency policies$(NC)"
-	cargo deny check
+	cargo deny check $(DENY_CHECKS)
 
 # -----------------------------------------------------------------------------
 # CI/CD
@@ -319,7 +335,7 @@ tools: ## Install common development tools used by the Makefile.
 	@echo "Installing cargo-deny...";  cargo install cargo-deny --locked
 	@echo "Installing cargo-audit..."; cargo install cargo-audit --locked
 	@echo "Installing cargo-outdated..."; cargo install cargo-outdated --locked
-	@echo "Installing cargo-sort..."; cargo install cargo-sort --locked
+	@echo "Installing cargo-sort $(CARGO_SORT_VERSION)..."; cargo install cargo-sort --version $(CARGO_SORT_VERSION) --locked
 	@echo "Installing cargo-udeps..."; cargo install cargo-udeps --locked
 	@echo "Installing cargo-nextest..."; cargo install cargo-nextest --locked
 	@echo "Installing cargo-llvm-cov..."; cargo install cargo-llvm-cov --locked

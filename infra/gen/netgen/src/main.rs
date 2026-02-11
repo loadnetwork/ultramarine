@@ -5,6 +5,7 @@ use std::{
     process::Command,
 };
 
+use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, bail, eyre};
 use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
@@ -64,6 +65,9 @@ struct Manifest {
     engine: Engine,
     ports: Ports,
     sync: Sync,
+    /// P2P message size configuration for handling large blocks.
+    #[serde(default)]
+    p2p: P2pConfig,
     archiver: Archiver,
     exposure: Exposure,
     blockscout: Option<Blockscout>,
@@ -141,6 +145,18 @@ struct ClPorts {
 #[derive(Clone, Debug, Deserialize)]
 struct Sync {
     enabled: bool,
+    /// Global sync tuning applied to ALL nodes (validators and fullnodes).
+    /// These set the baseline; the `fullnode` section can override them for non-validators.
+    #[serde(default)]
+    parallel_requests: Option<usize>,
+    #[serde(default)]
+    request_timeout: Option<String>,
+    #[serde(default)]
+    max_request_size: Option<String>,
+    #[serde(default)]
+    max_response_size: Option<String>,
+    #[serde(default)]
+    batch_size: Option<usize>,
     /// Fullnode-specific sync tuning (optional).
     /// These settings are applied only to non-validator nodes (fullnode/rpc roles)
     /// to help them catch up faster when syncing from genesis.
@@ -158,9 +174,29 @@ struct FullnodeSyncConfig {
     /// Recommended: "30s" for fullnodes with high parallel_requests.
     #[serde(default)]
     request_timeout: Option<String>,
+    /// Maximum request size (default: "1 MiB").
+    #[serde(default)]
+    max_request_size: Option<String>,
+    /// Maximum response size (default: "10 MiB").
+    #[serde(default)]
+    max_response_size: Option<String>,
     /// Batch size for sync requests (default: 5).
     #[serde(default)]
     batch_size: Option<usize>,
+}
+
+/// P2P message size configuration.
+/// These limits must be large enough to handle big blocks during load tests.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct P2pConfig {
+    /// Maximum pubsub message size (default: "4 MiB").
+    /// Load tests can produce blocks up to 6+ MB, so increase this.
+    #[serde(default)]
+    pubsub_max_size: Option<String>,
+    /// Maximum RPC message size (default: "10 MiB").
+    /// Should be larger than pubsub_max_size.
+    #[serde(default)]
+    rpc_max_size: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -894,8 +930,62 @@ fn generate(
         // Multi-host requires ValueSync.
         cfg.sync.enabled = true;
 
-        // Apply fullnode-specific sync tuning for non-validator nodes.
-        // These settings help fullnodes catch up faster when syncing a large chain.
+        // Apply global sync tuning (applies to ALL nodes: validators + fullnodes).
+        if let Some(parallel_requests) = manifest.sync.parallel_requests {
+            cfg.sync.parallel_requests = parallel_requests;
+        }
+        if let Some(ref request_timeout) = manifest.sync.request_timeout {
+            if let Ok(dur) = humantime::parse_duration(request_timeout) {
+                cfg.sync.request_timeout = dur;
+            } else {
+                eprintln!(
+                    "warning: invalid sync.request_timeout '{request_timeout}', using default"
+                );
+            }
+        }
+        if let Some(ref max_request_size) = manifest.sync.max_request_size {
+            if let Ok(size) = max_request_size.parse::<ByteSize>() {
+                cfg.sync.max_request_size = bytesize::ByteSize::b(size.as_u64());
+            } else {
+                eprintln!(
+                    "warning: invalid sync.max_request_size '{max_request_size}', using default"
+                );
+            }
+        }
+        if let Some(ref max_response_size) = manifest.sync.max_response_size {
+            if let Ok(size) = max_response_size.parse::<ByteSize>() {
+                cfg.sync.max_response_size = bytesize::ByteSize::b(size.as_u64());
+            } else {
+                eprintln!(
+                    "warning: invalid sync.max_response_size '{max_response_size}', using default"
+                );
+            }
+        }
+        if let Some(batch_size) = manifest.sync.batch_size {
+            cfg.sync.batch_size = batch_size;
+        }
+
+        // Apply P2P message size limits (for handling large blocks during load tests).
+        if let Some(ref pubsub_max_size) = manifest.p2p.pubsub_max_size {
+            if let Ok(size) = pubsub_max_size.parse::<ByteSize>() {
+                cfg.consensus.p2p.pubsub_max_size = bytesize::ByteSize::b(size.as_u64());
+                cfg.mempool.p2p.pubsub_max_size = bytesize::ByteSize::b(size.as_u64());
+            } else {
+                eprintln!(
+                    "warning: invalid p2p.pubsub_max_size '{pubsub_max_size}', using default"
+                );
+            }
+        }
+        if let Some(ref rpc_max_size) = manifest.p2p.rpc_max_size {
+            if let Ok(size) = rpc_max_size.parse::<ByteSize>() {
+                cfg.consensus.p2p.rpc_max_size = bytesize::ByteSize::b(size.as_u64());
+                cfg.mempool.p2p.rpc_max_size = bytesize::ByteSize::b(size.as_u64());
+            } else {
+                eprintln!("warning: invalid p2p.rpc_max_size '{rpc_max_size}', using default");
+            }
+        }
+
+        // Apply fullnode-specific sync tuning for non-validator nodes (overrides global).
         if n.role != "validator" &&
             let Some(fullnode_sync) = &manifest.sync.fullnode
         {
@@ -903,13 +993,29 @@ fn generate(
                 cfg.sync.parallel_requests = parallel_requests;
             }
             if let Some(ref request_timeout) = fullnode_sync.request_timeout {
-                // Parse humantime duration (e.g. "30s", "1m")
                 if let Ok(dur) = humantime::parse_duration(request_timeout) {
                     cfg.sync.request_timeout = dur;
                 } else {
                     eprintln!(
-                        "warning: invalid request_timeout '{}' for fullnode sync, using default",
-                        request_timeout
+                        "warning: invalid fullnode request_timeout '{request_timeout}', using default"
+                    );
+                }
+            }
+            if let Some(ref max_request_size) = fullnode_sync.max_request_size {
+                if let Ok(size) = max_request_size.parse::<ByteSize>() {
+                    cfg.sync.max_request_size = bytesize::ByteSize::b(size.as_u64());
+                } else {
+                    eprintln!(
+                        "warning: invalid fullnode max_request_size '{max_request_size}', using default"
+                    );
+                }
+            }
+            if let Some(ref max_response_size) = fullnode_sync.max_response_size {
+                if let Ok(size) = max_response_size.parse::<ByteSize>() {
+                    cfg.sync.max_response_size = bytesize::ByteSize::b(size.as_u64());
+                } else {
+                    eprintln!(
+                        "warning: invalid fullnode max_response_size '{max_response_size}', using default"
                     );
                 }
             }

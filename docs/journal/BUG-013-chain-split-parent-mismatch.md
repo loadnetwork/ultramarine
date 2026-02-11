@@ -278,3 +278,34 @@ Run from `ultramarine/`:
 - Execution genesis bootstrap: `ultramarine/docs/knowledge_base/execution-genesis.md`
 - EL persistence for 1-slot finality: `ultramarine/docs/knowledge_base/el-persistence.md`
 - Network inventory: `ultramarine/infra/networks/fibernet/inventory.yml`
+
+## Production Verification (2026-02-03)
+
+### Load Testing Under Stress
+
+BUG-013 fix verified under sustained load testing on fibernet:
+
+| Test                       | TPS    | Duration    | Parent Mismatch Errors |
+| -------------------------- | ------ | ----------- | ---------------------- |
+| Warmup                     | 1k-10k | 5 min       | 0                      |
+| Sustained                  | 10k    | 10 min      | 0                      |
+| Peak                       | 20k    | 5 min       | 0                      |
+| Rolling restart under load | 20k    | during test | 0                      |
+
+**Verification commands:**
+
+```bash
+# Check for parent mismatch errors across all nodes
+for host in 67.213.117.143 64.34.87.1 67.213.121.57; do
+  ssh ubuntu@$host 'journalctl -u "ultramarine@*" --since "-30min" | grep -c "Parent hash mismatch" || echo 0'
+done
+# Result: 0 on all hosts
+```
+
+### Conclusion
+
+BUG-013 fix confirmed stable under:
+
+- 20k TPS sustained load
+- Rolling restarts during load
+- Peak blocks with 21,622 transactions

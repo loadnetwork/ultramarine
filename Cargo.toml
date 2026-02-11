@@ -2,18 +2,18 @@
 resolver = "2"
 
 members = [
-  "bin/ultramarine",
-  "crates/blob_engine",
-  "crates/cli",
-  "crates/consensus",
-  "crates/execution",
-  "crates/genesis",
-  "crates/node",
-  "crates/test",
-  "crates/test_support",
-  "crates/types",
-  "crates/utils",
-  "infra/gen/netgen",
+    "bin/ultramarine",
+    "crates/blob_engine",
+    "crates/cli",
+    "crates/consensus",
+    "crates/execution",
+    "crates/genesis",
+    "crates/node",
+    "crates/test",
+    "crates/test_support",
+    "crates/types",
+    "crates/utils",
+    "infra/gen/netgen",
 ]
 default-members = ["bin/ultramarine", "crates/utils"]
 

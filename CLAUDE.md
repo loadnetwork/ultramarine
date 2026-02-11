@@ -1,5 +1,22 @@
 # Ultramarine Development Notes
 
+## Knowledge Base
+
+Technical reference documents in `docs/knowledge_base/`:
+
+| Document                                                           | Topic                                       |
+| ------------------------------------------------------------------ | ------------------------------------------- |
+| [block-timing.md](docs/knowledge_base/block-timing.md)             | Timestamp invariants, 1s minimum block time |
+| [cl-el-head-gating.md](docs/knowledge_base/cl-el-head-gating.md)   | FCU gate, CL/EL alignment, Engine API rules |
+| [cl-runtime.md](docs/knowledge_base/cl-runtime.md)                 | Runtime flavor, logging, consensus timeouts |
+| [el-gas-limits.md](docs/knowledge_base/el-gas-limits.md)           | Builder/txpool config, gas limits           |
+| [el-persistence.md](docs/knowledge_base/el-persistence.md)         | 1-slot finality, persistence threshold      |
+| [execution-genesis.md](docs/knowledge_base/execution-genesis.md)   | Genesis bootstrap without HTTP RPC          |
+| [itest-node-harness.md](docs/knowledge_base/itest-node-harness.md) | Integration test harness                    |
+| [p2p-sync-limits.md](docs/knowledge_base/p2p-sync-limits.md)       | **P2P/sync size limits for load tests**     |
+
+---
+
 ## DevOps Operations - MANDATORY RULES
 
 **CRITICAL**: Before performing ANY DevOps or operations tasks (deploy, wipe, restart, etc.), you MUST:
@@ -128,6 +145,83 @@ The design follows Lighthouse's pattern where beacon blocks are kept forever, on
 - `block_sidecar_coupling.rs:573-577` - Empty blob response handling
 
 In Load Network, we apply the same principle: consensus data (decided values, certificates, block data) is retained indefinitely, while blob bytes are pruned after archive verification.
+
+---
+
+## P2P and Sync Size Limits (Critical for Load Tests)
+
+> **Full documentation**: [docs/knowledge_base/p2p-sync-limits.md](docs/knowledge_base/p2p-sync-limits.md)
+
+### Problem: Sync Stalls with Large Blocks
+
+During high-throughput load tests, blocks can grow to **~5-12 MB** (2026-02-10 baseline hot segment peaked near **11.6 MB**). Default P2P/sync limits are ~1-10 MB, causing:
+
+- Sync requests timeout (responses rejected at P2P layer)
+- Nodes fall behind and can't catch up
+- `WARN: Beacon client online, but no consensus updates received`
+
+### Required Config Values for Load Tests
+
+In `manifests/<network>.yaml`:
+
+```yaml
+sync:
+  enabled: true
+  max_request_size: "50 MiB"      # Default 1 MiB - TOO SMALL for load tests
+  max_response_size: "500 MiB"    # Default 10 MiB - increase for large blocks
+  request_timeout: "60s"          # Default 30s - increase for large payloads
+  parallel_requests: 100          # For fast sync catch-up
+
+# P2P message size limits - CRITICAL for large blocks
+p2p:
+  pubsub_max_size: "50 MiB"       # Default 4 MiB - blocks can be 12+ MB
+  rpc_max_size: "100 MiB"         # Default 10 MiB - must be > block size
+```
+
+### Manual Fix (without regenerating configs)
+
+If nodes are stuck, update configs on ALL hosts:
+
+```bash
+# Create update script
+cat > /tmp/update-sync-sizes.sh << 'EOF'
+#!/bin/bash
+for config in /var/lib/ultramarine/*/config/config.toml; do
+    sed -i.bak \
+        -e 's/pubsub_max_size = ".*"/pubsub_max_size = "50 MiB"/g' \
+        -e 's/rpc_max_size = ".*"/rpc_max_size = "100 MiB"/g' \
+        -e 's/max_request_size = ".*"/max_request_size = "50 MiB"/g' \
+        -e 's/max_response_size = ".*"/max_response_size = "500 MiB"/g' \
+        "$config"
+done
+EOF
+
+# Run on ALL hosts, then restart
+for host in LON2 AMS FRA2 RPC; do
+    scp /tmp/update-sync-sizes.sh ubuntu@$host:/tmp/
+    ssh ubuntu@$host 'sudo bash /tmp/update-sync-sizes.sh'
+    ssh ubuntu@$host 'sudo systemctl restart ultramarine@*'
+done
+```
+
+### Key Insight
+
+**ALL nodes** must have large limits - not just the receiver. The SENDER also needs high `rpc_max_size` to send large sync responses.
+
+### Validation
+
+Historical (2026-02-06):
+
+- P2P/sync sizing changes removed sync-stall class and enabled clean sharded runs in captured logs.
+
+Latest canonical baseline (2026-02-10, PERF-SUMMARY):
+
+- 10k/host validation (60s): `1,472,250` submitted (`~24,537 TPS`), `0` errors.
+- 20k/host probe (60s): `1,823,713` submitted (`~30,395 TPS`), `0` errors.
+- 20k probe on-chain window (65 blocks): `1,824,625` tx / `109s` = `16,739.68 TPS`.
+- Post-run health: `txpool pending=0, queued=0`, `eth_syncing=false` on all endpoints.
+
+See `docs/journal/PERF-SUMMARY-fibernet-throughput-journey.md` for baseline details and consolidated phase metrics.
 
 ---
 

@@ -15,7 +15,6 @@ alloy-eips.workspace = true # Added for EIP-4844 kzg_to_versioned_hash (Phase 1)
 alloy-rpc-types = { workspace = true }
 alloy-rpc-types-engine = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
-alloy-rpc-types-txpool = { workspace = true }
 ethereum_hashing.workspace = true
 ethereum_serde_utils = { workspace = true }
 fixed_bytes.workspace = true

@@ -10,6 +10,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_SORT_VERSION: 2.0.1
 
 permissions:
   contents: read
@@ -68,7 +69,7 @@ jobs:
       - name: Install cargo-sort (pinned)
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-sort@2.0.1
+          tool: cargo-sort@${{ env.CARGO_SORT_VERSION }}
 
       - name: Show cargo-sort version
         run: cargo sort --version
@@ -271,3 +272,38 @@ jobs:
           name: coverage-report
           path: target/llvm-cov/html/
           retention-days: 30
+
+  # ----------------------------------------------------------------------------
+  # Security policy checks (advisories + deny)
+  # ----------------------------------------------------------------------------
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    needs: [fmt, sort, clippy]
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Setup Rust 1.89
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Advisory audit (online)
+        run: make audit-online
+
+      - name: Deny policy checks
+        run: make deny
