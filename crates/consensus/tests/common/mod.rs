@@ -196,7 +196,7 @@ pub(crate) async fn propose_with_optional_blobs(
         state.propose_value_with_blobs(height, round, bytes.clone(), payload, &[], bundle).await?;
 
     let sidecars = if let Some(bundle) = bundle {
-        let (_header, sidecars) = state.prepare_blob_sidecar_parts(&proposed, Some(bundle))?;
+        let (_header, sidecars) = state.prepare_blob_sidecar_parts(&proposed, Some(bundle)).await?;
         Some(sidecars)
     } else {
         None
