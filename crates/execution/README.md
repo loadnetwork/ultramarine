@@ -51,7 +51,7 @@ Load Network uses **constant `0x01`** for `prev_randao` (Arbitrum pattern):
 - **Normalization**: [`alloy_impl.rs:95`](./src/eth_rpc/alloy_impl.rs#L95) - RPC client returns constant
 - **Testing**:
   - Unit: [`state/tests/mod.rs:490`](../consensus/src/state/tests/mod.rs#L490) - `process_decided_certificate_rejects_mismatched_prev_randao`
-  - Integration: [`node_harness.rs:1803`](../../test/tests/full_node/node_harness.rs#L1803) - `assert_prev_randao_constant()`
+  - Integration: [`node_harness.rs:1803`](../test/tests/full_node/node_harness.rs#L1803) - `assert_prev_randao_constant()`
 
 **For dApp developers**: Do not use `block.prevrandao` for security-critical randomness. Use VRF oracles (Chainlink VRF, API3 QRNG) or commit-reveal schemes.
 

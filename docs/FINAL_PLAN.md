@@ -30,10 +30,10 @@ This plan integrates EIP-4844 blob sidecars into Ultramarine while maintaining c
 - **Phase 1 – Execution Bridge** _(2025-10-27)_: Engine API v3 wired end-to-end with blob bundle retrieval (upgraded to v4 in Dec 2025); execution payload header extraction added to `ValueMetadata`.
 - **Phase 2 – Three-Layer Metadata Architecture** _(2025-10-27)_: Introduced `ConsensusBlockMetadata`, `BlobMetadata`, and blob-engine persistence (Layer 1/2/3) with redb tables and protobuf encoding.
 - **Phase 3 – Proposal Streaming** _(2025-10-28)_: Extended `ProposalPart` with `BlobSidecar`, enabled streaming of blobs via `/proposal_parts` with commitment/proof payloads.
-- **Phase 4 – Cleanup & Storage Finalisation** _(2025-10-28)_: Removed legacy header tables/APIs, made `BlobMetadata` the single source of truth, updated parent-root validation and restream rebuilds. See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for full log.
-- **Phase 5 (5.1/5.2) – Live Consensus + Sync Fixes** _(2025-10-23)_: Delivered proposer blob storage, restream sealing, synced-value protobuf path corrections (tracked separately in `STATUS_UPDATE_2025-10-21.md`).
+- **Phase 4 – Cleanup & Storage Finalisation** _(2025-10-28)_: Removed legacy header tables/APIs, made `BlobMetadata` the single source of truth, updated parent-root validation and restream rebuilds.
+- **Phase 5 (5.1/5.2) – Live Consensus + Sync Fixes** _(2025-10-23)_: Delivered proposer blob storage, restream sealing, and synced-value protobuf path corrections.
 - **Phase 5A – Metrics Instrumentation** _(2025-11-04)_: Added 12 blob metrics, wired through node startup/state helpers, updated dashboards and docs.
-- **Phase 5B – Integration Harness** _(2025-11-08)_: Seventeen deterministic full-node scenarios pass via `make itest-node`, covering proposer/follower commit, sync ingestion, restart hydration, decided-history pruning (`Store::prune()`), execution-layer rejection, and invalid/missing EL payload data (see [Testing Strategy](./PHASE5_TESTNET.md#testing-strategy) for the full matrix).
+- **Phase 5B – Integration Harness** _(2025-11-08)_: Seventeen deterministic full-node scenarios pass via `make itest-node`, covering proposer/follower commit, sync ingestion, restart hydration, decided-history pruning (`Store::prune()`), execution-layer rejection, and invalid/missing EL payload data (see [itest-node-harness.md](./knowledge_base/itest-node-harness.md) for harness details).
 - **Phase 6 – Archiving & Pruning (V0)** _(2025-12-17)_: Archive notices + proposer-only verification + archive→finality→prune flow implemented. Tier‑1 harness defaults `archiver.enabled=false` (to avoid accidental pruning), archiver/prune scenarios opt in with `FullNodeTestBuilder::with_archiver(...)` / `with_mock_archiver()`, and harness hardening (panic-safe teardown, port allocation retries, read-only store opens) reduces CI flakiness.
 - **Phase 5C – Testnet Validation** _(2025-11-07)_: Docker harness exercised 1,158 real blobs; metrics and dashboards verified against live runs.
 - **Prague / Engine API v4 upgrade** _(2025-12-05)_: Consensus/execution bridge now uses `forkchoiceUpdated/getPayload/newPayload V4`, deterministic execution-request helpers are shared across harnesses, and the load-reth genesis enforces Prague at timestamp 0 so EL and CL compute the same `requests_hash`.
@@ -137,7 +137,7 @@ Proposer                           Validators
 - **Normalization**: `ultramarine/crates/execution/src/eth_rpc/alloy_impl.rs:95` - RPC client returns constant
 - **Testing**: `ultramarine/crates/test/tests/full_node/node_harness.rs:1803` - harness verifies payloads, signatures bind execution requests, and V4 round-trips run via ignored tests
 
-**See also**: [load-reth-design.md](../../../../load-el-design/load-reth-design.md#2-functional-requirements) for EL perspective.
+**See also**: [load-reth README](../../load-reth/README.md) for EL perspective.
 
 ### TPS Considerations
 
@@ -177,7 +177,7 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
   3. Blob engine (Layer 3) – prunable RocksDB storage keyed by height/round.
 - Added redb tables: `consensus_block_metadata`, `blob_metadata_undecided`, `blob_metadata_decided`, `blob_metadata_meta` (O(1) latest pointer).
 - Implemented protobuf serialization for both metadata layers; consensus now serialises via `ProtobufCodec`.
-- Unit tests cover metadata creation, protobuf round-trips, validator-set hashing (see [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#phase-1--core-storage)).
+- Unit tests cover metadata creation, protobuf round-trips, and validator-set hashing.
 
 ## Phase 3: Proposal Streaming ✅ COMPLETED (2025-10-28)
 
@@ -211,7 +211,7 @@ Extend execution client interface to support Engine API v3 with blob bundle retr
 - Strengthened round hygiene (`commit_cleans_failed_round_blob_metadata`) and metadata fallback logic (`load_blob_metadata_for_round_falls_back_to_decided`).
 - Added restream reconstruction test (`rebuild_blob_sidecars_for_restream_reconstructs_headers`); unit-suite now 23/23 passing.
 - `cargo fmt --all`, `cargo clippy -p ultramarine-consensus`, and `cargo test -p ultramarine-consensus --lib` run clean for the consensus crate.
-- See [PHASE4_PROGRESS.md](../PHASE4_PROGRESS.md#2025-10-28-tuesday--phase-4--cleanup-complete) for detailed timeline and code references.
+- Detailed timeline and code references are captured in this plan's Phase 4 section.
 
 ## Phase 5: Block Import / EL Interaction (Days 8-9) ✅ COMPLETED
 
@@ -243,9 +243,9 @@ Modify `Decided` handler to validate blob availability before block import.
 
 **See**:
 
-- `docs/PHASE_5_COMPLETION.md` - Live consensus completion details
-- `docs/LIGHTHOUSE_PARITY_COMPLETE.md` - Versioned hash verification
-- `docs/BLOB_SYNC_GAP_ANALYSIS.md` - **Critical sync gaps and fixes**
+- `docs/knowledge_base/itest-node-harness.md` - integration harness scenarios and coverage
+- `docs/knowledge_base/cl-el-head-gating.md` - FCU gating and EL readiness invariants
+- `docs/knowledge_base/el-persistence.md` - persistence-threshold rationale for restart safety
 
 ### Files to Modify
 
@@ -794,8 +794,9 @@ Validate blob sidecar integration end-to-end with comprehensive metrics, integra
 
 ### See Also
 
-- [PHASE5_TESTNET.md](./PHASE5_TESTNET.md) - Complete implementation plan with daily progress log
-- [PHASE4_PROGRESS.md](./PHASE4_PROGRESS.md) - Phase 1-4 completion log
+- [DEV_WORKFLOW.md](./DEV_WORKFLOW.md) - End-to-end workflow and integration runbook
+- [knowledge_base/itest-node-harness.md](./knowledge_base/itest-node-harness.md) - Integration harness scenarios and usage
+- [journal/PERF-SUMMARY-fibernet-throughput-journey.md](./journal/PERF-SUMMARY-fibernet-throughput-journey.md) - Consolidated throughput timeline and baseline
 - Makefile:427-550 - Testnet automation targets
 - `docs/DEV_WORKFLOW.md` – integration harness command reference (`make itest`, `make itest-node`)
 

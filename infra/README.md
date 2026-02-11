@@ -1,10 +1,12 @@
 # Infra (multi-host) tooling
 
-This folder contains the manifest-driven infra scaffolding described in `infra_progress.md`.
+This folder contains the manifest-driven infra scaffolding for multi-host
+Load Network deployments.
 
-Docs:
-
-- Firewall/ports guidance: `FIREWALL.md`
+Primary references:
+- `infra/README.md` (this document) for operator workflows and commands.
+- `docs/FINAL_PLAN.md` for architecture context.
+- `docs/knowledge_base/p2p-sync-limits.md` for size-limit tuning under load.
 
 ## Netgen
 
@@ -36,7 +38,8 @@ Generated outputs (current):
 Notes:
 
 - Deploys are **Engine IPC-only**.
-- Validators require archiver config; bearer tokens are expected via decrypted secrets (see `SECRETS.md`).
+- Validators require archiver config; bearer tokens are expected via decrypted
+  secrets in `infra/networks/<net>/secrets.sops.yaml`.
 - If `blockscout.enabled=true` in the manifest, `net-deploy` / `net-launch` will also deploy Blockscout + nginx on the configured host.
 
 ## Ansible Design Choices (Intentional)
