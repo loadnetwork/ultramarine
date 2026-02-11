@@ -6988,6 +6988,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-network",
+ "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-client",
  "alloy-rpc-types",
