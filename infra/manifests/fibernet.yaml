@@ -82,18 +82,25 @@ ports:
 # ValueSync must be enabled for multi-host networks.
 sync:
   enabled: true
-  # Fullnode-specific sync tuning for faster catch-up when syncing from genesis.
-  # These settings only apply to non-validator nodes (fullnode/rpc roles).
+  # Global sync tuning (applies to ALL nodes: validators + fullnodes).
+  # Blocks with 1024 blobs can be ~134 MB; default 10 MiB response limit is too small.
+  # Load tests can produce blocks up to 6 MB - increase all limits accordingly.
+  max_request_size: "50 MiB"
+  max_response_size: "500 MiB"
+  request_timeout: "60s"
+  parallel_requests: 100
+  batch_size: 5
+  # Fullnode-specific sync tuning (overrides global for non-validator nodes).
   fullnode:
-    # Number of parallel sync requests (default: 5).
-    # Higher values allow faster sync but increase load on validators.
-    # Recommended: 20-30 for syncing a chain with millions of blocks.
-    parallel_requests: 20
-    # Timeout for sync requests (default: 10s).
-    # Increase with higher parallel_requests to avoid timeout storms.
-    request_timeout: "30s"
-    # Batch size for sync requests (default: 5).
+    parallel_requests: 100
+    request_timeout: "60s"
+    max_response_size: "500 MiB"
     batch_size: 10
+
+# P2P message size limits - must be large enough for big blocks.
+p2p:
+  pubsub_max_size: "50 MiB"
+  rpc_max_size: "100 MiB"
 
 # Validators require archiver. The generator enforces presence of provider+token.
 archiver:

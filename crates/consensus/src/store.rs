@@ -622,14 +622,13 @@ impl Db {
         {
             let mut table = tx.open_table(BLOB_METADATA_UNDECIDED_TABLE)?;
 
-            // Idempotent write: only insert if value doesn't exist or differs
-            let should_write = if let Some(existing) = table.get(&key)? {
-                existing.value() != bytes.as_slice()
-            } else {
-                true
-            };
-
-            if should_write {
+            // BUG-014 fix: Only insert if no value exists at this key.
+            // Previous "overwrite if different" guard allowed WAL replay race
+            // conditions to corrupt blob metadata when the proposer rebuilds a
+            // block with a different timestamp during crash recovery.
+            // This now matches insert_undecided_block_data and
+            // insert_undecided_proposal which both use is_none() guards.
+            if table.get(&key)?.is_none() {
                 table.insert(key, bytes)?;
             }
         }

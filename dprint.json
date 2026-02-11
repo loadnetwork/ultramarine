@@ -8,5 +8,8 @@
   "includes": [
     "**/*.toml",
     "**/*.md"
+  ],
+  "excludes": [
+    "**/Cargo.toml"
   ]
 }

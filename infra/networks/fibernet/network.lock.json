@@ -10,7 +10,7 @@
   },
   "inputs": {
     "manifest_path": "infra/manifests/fibernet.yaml",
-    "manifest_sha256": "33aaf290e0ad4b26893d9a3880668ce5a0f3fdbacfa9de613b090cd43ac0926f"
+    "manifest_sha256": "14239f78d432ee65694dd42e35b2a6c609fcd5837e7b46450c81dca53e0797af"
   },
   "policy": {
     "engine": "ipc-only",
@@ -335,7 +335,7 @@
     "public": {
       "genesis_json": {
         "path": "bundle/public/genesis.json",
-        "sha256": "e05fced24b5e89bf948ba47262d57849352b521f9de048cd328538a0021c4797"
+        "sha256": "72909350ccb198782324ca5da83647c194f20b9604a2d0ac75d131da3868baf5"
       }
     }
   }

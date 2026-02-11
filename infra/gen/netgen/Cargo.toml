@@ -2,6 +2,7 @@
 name = "ultramarine-netgen"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "netgen"
@@ -29,3 +30,7 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 
 # Human-readable duration parsing for sync config.
 humantime = "2.1"
+
+# Byte size parsing for sync config (e.g. "150 MiB").
+# Must match malachitebft_config's bytesize version (1.3), not the workspace (2.x).
+bytesize = "1.3"

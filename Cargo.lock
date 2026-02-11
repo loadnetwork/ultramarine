@@ -1423,12 +1423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bytesize"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd91ee7b2422bcb158d90ef4d14f75ef67f340943fc4149891dcce8f8b972a3"
-
-[[package]]
 name = "bzip2-sys"
 version = "0.1.13+1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3358,7 +3352,7 @@ name = "informalsystems-malachitebft-config"
 version = "0.6.0-pre"
 source = "git+https://github.com/circlefin/malachite.git?rev=b205f4252f3064d9a74716056f63834ff33f2de9#b205f4252f3064d9a74716056f63834ff33f2de9"
 dependencies = [
- "bytesize 1.3.3",
+ "bytesize",
  "config",
  "humantime-serde",
  "informalsystems-malachitebft-core-types",
@@ -6926,7 +6920,6 @@ name = "ultramarine-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bytesize 2.3.1",
  "clap",
  "color-eyre",
  "directories",
@@ -6982,7 +6975,6 @@ dependencies = [
  "tracing",
  "tree_hash",
  "ultramarine-blob-engine",
- "ultramarine-cli",
  "ultramarine-execution",
  "ultramarine-test-support",
  "ultramarine-types",
@@ -7010,12 +7002,10 @@ dependencies = [
  "ethereum_serde_utils",
  "ethereum_ssz",
  "hex",
- "informalsystems-malachitebft-app-channel",
  "informalsystems-malachitebft-proto",
  "jsonwebtoken",
  "prost",
  "rand 0.8.5",
- "redb",
  "reqwest",
  "serde",
  "serde_json",
@@ -7023,7 +7013,6 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
- "ultramarine-cli",
  "ultramarine-types",
  "url",
 ]
@@ -7046,6 +7035,7 @@ dependencies = [
 name = "ultramarine-netgen"
 version = "0.1.0"
 dependencies = [
+ "bytesize",
  "clap",
  "color-eyre",
  "hex",
@@ -7161,7 +7151,6 @@ dependencies = [
  "alloy-rpc-types",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
- "alloy-rpc-types-txpool",
  "async-trait",
  "bytes",
  "ethereum_hashing",
@@ -7205,7 +7194,6 @@ dependencies = [
  "alloy-rpc-types-txpool",
  "alloy-signer",
  "alloy-signer-local",
- "alloy-transport-http",
  "c-kzg",
  "chrono",
  "clap",

@@ -20,7 +20,6 @@ malachitebft-metrics.workspace = true
 ultramarine-types.workspace = true
 
 axum = { workspace = true }
-bytesize = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 color-eyre = { workspace = true }
 directories = { workspace = true }
