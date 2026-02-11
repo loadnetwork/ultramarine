@@ -4,6 +4,7 @@ This folder contains the manifest-driven infra scaffolding for multi-host
 Load Network deployments.
 
 Primary references:
+
 - `infra/README.md` (this document) for operator workflows and commands.
 - `docs/FINAL_PLAN.md` for architecture context.
 - `docs/knowledge_base/p2p-sync-limits.md` for size-limit tuning under load.
